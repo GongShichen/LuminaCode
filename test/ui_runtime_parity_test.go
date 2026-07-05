@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"LuminaCode/agent"
 	luminacli "LuminaCode/cli"
@@ -85,14 +86,16 @@ func TestUIRuntimeEventMappingAndFrameUpdates(t *testing.T) {
 	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("error", "boom", nil)))
 
 	entries := rt.Frame.TranscriptEntries
-	if len(entries) != 5 {
-		t.Fatalf("expected merged assistant text and five transcript entries, got %#v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("expected only assistant text in transcript entries, got %#v", entries)
 	}
 	if entries[0]["kind"] != "assistant" || entries[0]["text"] != "hello world" {
 		t.Fatalf("assistant deltas should merge, got %#v", entries[0])
 	}
-	if entries[3]["text"] != "[tool result] first line" {
-		t.Fatalf("unexpected tool result preview: %#v", entries[3])
+	if len(rt.Frame.TaskActivityEntries) != 2 ||
+		rt.Frame.TaskActivityEntries[0]["summary"] != "[tool] read_file" ||
+		rt.Frame.TaskActivityEntries[1]["summary"] != "[tool result] first line" {
+		t.Fatalf("tool activity should stay out of transcript and land in task activity, got %#v", rt.Frame.TaskActivityEntries)
 	}
 	if rt.Frame.SessionCostText != "$0.0100" || rt.Frame.SessionCostValue != 0.01 {
 		t.Fatalf("cost event not applied: %#v", rt.Frame)
@@ -118,6 +121,50 @@ func TestUIContextWindowStatusShowsModelAndProgress(t *testing.T) {
 	for _, want := range []string{"Model: deepseek-v4-pro[1M]", "Context", "[###-------]", "25%", "250/1K"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("status missing %q: %q", want, status)
+		}
+	}
+}
+
+func TestUIRuntimeMountStateSnapshotBackfillsFullscreenHistory(t *testing.T) {
+	state := agent.NewAgentState()
+	state.Messages = []map[string]any{
+		{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "分析一下当前项目"}},
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]any{
+				{"type": "text", "text": "这是一个 Go 工程。"},
+				{"type": "tool_use", "id": "tool-1", "name": "list_files", "input": map[string]any{}},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "tool_result", "tool_use_id": "tool-1", "content": "main.go\nui/runtime.go"},
+			},
+		},
+		{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "<system-reminder>hidden</system-reminder>"}},
+			"isMeta":  true,
+		},
+	}
+	fullscreen := ui.NewFullscreenRendererBackend(strings.NewReader(""), nil, nil)
+	rt := ui.NewUiRuntime(nil, fullscreen)
+
+	rt.MountStateSnapshot(&state)
+
+	transcript := fullscreen.TranscriptTextCache
+	for _, want := range []string{"你", "  分析一下当前项目", "Lumina", "  这是一个 Go 工程。", "\n\n"} {
+		if !strings.Contains(transcript, want) {
+			t.Fatalf("resumed transcript missing %q:\n%s", want, transcript)
+		}
+	}
+	for _, hidden := range []string{"hidden", "[tool] list_files", "工具结果: main.go", "main.go\nui/runtime.go"} {
+		if strings.Contains(transcript, hidden) {
+			t.Fatalf("resume transcript should hide non-dialogue content %q:\n%s", hidden, transcript)
 		}
 	}
 }
@@ -405,10 +452,17 @@ func TestUIRuntimeRunSubmitMessageDrivesTaskSinkAndPermissionLikePython(t *testi
 	rt := ui.NewUiRuntime(engine, backend)
 	state := agent.NewAgentState()
 
-	events := rt.RunSubmitMessage(context.Background(), "hello", &state, "session-1")
+	events := rt.RunSubmitMessage(context.Background(), "please analyze", &state, "session-1")
 
 	if len(events) != 3 || events[0].Type != "text" || events[1].Type != "permission_needed" || events[2].Type != "done" {
 		t.Fatalf("unexpected submit events: %#v", events)
+	}
+	if len(rt.Frame.TranscriptEntries) != 2 ||
+		rt.Frame.TranscriptEntries[0]["kind"] != "user" ||
+		rt.Frame.TranscriptEntries[0]["text"] != "please analyze" ||
+		rt.Frame.TranscriptEntries[1]["kind"] != "assistant" ||
+		rt.Frame.TranscriptEntries[1]["text"] != "hello" {
+		t.Fatalf("submit should keep user and assistant as separate transcript cells, got %#v", rt.Frame.TranscriptEntries)
 	}
 	if backend.prompt == nil || !backend.dangerous {
 		t.Fatalf("permission event should ask backend like Python, prompt=%#v dangerous=%v", backend.prompt, backend.dangerous)
@@ -424,7 +478,7 @@ func TestUIRuntimeRunSubmitMessageDrivesTaskSinkAndPermissionLikePython(t *testi
 	if len(rt.Frame.TaskActivityEntries) != 1 || rt.Frame.TaskActivityEntries[0]["summary"] != "Running worker was stopped." {
 		t.Fatalf("terminal task event should create activity entry, got %#v", rt.Frame.TaskActivityEntries)
 	}
-	if rt.Frame.InputPlaceholder != "Agent is responding..." || backend.updates == 0 {
+	if !rt.Frame.InputEnabled || rt.Frame.InputPlaceholder != "请输入消息并回车。" || backend.updates == 0 {
 		t.Fatalf("submit runtime should update frame and backend, frame=%#v updates=%d", rt.Frame, backend.updates)
 	}
 
@@ -476,6 +530,38 @@ func TestUIRuntimeRunSubmitMessagePreparesBackendBeforeMountLikePython(t *testin
 
 	if backend.prepared != 1 || backend.mounted != 1 {
 		t.Fatalf("run submit should prepare backend once before mounting, prepared=%d mounted=%d", backend.prepared, backend.mounted)
+	}
+}
+
+type delayedSubmitEngine struct{}
+
+func (e *delayedSubmitEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+	out := make(chan agent.StreamEvent)
+	go func() {
+		defer close(out)
+		select {
+		case <-time.After(350 * time.Millisecond):
+			out <- agent.NewStreamEvent("done", "", nil)
+		case <-ctx.Done():
+		}
+	}()
+	return out
+}
+
+func TestUIRuntimeRunSubmitMessageTicksAnimationWhileWaiting(t *testing.T) {
+	fullscreen := ui.NewFullscreenRendererBackend(strings.NewReader(""), nil, nil)
+	rt := ui.NewUiRuntime(&delayedSubmitEngine{}, fullscreen)
+
+	rt.RunSubmitMessage(context.Background(), "wait for work", nil, "session-1")
+
+	if fullscreen.LastFrame.AnimationFrame == 0 {
+		t.Fatalf("runtime should advance animation frames while waiting, frame=%#v", fullscreen.LastFrame)
+	}
+	if fullscreen.LastFrame.InputEnabled != true || fullscreen.InputPlaceholder != "请输入消息并回车。" {
+		t.Fatalf("runtime should restore input-ready frame after submit, frame=%#v placeholder=%q", fullscreen.LastFrame, fullscreen.InputPlaceholder)
+	}
+	if strings.Contains(fullscreen.TasksText, "正在执行任务") {
+		t.Fatalf("fullscreen task overview should clear animated working state after submit, got %q", fullscreen.TasksText)
 	}
 }
 

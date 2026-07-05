@@ -22,7 +22,7 @@ import (
 
 func TestQueryEngineSlashSkillInvocationInjectsInlineContext(t *testing.T) {
 	dir := t.TempDir()
-	skillDir := filepath.Join(dir, ".Lumina", "PROJECT_SKILLS", "reader")
+	skillDir := filepath.Join(dir, "skills", "reader")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,6 @@ Read carefully: $ARGUMENTS
 	}
 	cfg := config.NewConfig()
 	cfg.CWD = dir
-	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.SkillsEnabled = true
 	engine := agent.NewQueryEngine(&cfg)
 	state := agent.NewAgentState()

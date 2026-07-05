@@ -73,6 +73,7 @@ func TestSubAgentExecutesToolAndContinuesConversation(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	registry := coretools.NewToolRegistry(newLargeReadTool())
@@ -99,6 +100,7 @@ func TestSubAgentAbortCheckReturnsAbortText(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1:1"
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	registry := coretools.NewToolRegistry(newLargeReadTool())
 	def := agent.AgentDef{Name: "general-purpose", Description: "test", MaxTurns: 5}
 	sub := agent.NewSubAgent(cfg, registry, def, nil, "", "general-purpose", coretools.ExecutionContext{
@@ -118,6 +120,7 @@ func TestSubAgentSessionStateDefaultsMatchPython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1:1"
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	def := agent.AgentDef{Name: "general-purpose", Description: "test", MaxTurns: 1}
 	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "general-purpose", coretools.ExecutionContext{})
 	state := &agent.SubAgentSessionState{}
@@ -160,6 +163,7 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	def := agent.AgentDef{Name: "general-purpose", Description: "test", MaxTurns: 3}
@@ -204,6 +208,7 @@ func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.CWD = dir
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.AutoMemoryEnabled = true
 	registry := coretools.NewToolRegistry(newLargeReadTool())
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
@@ -296,6 +301,7 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.AutoMemoryEnabled = true
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
 	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "Explore", coretools.ExecutionContext{})
@@ -367,6 +373,7 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	cfg.AutoMemoryEnabled = true

@@ -2,6 +2,18 @@ package ui
 
 import "sort"
 
+type InputDraftBackend interface {
+	SetInputDraft(string)
+}
+
+func SetBackendInputDraft(backend RendererBackend, draft string) bool {
+	if setter, ok := backend.(InputDraftBackend); ok {
+		setter.SetInputDraft(draft)
+		return true
+	}
+	return false
+}
+
 type TaskSignature struct {
 	Status       any
 	InputTokens  int

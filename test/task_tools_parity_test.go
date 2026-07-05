@@ -230,6 +230,7 @@ func TestReusableWorkerPreservesSessionAcrossMessages(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	rt := agent.NewAgentTaskRuntime()
@@ -318,6 +319,7 @@ func TestBackgroundWorkerUsesPythonScopedExecutionContext(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	rt := agent.NewAgentTaskRuntime()
@@ -377,6 +379,7 @@ func TestBackgroundWorkerOutlivesParentContextLikePython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
 	rt := agent.NewAgentTaskRuntime()
@@ -408,6 +411,7 @@ func TestStopTaskMatchesPythonStatusSpecificNotifications(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
@@ -452,6 +456,7 @@ func TestShutdownStopsIdleReusableWorkers(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
@@ -479,6 +484,7 @@ func TestReusableWorkerExpiresAfterIdleTTLLikePython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
@@ -519,6 +525,7 @@ func TestNonReusableWorkerTerminalRecordCleanupTTLMatchesPython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
@@ -547,6 +554,7 @@ func TestStopRunningWorkerIsNotOverwrittenByCompletion(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}

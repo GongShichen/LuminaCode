@@ -289,6 +289,42 @@ func TestOpenAICompatibleAcceptsFullChatCompletionsBaseURLLikeLuminaDefaults(t *
 	}
 }
 
+func TestDeepSeekAnthropicDefaultsSendClaudeCompatibleRequest(t *testing.T) {
+	var requestPath string
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
+		}
+		if r.Header.Get("x-api-key") != "test-key" {
+			t.Fatalf("anthropic-compatible request should use x-api-key header, got %q", r.Header.Get("x-api-key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer server.Close()
+
+	client, err := api.NewAPIClient("test-key", server.URL, "deepseek-v4-pro[1m]", 256, nil, nil, "anthropic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := client.Complete(context.Background(), "sys", []map[string]any{{"role": "user", "content": "hi"}}, api.CompleteOptions{MaxTokens: 32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "ok" {
+		t.Fatalf("unexpected response text: %q", text)
+	}
+	if requestPath != "/v1/messages" {
+		t.Fatalf("deepseek anthropic base should use Claude-compatible messages path, got %s", requestPath)
+	}
+	if requestBody["model"] != "deepseek-v4-pro[1m]" || requestBody["stream"] != false {
+		t.Fatalf("unexpected anthropic request body: %#v", requestBody)
+	}
+}
+
 func TestOpenAICompatibleChatCompletionsURLNormalizesDeepSeekBaseURLLikePython(t *testing.T) {
 	for _, suffix := range []string{"", "/", "/v1", "/v1/", "/chat/completions"} {
 		t.Run(suffix, func(t *testing.T) {

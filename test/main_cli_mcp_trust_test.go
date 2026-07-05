@@ -55,8 +55,11 @@ func TestMainSingleShotResolvesMCPTrustLikePythonRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "Permission needed to trust project MCP servers") {
-		t.Fatalf("single-shot CLI should prompt for MCP trust, output:\n%s", output)
+	text := string(output)
+	for _, want := range []string{"权限请求", "mcp-project-trust", "fake-mcp --stdio"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("single-shot CLI should prompt for MCP trust with fullscreen UI, missing %q output:\n%s", want, output)
+		}
 	}
 
 	data, err := os.ReadFile(filepath.Join(project, ".Lumina", "CONFIG", "trusted_mcp.json"))
@@ -105,6 +108,69 @@ func TestMainREPLResumeWithoutIDUsesPickListLikePython(t *testing.T) {
 	}
 }
 
+func TestMainREPLSkillCommandUsesPickListInsteadOfPrintingSkills(t *testing.T) {
+	project := t.TempDir()
+	home := t.TempDir()
+	skillDir := filepath.Join(project, "skills", "reader")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawSkill := `---
+name: Reader
+description: Read project files carefully
+---
+Read carefully: $ARGUMENTS
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(rawSkill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := make(chan string, 1)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case requests <- string(body):
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"msg-1\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer apiServer.Close()
+
+	repoRoot := filepath.Dir(mustGetwd(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "run", ".", "--cwd", project, "--api-key", "test-key", "--base-url", apiServer.URL, "--api-type", "openai_compatible", "--model", "custom-model", "--bare")
+	cmd.Dir = repoRoot
+	cmd.Env = mainCLITestEnv(t, home)
+	cmd.Stdin = strings.NewReader("/skill\n1\nplease inspect this project\n/exit\n")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("go run timed out; output:\n%s", output)
+	}
+	if err != nil {
+		t.Fatalf("go run failed: %v\n%s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "Select Skill") || !strings.Contains(text, "/reader") {
+		t.Fatalf("/skill should open skill picklist, output:\n%s", output)
+	}
+	if strings.Contains(text, "Visible Skills") {
+		t.Fatalf("/skill should not print visible skills into the transcript, output:\n%s", output)
+	}
+	select {
+	case body := <-requests:
+		if !strings.Contains(body, "Skill 'reader'") ||
+			!strings.Contains(body, "Read carefully") ||
+			!strings.Contains(body, "please inspect this project") {
+			t.Fatalf("selected skill should be injected into model request, body=%s\noutput=%s", body, output)
+		}
+	default:
+		t.Fatalf("expected model request after selecting skill, output:\n%s", output)
+	}
+}
+
 func TestMainREPLStartsWithoutActiveStateLikePython(t *testing.T) {
 	home := t.TempDir()
 	repoRoot := filepath.Dir(mustGetwd(t))
@@ -122,8 +188,13 @@ func TestMainREPLStartsWithoutActiveStateLikePython(t *testing.T) {
 		t.Fatalf("go run failed: %v\n%s", err, output)
 	}
 	text := string(output)
-	if count := strings.Count(text, "No active session"); count != 4 {
-		t.Fatalf("fresh REPL slash commands should see no active state before first user turn, count=%d output:\n%s", count, output)
+	for _, want := range []string{
+		"No active session.",
+		"No active session - will apply to next prompt.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("fresh REPL slash commands should see no active state before first user turn, missing %q output:\n%s", want, output)
+		}
 	}
 	if strings.Contains(text, "Session Cost") || strings.Contains(text, "YOLO mode:") || strings.Contains(text, "No compression needed.") {
 		t.Fatalf("fresh REPL should not create an empty active state for slash commands, output:\n%s", output)
@@ -232,7 +303,6 @@ func mainCLITestEnv(t *testing.T, home string) []string {
 		"HOME="+home,
 		"GOMODCACHE="+goEnv(t, "GOMODCACHE"),
 		"GOCACHE="+goEnv(t, "GOCACHE"),
-		"LUMINA_UI_BACKEND=legacy_terminal",
 	)
 }
 

@@ -35,13 +35,11 @@ type TerminalRendererBackend struct {
 	interactive   bool
 	history       []string
 	historyIndex  int
+	inputDraft    string
 }
 
 func NewRendererBackend(name string, in io.Reader, out io.Writer, errOut io.Writer) RendererBackend {
-	if name == "prompt_toolkit_fullscreen" {
-		return NewFullscreenRendererBackend(in, out, errOut)
-	}
-	return NewTerminalRendererBackend(in, out, errOut)
+	return NewFullscreenRendererBackend(in, out, errOut)
 }
 
 func ConfigureRendererBackend(backend RendererBackend, registry *coretools.ToolRegistry, execCtx coretools.ExecutionContext) {
@@ -183,13 +181,24 @@ func (b *TerminalRendererBackend) GetInput(state any) (string, bool) {
 			return strings.TrimSpace(line), true
 		}
 	}
-	fmt.Fprintf(b.out, "%s ", symbol)
+	draft := b.consumeInputDraft()
+	fmt.Fprintf(b.out, "%s %s", symbol, draft)
 	line, err := b.in.ReadString('\n')
 	if err != nil && len(line) == 0 {
 		fmt.Fprintln(b.out)
 		return "", false
 	}
-	return strings.TrimSpace(line), true
+	return strings.TrimSpace(draft + line), true
+}
+
+func (b *TerminalRendererBackend) SetInputDraft(draft string) {
+	b.inputDraft = draft
+}
+
+func (b *TerminalRendererBackend) consumeInputDraft() string {
+	draft := b.inputDraft
+	b.inputDraft = ""
+	return draft
 }
 
 func (b *TerminalRendererBackend) contextStatusText(state any) string {
@@ -221,8 +230,8 @@ func (b *TerminalRendererBackend) readInteractiveLine(prompt string) (string, bo
 		_ = term.Restore(fd, oldState)
 	}()
 
-	var line []rune
-	cursor := 0
+	line := []rune(b.consumeInputDraft())
+	cursor := len(line)
 	selected := 0
 	historyDraft := ""
 	b.historyIndex = len(b.history)

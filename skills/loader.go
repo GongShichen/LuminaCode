@@ -24,7 +24,9 @@ func (l *SkillLoader) LoadFrontmatterOnly() []SkillSpec {
 	l.seenPaths = map[string]struct{}{}
 	var skills []SkillSpec
 	skills = append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
-	skills = append(skills, l.loadDirectory(l.ProjectSkillsDir(), SkillSourceProject)...)
+	for _, root := range l.ProjectSkillsDirs() {
+		skills = append(skills, l.loadDirectory(root, SkillSourceProject)...)
+	}
 	skills = append(skills, l.loadDirectory(l.BundledSkillsDir(), SkillSourceBundled)...)
 	return skills
 }
@@ -45,6 +47,14 @@ func (l *SkillLoader) LoadFullContent(skill SkillSpec) SkillSpec {
 
 func (l *SkillLoader) ProjectSkillsDir() string {
 	return filepath.Join(l.Config.CWD, l.Config.SkillsDir)
+}
+
+func (l *SkillLoader) ProjectSkillsDirs() []string {
+	roots := []string{filepath.Join(l.Config.CWD, "skills")}
+	if l.Config.SkillsDir != "" {
+		roots = append(roots, l.ProjectSkillsDir())
+	}
+	return uniqueExistingOrder(roots)
 }
 
 func (l *SkillLoader) UserSkillsDir() string {
@@ -112,4 +122,27 @@ func expandSkillHome(path string) string {
 		}
 	}
 	return path
+}
+
+func uniqueExistingOrder(paths []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		key, err := filepath.Abs(path)
+		if err != nil {
+			key = path
+		}
+		if resolved, err := filepath.EvalSymlinks(key); err == nil {
+			key = resolved
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, path)
+	}
+	return out
 }

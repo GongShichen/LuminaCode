@@ -105,6 +105,40 @@ func TestNormalizeMessagesStripsUnsupportedThinkingAndRepairsOrphanResult(t *tes
 	}
 }
 
+func TestNormalizeMessagesMovesToolResultsImmediatelyAfterToolUseForAnthropic(t *testing.T) {
+	messages := []map[string]any{
+		{
+			"role": "assistant",
+			"content": []map[string]any{
+				{"type": "tool_use", "id": "call-1", "name": "read_file", "input": map[string]any{}},
+			},
+		},
+		{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "injected context"}},
+		},
+		{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "tool_result", "tool_use_id": "call-1", "content": "file body"},
+			},
+		},
+	}
+
+	normalized := agent.NormalizeMessages(messages, "deepseek-v4-pro[1m]", nil)
+	if len(normalized) != 3 {
+		t.Fatalf("expected tool result moved without losing user text, got %#v", normalized)
+	}
+	resultBlocks := normalized[1]["content"].([]map[string]any)
+	if normalized[1]["role"] != "user" || len(resultBlocks) != 1 || resultBlocks[0]["tool_use_id"] != "call-1" {
+		t.Fatalf("tool_result must immediately follow tool_use for Anthropic-compatible APIs, got %#v", normalized)
+	}
+	textBlocks := normalized[2]["content"].([]map[string]any)
+	if len(textBlocks) != 1 || textBlocks[0]["text"] != "injected context" {
+		t.Fatalf("non-tool user content should remain after repaired tool_result turn, got %#v", normalized)
+	}
+}
+
 func TestBuildMessagesStripsMetadataAndAppliesClaudeRollingCache(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.APIModel = "claude-sonnet-4-6"

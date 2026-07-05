@@ -30,7 +30,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "bundled_skills_dir": ".Lumina/SKILLS",
   "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
   "memory_extraction_prompt_path": ".Lumina/SYSTEM/extraction_system.md",
-  "ui_backend": "prompt_toolkit_fullscreen",
+  "ui_backend": "legacy_terminal",
   "worktree_dir": ".Lumina/worktrees"
 }`
 	if err := os.WriteFile(filepath.Join(dir, ".Lumina", "CONFIG", "defaults.json"), []byte(defaults), 0o644); err != nil {
@@ -41,6 +41,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	t.Setenv("LUMINA_API_TYPE", "openai-compatible")
 	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")
 	t.Setenv("LUMINA_ANTHROPIC_CACHE_EDITS", "true")
+	t.Setenv("LUMINA_UI_BACKEND", "legacy_terminal")
 
 	cfg := config.NewConfig()
 	if cfg.APIMaxTokens != 1234 || cfg.MCPEnabled {
@@ -74,7 +75,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 		t.Fatalf("worktree dir should stay relative like Python config, got %s", cfg.WorktreeDir)
 	}
 	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
-		t.Fatalf("ui backend should default to fullscreen, got %s", cfg.UIBackend)
+		t.Fatalf("ui backend should be forced to fullscreen, got %s", cfg.UIBackend)
 	}
 }
 
@@ -97,6 +98,9 @@ func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 	if cfg.APIMaxTokens != 1000000 {
 		t.Fatalf("defaults.json should load from bundled resources outside cwd, max_tokens=%d", cfg.APIMaxTokens)
 	}
+	if cfg.APIBaseURL != "https://api.deepseek.com/anthropic" || cfg.APIModel != "deepseek-v4-pro[1m]" || cfg.APIType != "anthropic" {
+		t.Fatalf("bundled defaults should match DeepSeek Anthropic config, base=%q model=%q type=%q", cfg.APIBaseURL, cfg.APIModel, cfg.APIType)
+	}
 	if cfg.BundledSkillsDir != filepath.Join(root, ".Lumina", "SKILLS") {
 		t.Fatalf("bundled skills should resolve from Lumina root, got %s", cfg.BundledSkillsDir)
 	}
@@ -108,6 +112,25 @@ func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 	}
 	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
 		t.Fatalf("bundled defaults should start fullscreen by default, got %s", cfg.UIBackend)
+	}
+}
+
+func TestConfigDoesNotProvideBuiltInModelDefault(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceRoot, "CONFIG", "defaults.json"), []byte(`{"api_max_tokens": 1000}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("LUMINA_API_MODEL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+
+	cfg := config.NewConfig()
+	if cfg.APIModel != "" {
+		t.Fatalf("model should only come from user config/env/flag, got %q", cfg.APIModel)
 	}
 }
 

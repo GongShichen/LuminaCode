@@ -344,6 +344,49 @@ Review it.
 	}
 }
 
+func TestProjectRootSkillsDirectoryLoadsAlongsideLegacyProjectSkills(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	for _, item := range []struct {
+		dir  string
+		name string
+		desc string
+	}{
+		{dir: filepath.Join(dir, "skills", "reader"), name: "Reader", desc: "Project root skill"},
+		{dir: filepath.Join(dir, ".Lumina", "PROJECT_SKILLS", "legacy"), name: "Legacy", desc: "Legacy project skill"},
+	} {
+		if err := os.MkdirAll(item.dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		raw := "---\nname: " + item.name + "\ndescription: " + item.desc + "\n---\nBody\n"
+		if err := os.WriteFile(filepath.Join(item.dir, "SKILL.md"), []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.NewConfig()
+	cfg.CWD = dir
+	cfg.UserSkillsDir = filepath.Join(dir, "missing-user")
+	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
+	cfg.BundledSkillsDir = filepath.Join(dir, "missing-bundled")
+	loader := skills.NewSkillLoader(cfg)
+
+	loaded := loader.LoadFrontmatterOnly()
+
+	if len(loaded) != 2 {
+		t.Fatalf("expected project root and legacy project skills, got %#v", loaded)
+	}
+	if loaded[0].CanonicalName != "reader" || loaded[0].Source != skills.SkillSourceProject {
+		t.Fatalf("project root skills should load before legacy project skills, got %#v", loaded)
+	}
+	if loaded[1].CanonicalName != "legacy" || loaded[1].Source != skills.SkillSourceProject {
+		t.Fatalf("expected legacy project skill second, got %#v", loaded)
+	}
+	dirs := loader.ProjectSkillsDirs()
+	if len(dirs) != 2 || dirs[0] != filepath.Join(dir, "skills") || dirs[1] != filepath.Join(dir, ".Lumina", "PROJECT_SKILLS") {
+		t.Fatalf("unexpected project skill dirs: %#v", dirs)
+	}
+}
+
 func TestSkillLoaderOrderingAndHomeExpansionMatchPython(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

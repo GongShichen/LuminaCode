@@ -50,7 +50,6 @@ func run(args []string) error {
 	verbose := flags.Bool("verbose", false, "Enable debug output.")
 	verboseShort := flags.Bool("v", false, "Enable debug output.")
 	bare := flags.Bool("bare", false, "Disable auto-memory and other persistent features.")
-	uiBackend := flags.String("ui-backend", "", "Terminal UI backend name.")
 	listFlag := flags.Bool("list", false, "List saved session files and exit.")
 	resume := flags.String("resume", "", "Resume a previous session by ID.")
 
@@ -87,9 +86,6 @@ func run(args []string) error {
 			return err
 		}
 		cfg.CWD = abs
-	}
-	if *uiBackend != "" {
-		cfg.UIBackend = *uiBackend
 	}
 	if *bare {
 		cfg.AutoMemoryEnabled = false
@@ -186,6 +182,9 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 		}
 	}()
 	luminaui.RenderBackendWelcome(backend, sessionID, engine.SkillRegistry())
+	if state != nil && len(state.Messages) > 0 {
+		uiRuntime.MountStateSnapshot(state)
+	}
 	for {
 		line, ok := luminaui.ReadBackendInput(backend, state)
 		if !ok {
@@ -195,6 +194,11 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
+			resolvedLine, ok := resolveSkillPickerSlash(line, engine, backend)
+			if !ok {
+				continue
+			}
+			line = resolvedLine
 			registry := engine.SkillRegistry()
 			dispatch := luminacli.ClassifyREPLSlashCommand(line, registry, engine.Config.CWD)
 			if dispatch.Kind == luminacli.SlashDispatchExit {
@@ -213,6 +217,9 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 					luminaui.ResetBackendForNewSession(backend)
 					configureBackendForEngine(backend, engine)
 					uiRuntime = luminaui.NewUiRuntime(engine, backend)
+					if cmdName == "resume" && state != nil && len(state.Messages) > 0 {
+						uiRuntime.MountStateSnapshot(state)
+					}
 				}
 				continue
 			}
@@ -228,6 +235,46 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 			)
 		}
 	}
+}
+
+func resolveSkillPickerSlash(line string, engine *agent.QueryEngine, backend luminaui.RendererBackend) (string, bool) {
+	cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "/")))
+	if cmd != "skill" {
+		return line, true
+	}
+	out := luminaui.BackendOutputWriter(backend)
+	if engine == nil {
+		fmt.Fprintln(out, "Skills are disabled.")
+		return "", false
+	}
+	registry := engine.SkillRegistry()
+	if registry == nil {
+		fmt.Fprintln(out, "Skills are disabled.")
+		return "", false
+	}
+	visible := registry.ListUserInvocable(engine.Config.CWD)
+	if len(visible) == 0 {
+		fmt.Fprintln(out, "No visible skills for current directory.")
+		return "", false
+	}
+	values := make([][2]string, 0, len(visible))
+	for _, skill := range visible {
+		values = append(values, [2]string{skill.CanonicalName, skillPickLabel(skill)})
+	}
+	picked := backend.PickFromList("Select Skill", values)
+	if picked == nil || *picked == "" {
+		return "", false
+	}
+	luminaui.SetBackendInputDraft(backend, "/"+*picked+" ")
+	return "", false
+}
+
+func skillPickLabel(skill skills.SkillSpec) string {
+	description := skill.Frontmatter.Description
+	if skill.Frontmatter.ArgumentHint != nil && *skill.Frontmatter.ArgumentHint != "" {
+		description = *skill.Frontmatter.ArgumentHint
+	}
+	return fmt.Sprintf("/%-24s %s", skill.CanonicalName, description)
 }
 
 func configureBackendForEngine(backend luminaui.RendererBackend, engine *agent.QueryEngine) {

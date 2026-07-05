@@ -254,6 +254,103 @@ func FixToolPairings(messages []map[string]any) []map[string]any {
 	return repaired
 }
 
+func EnforceImmediateToolResults(messages []map[string]any) []map[string]any {
+	working := copyMessages(messages)
+	out := make([]map[string]any, 0, len(working))
+	for i := 0; i < len(working); i++ {
+		msg := working[i]
+		if msg == nil {
+			continue
+		}
+		if len(contentBlocks(msg["content"])) == 0 {
+			continue
+		}
+		out = append(out, msg)
+		if stringFromAny(msg["role"]) != "assistant" {
+			continue
+		}
+		toolUseIDs := toolUseIDsInMessage(msg)
+		if len(toolUseIDs) == 0 {
+			continue
+		}
+		found := map[string]map[string]any{}
+		needed := map[string]struct{}{}
+		for _, id := range toolUseIDs {
+			needed[id] = struct{}{}
+		}
+		for j := i + 1; j < len(working) && len(needed) > 0; j++ {
+			next := working[j]
+			if next == nil {
+				continue
+			}
+			blocks := contentBlocks(next["content"])
+			if len(blocks) == 0 {
+				continue
+			}
+			kept := make([]map[string]any, 0, len(blocks))
+			for _, block := range blocks {
+				if block["type"] == "tool_result" {
+					id := stringFromAny(block["tool_use_id"])
+					if _, ok := needed[id]; ok {
+						found[id] = block
+						delete(needed, id)
+						continue
+					}
+				}
+				kept = append(kept, block)
+			}
+			if len(kept) == 0 {
+				working[j] = nil
+			} else if len(kept) != len(blocks) {
+				cp := copyMap(next)
+				cp["content"] = kept
+				working[j] = cp
+			}
+		}
+		resultBlocks := make([]map[string]any, 0, len(toolUseIDs))
+		for _, id := range toolUseIDs {
+			if block, ok := found[id]; ok {
+				resultBlocks = append(resultBlocks, block)
+				continue
+			}
+			resultBlocks = append(resultBlocks, map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": id,
+				"content":     "Tool execution was interrupted or lost during message normalization.",
+			})
+		}
+		out = append(out, map[string]any{"role": "user", "content": resultBlocks})
+	}
+	return out
+}
+
+func copyMessages(messages []map[string]any) []map[string]any {
+	out := make([]map[string]any, len(messages))
+	for i, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		cp := copyMap(msg)
+		if blocks := contentBlocks(msg["content"]); blocks != nil {
+			cp["content"] = append([]map[string]any{}, blocks...)
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+func toolUseIDsInMessage(msg map[string]any) []string {
+	var ids []string
+	for _, block := range contentBlocks(msg["content"]) {
+		if block["type"] == "tool_use" {
+			if id := stringFromAny(block["id"]); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
 func NormalizeMessages(messages []map[string]any, modelFamily string, recentErrors []string) []map[string]any {
 	normalized := ReorderAttachments(messages)
 	normalized = FilterVirtualMessages(normalized)
@@ -262,6 +359,7 @@ func NormalizeMessages(messages []map[string]any, modelFamily string, recentErro
 	normalized = HandleThinkingBlocks(normalized, modelFamily, recentErrors)
 	normalized = MergeSplitMessages(normalized)
 	normalized = FixToolPairings(normalized)
+	normalized = EnforceImmediateToolResults(normalized)
 	return normalized
 }
 

@@ -75,7 +75,7 @@ func NewConfig() Config {
 	cfg := Config{
 		APIKey:       "",
 		APIBaseURL:   "",
-		APIModel:     "deepseek-v4-pro",
+		APIModel:     "",
 		APIType:      "openai_compatible",
 		APIMaxTokens: 16000,
 
@@ -114,10 +114,7 @@ func NewConfig() Config {
 		SystemPromptPath:           filepath.Join(resourceDir, "SYSTEM", "system-prompt.md"),
 		MemoryExtractionPromptPath: filepath.Join(resourceDir, "SYSTEM", "extraction_system.md"),
 
-		UIBackend: firstNonEmpty(
-			os.Getenv("LUMINA_UI_BACKEND"),
-			"prompt_toolkit_fullscreen",
-		),
+		UIBackend: "prompt_toolkit_fullscreen",
 
 		WorktreeBaseRef: "HEAD",
 		WorktreeDir:     ".Lumina/worktrees",
@@ -476,7 +473,7 @@ func applyEnvOverrides(cfg *Config) {
 	if outputPrice := envOptionalFloat("LUMINA_OUTPUT_PRICE_PER_1K"); outputPrice != nil {
 		cfg.APIOutputPricePer1K = outputPrice
 	}
-	cfg.UIBackend = firstNonEmpty(os.Getenv("LUMINA_UI_BACKEND"), cfg.UIBackend)
+	cfg.UIBackend = "prompt_toolkit_fullscreen"
 }
 
 func firstNonEmpty(values ...string) string {

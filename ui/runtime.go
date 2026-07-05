@@ -32,6 +32,7 @@ type RenderFrame struct {
 	TranscriptEntries   []map[string]any          `json:"transcript_entries"`
 	Tasks               map[string]map[string]any `json:"tasks"`
 	TaskActivityEntries []map[string]any          `json:"task_activity_entries"`
+	AnimationFrame      int                       `json:"animation_frame"`
 	InputEnabled        bool                      `json:"input_enabled"`
 	InputMode           string                    `json:"input_mode"`
 	InputPlaceholder    string                    `json:"input_placeholder"`
@@ -87,6 +88,8 @@ type RuntimePreparer interface {
 	PrepareRuntime()
 }
 
+const uiAnimationInterval = 120 * time.Millisecond
+
 type TaskEventSink struct {
 	queue chan TaskUiEvent
 }
@@ -140,6 +143,44 @@ func NewUiRuntime(engine any, backend RendererBackend) *UiRuntime {
 	}
 }
 
+func (r *UiRuntime) MountStateSnapshot(state *agent.AgentState) {
+	r.CurrentState = state
+	r.Frame = NewRenderFrame()
+	r.Frame.TranscriptEntries = TranscriptEntriesFromState(state)
+	r.Frame.InputEnabled = true
+	r.Frame.InputMode = "normal"
+	r.Frame.InputPlaceholder = "请输入消息并回车。"
+	r.refreshContextWindowFrame()
+	if preparer, ok := r.UI.(RuntimePreparer); ok {
+		preparer.PrepareRuntime()
+	}
+	if r.UI != nil {
+		r.UI.Mount(r.Frame)
+		r.Mounted = true
+	}
+	r.Dirty = false
+}
+
+func TranscriptEntriesFromState(state *agent.AgentState) []map[string]any {
+	if state == nil {
+		return []map[string]any{}
+	}
+	var entries []map[string]any
+	for _, message := range state.Messages {
+		if shouldHideTranscriptMessage(message) {
+			continue
+		}
+		role := stringFromAny(message["role"])
+		switch role {
+		case "user":
+			entries = appendUserTranscriptMessage(entries, message["content"])
+		case "assistant":
+			entries = appendAssistantTranscriptMessage(entries, message["content"])
+		}
+	}
+	return entries
+}
+
 func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID string) []agent.StreamEvent {
 	r.CurrentState = state
 	taskRuntime := r.taskRuntime()
@@ -147,6 +188,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 		taskRuntime.SetTaskEventSink(r.TaskSink)
 		defer taskRuntime.SetTaskEventSink(nil)
 	}
+	r.appendTranscriptEntry("user", userInput)
 	r.Frame.InputEnabled = false
 	r.Frame.InputMode = "normal"
 	r.Frame.InputPlaceholder = "Agent is responding..."
@@ -159,6 +201,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 		r.Mounted = true
 	}
 	r.markDirty()
+	r.Flush(true)
 	submitter, ok := r.Engine.(interface {
 		SubmitMessage(context.Context, string, *agent.AgentState, ...string) <-chan agent.StreamEvent
 	})
@@ -169,21 +212,39 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 		return nil
 	}
 	var events []agent.StreamEvent
-	for event := range submitter.SubmitMessage(ctx, userInput, state, sessionID) {
-		uiEvent := r.ToUIEvent(event)
-		if uiEvent.Type == "permission_requested" {
-			r.HandlePermissionEvent(uiEvent)
-		} else {
-			r.ApplyUIEvent(uiEvent)
-			r.MaybeRenderEvent(event)
-			r.FlushIfDue()
+	eventCh := submitter.SubmitMessage(ctx, userInput, state, sessionID)
+	ticker := time.NewTicker(uiAnimationInterval)
+	defer ticker.Stop()
+	for eventCh != nil {
+		select {
+		case event, open := <-eventCh:
+			if !open {
+				eventCh = nil
+				continue
+			}
+			uiEvent := r.ToUIEvent(event)
+			if uiEvent.Type == "permission_requested" {
+				r.HandlePermissionEvent(uiEvent)
+			} else {
+				r.ApplyUIEvent(uiEvent)
+				r.MaybeRenderEvent(event)
+				r.FlushIfDue()
+			}
+			r.DrainTaskEvents()
+			events = append(events, event)
+		case <-ticker.C:
+			r.advanceAnimationFrame()
+			r.DrainTaskEvents()
+			r.Flush(true)
+		case <-ctx.Done():
+			if r.Dirty {
+				r.Flush(true)
+			}
+			return events
 		}
-		r.DrainTaskEvents()
-		events = append(events, event)
 	}
-	if r.Dirty {
-		r.Flush(true)
-	}
+	r.finishSubmitFrame()
+	r.Flush(true)
 	return events
 }
 
@@ -262,14 +323,14 @@ func (r *UiRuntime) ApplyUIEvent(event UiEvent) {
 		r.appendTranscriptEntry("assistant", event.Content)
 		r.markDirty()
 	case "thinking_delta":
-		r.appendTranscriptEntry("thinking", event.Content)
-		r.markDirty()
+		if event.Content != "" {
+			r.Frame.InputPlaceholder = "Agent is thinking..."
+			r.markDirty()
+		}
 	case "tool_call_started":
-		r.appendTranscriptEntry("tool_call", FormatToolCallEntry(event))
-		r.markDirty()
+		r.recordInlineActivity("tool_call", FormatToolCallEntry(event))
 	case "tool_call_finished":
-		r.appendTranscriptEntry("tool_result", FormatToolResultEntry(event))
-		r.markDirty()
+		r.recordInlineActivity("tool_result", FormatToolResultEntry(event))
 	case "session_cost_updated":
 		r.Frame.SessionCostText = event.Content
 		r.Frame.SessionCostValue = floatFromAny(event.Metadata["cost"])
@@ -277,13 +338,11 @@ func (r *UiRuntime) ApplyUIEvent(event UiEvent) {
 	case "ui_warning":
 		if event.Content != "" {
 			r.Frame.Warnings = append(r.Frame.Warnings, event.Content)
-			r.appendTranscriptEntry("warning", event.Content)
 			r.markDirty()
 		}
 	case "ui_fatal":
 		if event.Content != "" {
 			r.Frame.Errors = append(r.Frame.Errors, event.Content)
-			r.appendTranscriptEntry("error", event.Content)
 			r.markDirty()
 		}
 	}
@@ -462,6 +521,21 @@ func (r *UiRuntime) markDirty() {
 	r.Dirty = true
 }
 
+func (r *UiRuntime) advanceAnimationFrame() {
+	if r.Frame.InputEnabled || r.Frame.ActiveModal != "none" {
+		return
+	}
+	r.Frame.AnimationFrame++
+	r.markDirty()
+}
+
+func (r *UiRuntime) finishSubmitFrame() {
+	r.Frame.InputEnabled = true
+	r.Frame.InputMode = "normal"
+	r.Frame.InputPlaceholder = "请输入消息并回车。"
+	r.markDirty()
+}
+
 func (r *UiRuntime) refreshContextWindowFrame() {
 	cfg, ok := r.engineConfig()
 	if !ok {
@@ -502,11 +576,14 @@ func (r *UiRuntime) latestState() *agent.AgentState {
 }
 
 func (r *UiRuntime) appendTranscriptEntry(kind, text string) {
-	if text == "" {
+	if kind == "user" {
+		text = strings.TrimSpace(text)
+	}
+	if text == "" || strings.TrimSpace(text) == "" {
 		return
 	}
 	entries := r.Frame.TranscriptEntries
-	if len(entries) > 0 && entries[len(entries)-1]["kind"] == kind && (kind == "assistant" || kind == "thinking") {
+	if len(entries) > 0 && entries[len(entries)-1]["kind"] == kind && kind == "assistant" {
 		entries[len(entries)-1]["text"] = stringFromAny(entries[len(entries)-1]["text"]) + text
 		r.Frame.TranscriptEntries = entries
 		return
@@ -538,6 +615,34 @@ func (r *UiRuntime) recordTaskActivity(taskEvent TaskUiEvent) {
 	r.Frame.TaskActivityEntries = entries
 }
 
+func (r *UiRuntime) recordInlineActivity(kind, summary string) {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return
+	}
+	entry := map[string]any{
+		"task_id":        "agent:" + kind,
+		"worker_label":   "agent",
+		"status":         kind,
+		"summary":        summary,
+		"result_text":    "",
+		"input_tokens":   0,
+		"output_tokens":  0,
+		"tool_use_count": 0,
+		"duration_ms":    0,
+	}
+	entries := r.Frame.TaskActivityEntries
+	if len(entries) > 0 && mapsEqual(entries[len(entries)-1], entry) {
+		return
+	}
+	entries = append(entries, entry)
+	if len(entries) > r.MaxTaskActivityEntries {
+		entries = entries[len(entries)-r.MaxTaskActivityEntries:]
+	}
+	r.Frame.TaskActivityEntries = entries
+	r.markDirty()
+}
+
 func FormatToolCallEntry(event UiEvent) string {
 	toolName := firstNonEmpty(event.Content, stringFromAny(event.Metadata["tool_name"]), "tool")
 	return fmt.Sprintf("[tool] %s", toolName)
@@ -556,6 +661,119 @@ func FormatToolResultEntry(event UiEvent) string {
 	}
 	preview := truncateString(strings.Split(strings.TrimSpace(result), "\n")[0], 200)
 	return fmt.Sprintf("[tool result] %s", preview)
+}
+
+func shouldHideTranscriptMessage(message map[string]any) bool {
+	if truthy(message["isMeta"]) {
+		return true
+	}
+	metadata, _ := message["metadata"].(map[string]any)
+	return truthy(metadata["lumina_skill_context"]) || truthy(metadata["lumina_memory_context"])
+}
+
+func appendUserTranscriptMessage(entries []map[string]any, content any) []map[string]any {
+	if text, ok := content.(string); ok {
+		return appendTranscriptSnapshotEntry(entries, "user", formatUserTranscriptText(text))
+	}
+	blocks := transcriptContentBlocks(content)
+	if len(blocks) == 0 {
+		return entries
+	}
+	var textParts []string
+	for _, block := range blocks {
+		switch stringFromAny(block["type"]) {
+		case "text":
+			text := strings.TrimSpace(stringFromAny(block["text"]))
+			if text != "" && !strings.Contains(text, "<system_hint>") {
+				textParts = append(textParts, text)
+			}
+		}
+	}
+	if len(textParts) > 0 {
+		entries = appendTranscriptSnapshotEntry(entries, "user", formatUserTranscriptText(strings.Join(textParts, "\n\n")))
+	}
+	return entries
+}
+
+func appendAssistantTranscriptMessage(entries []map[string]any, content any) []map[string]any {
+	if text, ok := content.(string); ok {
+		return appendTranscriptSnapshotEntry(entries, "assistant", formatAssistantTranscriptText(text))
+	}
+	for _, block := range transcriptContentBlocks(content) {
+		switch stringFromAny(block["type"]) {
+		case "text":
+			entries = appendTranscriptSnapshotEntry(entries, "assistant", formatAssistantTranscriptText(stringFromAny(block["text"])))
+		}
+	}
+	return entries
+}
+
+func appendTranscriptSnapshotEntry(entries []map[string]any, kind, text string) []map[string]any {
+	if strings.TrimSpace(text) == "" {
+		return entries
+	}
+	return append(entries, map[string]any{"kind": kind, "text": text})
+}
+
+func formatUserTranscriptText(text string) string {
+	return strings.TrimSpace(text)
+}
+
+func formatAssistantTranscriptText(text string) string {
+	return strings.TrimSpace(text)
+}
+
+func formatHistoricalToolResult(block map[string]any) string {
+	content := transcriptBlockContentText(block["content"])
+	if content == "" {
+		content = stringFromAny(block["text"])
+	}
+	if content == "" {
+		return "[tool result]"
+	}
+	return "[tool result] " + truncateString(strings.Split(strings.TrimSpace(content), "\n")[0], 200)
+}
+
+func transcriptBlockContentText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []map[string]any:
+		parts := make([]string, 0, len(typed))
+		for _, block := range typed {
+			if stringFromAny(block["type"]) == "text" {
+				parts = append(parts, stringFromAny(block["text"]))
+			}
+		}
+		return strings.Join(nonEmptyStrings(parts), "\n")
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			if block, ok := raw.(map[string]any); ok && stringFromAny(block["type"]) == "text" {
+				parts = append(parts, stringFromAny(block["text"]))
+			}
+		}
+		return strings.Join(nonEmptyStrings(parts), "\n")
+	default:
+		return ""
+	}
+}
+
+func transcriptContentBlocks(content any) []map[string]any {
+	switch typed := content.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		blocks := make([]map[string]any, 0, len(typed))
+		for _, raw := range typed {
+			if block, ok := raw.(map[string]any); ok {
+				blocks = append(blocks, block)
+			}
+		}
+		return blocks
+	default:
+		return nil
+	}
 }
 
 func permissionPromptFromEvent(event UiEvent) map[string]any {
