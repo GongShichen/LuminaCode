@@ -183,6 +183,9 @@ func TranscriptEntriesFromState(state *agent.AgentState) []map[string]any {
 
 func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID string) []agent.StreamEvent {
 	r.CurrentState = state
+	if refresher, ok := r.Engine.(interface{ RefreshRuntimeConfig() }); ok {
+		refresher.RefreshRuntimeConfig()
+	}
 	taskRuntime := r.taskRuntime()
 	if taskRuntime != nil {
 		taskRuntime.SetTaskEventSink(r.TaskSink)

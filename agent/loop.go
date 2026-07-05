@@ -108,6 +108,16 @@ func CreateCoreEngine(cfg *config.Config) *CoreExecutionEngine {
 	return NewCoreExecutionEngine(cfg)
 }
 
+func (e *CoreExecutionEngine) RefreshRuntimeConfig(cfg config.Config) {
+	if e == nil {
+		return
+	}
+	e.Config = cfg
+	if e.extraction != nil {
+		e.extraction.Config = cfg
+	}
+}
+
 func (e *CoreExecutionEngine) RegisterDefaultTools() {
 	e.Registry.Register(coretools.NewReadFileTool())
 	e.Registry.Register(coretools.NewWriteFileTool())
@@ -490,6 +500,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"cwd":                     e.Config.CWD,
 			"config":                  e.Config,
 			"allowed_read_roots":      []string{e.Config.CWD},
+			"allowed_write_roots":     []string{e.Config.CWD},
 			"_registry":               activeRegistry,
 			"parent_state":            state,
 			"task_runtime":            e.TaskRuntime,

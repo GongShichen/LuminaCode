@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"LuminaCode/agent"
 	"LuminaCode/config"
 )
 
@@ -197,5 +198,99 @@ func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
 	}
 	if cfg.CompressionTriggerTokens() != 600 {
 		t.Fatalf("configured compression trigger=%d want 600", cfg.CompressionTriggerTokens())
+	}
+}
+
+func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaultsPath := filepath.Join(resourceRoot, "CONFIG", "defaults.json")
+	if err := os.WriteFile(defaultsPath, []byte(`{
+  "api_key": "key-one",
+  "api_base_url": "https://one.example",
+  "api_model": "model-one",
+  "api_type": "anthropic",
+  "api_max_tokens": 1000,
+  "api_input_price_per_1k": 0.01,
+  "api_output_price_per_1k": 0.02
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("LUMINA_API_MODEL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	current := config.NewConfigForCWD(workDir)
+	current.CWD = filepath.Join(workDir, "runtime-cwd")
+	current.Yolo = true
+	current.AutoMemoryEnabled = false
+	current.AutoMemoryDirectory = nil
+
+	if err := os.WriteFile(defaultsPath, []byte(`{
+  "api_key": "key-two",
+  "api_base_url": "https://two.example",
+  "api_model": "model-two",
+  "api_type": "openai_compatible",
+  "api_max_tokens": 2000,
+  "api_input_price_per_1k": 0.03,
+  "api_output_price_per_1k": 0.04
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := config.ReloadDynamicConfig(current)
+	if reloaded.APIKey != "key-two" || reloaded.APIBaseURL != "https://two.example" || reloaded.APIModel != "model-two" || reloaded.APIType != "openai_compatible" || reloaded.APIMaxTokens != 2000 {
+		t.Fatalf("dynamic API defaults were not reloaded: %#v", reloaded)
+	}
+	if reloaded.CWD != current.CWD || !reloaded.Yolo || reloaded.AutoMemoryEnabled {
+		t.Fatalf("runtime fields should be preserved: %#v", reloaded)
+	}
+	if reloaded.APIInputPricePer1K == nil || *reloaded.APIInputPricePer1K != 0.03 || reloaded.APIOutputPricePer1K == nil || *reloaded.APIOutputPricePer1K != 0.04 {
+		t.Fatalf("pricing should reload: input=%v output=%v", reloaded.APIInputPricePer1K, reloaded.APIOutputPricePer1K)
+	}
+}
+
+func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
+	resourceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaultsPath := filepath.Join(resourceRoot, "CONFIG", "defaults.json")
+	if err := os.WriteFile(defaultsPath, []byte(`{
+  "api_key": "key-one",
+  "api_base_url": "https://one.example",
+  "api_model": "model-one",
+  "api_max_tokens": 1000
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("LUMINA_API_MODEL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	previous := config.GetConfig()
+	t.Cleanup(func() { config.SetConfig(previous) })
+
+	cfg := config.NewConfigForCWD(workDir)
+	engine := agent.NewQueryEngine(&cfg)
+	defer engine.Shutdown()
+	if err := os.WriteFile(defaultsPath, []byte(`{
+  "api_key": "key-two",
+  "api_base_url": "https://two.example",
+  "api_model": "model-two",
+  "api_max_tokens": 2000
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine.RefreshRuntimeConfig()
+	if engine.Config.APIModel != "model-two" || engine.Config.APIMaxTokens != 2000 {
+		t.Fatalf("query engine config did not refresh: %#v", engine.Config)
+	}
+	if engine.CoreEngine.Config.APIModel != "model-two" || engine.CoreEngine.Config.APIMaxTokens != 2000 {
+		t.Fatalf("core engine config did not refresh: %#v", engine.CoreEngine.Config)
+	}
+	if global := config.GetConfig(); global.APIModel != "model-two" {
+		t.Fatalf("global config was not refreshed: %#v", global)
 	}
 }

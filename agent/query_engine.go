@@ -45,6 +45,18 @@ func (q *QueryEngine) Reset() {
 	q.SessionCost = 0
 }
 
+func (q *QueryEngine) RefreshRuntimeConfig() {
+	if q == nil {
+		return
+	}
+	refreshed := config.ReloadDynamicConfig(q.Config)
+	q.Config = refreshed
+	if q.CoreEngine != nil {
+		q.CoreEngine.RefreshRuntimeConfig(refreshed)
+	}
+	config.SetConfig(refreshed)
+}
+
 func (q *QueryEngine) Shutdown() {
 	if q.CoreEngine != nil {
 		q.CoreEngine.Shutdown()
@@ -119,6 +131,7 @@ func (q *QueryEngine) Compact(state *AgentState) (AgentState, agentContext.Compr
 }
 
 func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, state *AgentState, sessionID ...string) <-chan StreamEvent {
+	q.RefreshRuntimeConfig()
 	out := make(chan StreamEvent)
 	go func() {
 		defer close(out)

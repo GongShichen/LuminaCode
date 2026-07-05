@@ -64,18 +64,23 @@ func run(args []string) error {
 	cfg := config.NewConfig()
 	if *model != "" {
 		cfg.APIModel = *model
+		config.PinFields(&cfg, "api_model")
 	}
 	if *apiType != "" {
 		cfg.APIType = *apiType
+		config.PinFields(&cfg, "api_type")
 	}
 	if *apiKey != "" {
 		cfg.APIKey = *apiKey
+		config.PinFields(&cfg, "api_key")
 	}
 	if *baseURL != "" {
 		cfg.APIBaseURL = *baseURL
+		config.PinFields(&cfg, "api_base_url")
 	}
 	if *maxTokens > 0 {
 		cfg.APIMaxTokens = *maxTokens
+		config.PinFields(&cfg, "api_max_tokens")
 	}
 	if *yolo {
 		cfg.Yolo = true

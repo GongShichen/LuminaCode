@@ -19,6 +19,7 @@ type Config struct {
 	APIModel     string
 	APIType      string
 	APIMaxTokens int
+	PinnedFields map[string]bool
 
 	Yolo bool
 
@@ -64,8 +65,15 @@ type Config struct {
 }
 
 func NewConfig() Config {
-	homeDir, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
+	return NewConfigForCWD(cwd)
+}
+
+func NewConfigForCWD(cwd string) Config {
+	homeDir, _ := os.UserHomeDir()
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
 	luminaRoot := FindLuminaRoot(cwd)
 	if luminaRoot == "" {
 		luminaRoot = cwd
@@ -124,6 +132,56 @@ func NewConfig() Config {
 	applyLuminaDefaults(&cfg, filepath.Join(resourceDir, "CONFIG", "defaults.json"), cwd, resourceDir)
 	applyEnvOverrides(&cfg)
 	return cfg
+}
+
+func ReloadDynamicConfig(current Config) Config {
+	fresh := NewConfigForCWD(current.CWD)
+	updated := current
+	if !isPinned(current, "api_key") {
+		updated.APIKey = fresh.APIKey
+	}
+	if !isPinned(current, "api_base_url") {
+		updated.APIBaseURL = fresh.APIBaseURL
+	}
+	if !isPinned(current, "api_model") {
+		updated.APIModel = fresh.APIModel
+	}
+	if !isPinned(current, "api_type") {
+		updated.APIType = fresh.APIType
+	}
+	if !isPinned(current, "api_max_tokens") {
+		updated.APIMaxTokens = fresh.APIMaxTokens
+	}
+	updated.MaxToolOutputChars = fresh.MaxToolOutputChars
+	updated.MaxToolResultCharsAbsolute = fresh.MaxToolResultCharsAbsolute
+	updated.MaxMessageToolResultsChars = fresh.MaxMessageToolResultsChars
+	updated.ShellTimeoutSeconds = fresh.ShellTimeoutSeconds
+	updated.ShellMaxOutputBytes = fresh.ShellMaxOutputBytes
+	updated.ContextCompressThreshold = fresh.ContextCompressThreshold
+	updated.PromptCacheTTLSeconds = fresh.PromptCacheTTLSeconds
+	updated.AnthropicCacheEditsEnabled = fresh.AnthropicCacheEditsEnabled
+	updated.MaxParentTurns = fresh.MaxParentTurns
+	updated.APIInputPricePer1K = fresh.APIInputPricePer1K
+	updated.APIOutputPricePer1K = fresh.APIOutputPricePer1K
+	updated.ExtractionModel = fresh.ExtractionModel
+	updated.MemoryRecallPrefetchTimeoutSeconds = fresh.MemoryRecallPrefetchTimeoutSeconds
+	return updated
+}
+
+func PinFields(cfg *Config, fields ...string) {
+	if cfg == nil {
+		return
+	}
+	if cfg.PinnedFields == nil {
+		cfg.PinnedFields = map[string]bool{}
+	}
+	for _, field := range fields {
+		cfg.PinnedFields[field] = true
+	}
+}
+
+func isPinned(cfg Config, field string) bool {
+	return cfg.PinnedFields != nil && cfg.PinnedFields[field]
 }
 
 func (c Config) CompressionContextLimit() int {

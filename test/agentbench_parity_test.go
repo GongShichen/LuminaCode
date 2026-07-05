@@ -1,0 +1,267 @@
+package test
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"LuminaCode/agent"
+	"LuminaCode/benchmark/agentbench"
+	"LuminaCode/config"
+)
+
+func TestAgentBenchLoadCasesJSONAndLimit(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "cases.json")
+	data := `[
+		{"id":"one","benchmark":"terminal_bench_smoke","prompt":"do one"},
+		{"id":"two","benchmark":"terminal_bench_smoke","prompt":"do two"}
+	]`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases, err := agentbench.LoadCases(agentbench.SuiteTerminalBenchSmoke, path, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 1 || cases[0].ID != "one" {
+		t.Fatalf("cases=%#v", cases)
+	}
+	if cases[0].TimeoutSeconds != agentbench.DefaultCaseTimeout {
+		t.Fatalf("default timeout not applied: %#v", cases[0])
+	}
+}
+
+func TestAgentBenchPercentileInterpolation(t *testing.T) {
+	if got := agentbench.Percentile(nil, 90); got != nil {
+		t.Fatalf("empty percentile should be nil")
+	}
+	single := agentbench.Percentile([]float64{7}, 95)
+	if single == nil || *single != 7 {
+		t.Fatalf("single percentile=%v", single)
+	}
+	values := []float64{1, 2, 3, 4}
+	p50 := agentbench.Percentile(values, 50)
+	p90 := agentbench.Percentile(values, 90)
+	p95 := agentbench.Percentile(values, 95)
+	if p50 == nil || *p50 != 2.5 {
+		t.Fatalf("p50=%v", p50)
+	}
+	if p90 == nil || *p90 < 3.69 || *p90 > 3.71 {
+		t.Fatalf("p90=%v", p90)
+	}
+	if p95 == nil || *p95 < 3.84 || *p95 > 3.86 {
+		t.Fatalf("p95=%v", p95)
+	}
+}
+
+func TestAgentBenchRunShellCommandCapturesExitAndTimeout(t *testing.T) {
+	tmp := t.TempDir()
+	ok := agentbench.RunShellCommand(context.Background(), tmp, "printf ok", time.Second)
+	if ok.ExitCode != 0 || ok.Stdout != "ok" {
+		t.Fatalf("ok result=%#v", ok)
+	}
+	timeout := agentbench.RunShellCommand(context.Background(), tmp, "sleep 1", 20*time.Millisecond)
+	if !timeout.TimedOut || timeout.ExitCode == 0 {
+		t.Fatalf("timeout result=%#v", timeout)
+	}
+}
+
+func TestAgentBenchBuildSummaryIncludesTailMetrics(t *testing.T) {
+	ttftA, ttftB := 100.0, 500.0
+	firstTool := 250.0
+	firstTest := 1000.0
+	summary := agentbench.BuildSummary([]agentbench.CaseResult{
+		{
+			Case:            agentbench.CaseSpec{ID: "pass", Benchmark: agentbench.SuiteTerminalBenchSmoke},
+			Resolved:        true,
+			DurationSeconds: 1,
+			TTFTMillis:      &ttftA,
+			FirstToolCallMS: &firstTool,
+			FirstTestMS:     &firstTest,
+			InputTokens:     100,
+			OutputTokens:    20,
+			EstimatedCost:   0.1,
+			PatchApplyRate:  1,
+			TestPassRate:    1,
+		},
+		{
+			Case:            agentbench.CaseSpec{ID: "fail", Benchmark: agentbench.SuiteTerminalBenchSmoke},
+			Resolved:        false,
+			DurationSeconds: 3,
+			TTFTMillis:      &ttftB,
+			InputTokens:     300,
+			OutputTokens:    40,
+			EstimatedCost:   0.3,
+			ErrorType:       "validation_failed",
+		},
+	})
+	if summary.PassRate != 0.5 || summary.ResolvedCases != 1 {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if summary.DurationSeconds.P90 == nil || *summary.DurationSeconds.P90 < 2.79 || *summary.DurationSeconds.P90 > 2.81 {
+		t.Fatalf("duration p90=%v", summary.DurationSeconds.P90)
+	}
+	if summary.TTFTMillis.P95 == nil || *summary.TTFTMillis.P95 < 479 || *summary.TTFTMillis.P95 > 481 {
+		t.Fatalf("ttft p95=%v", summary.TTFTMillis.P95)
+	}
+	if summary.FailureCategories["validation_failed"] != 1 {
+		t.Fatalf("failure categories=%#v", summary.FailureCategories)
+	}
+}
+
+func TestAgentBenchRunSuiteWithFakeAgentWritesArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	report, err := agentbench.RunSuite(context.Background(), agentbench.RunnerOptions{
+		Suite:        agentbench.SuiteTerminalBenchSmoke,
+		Limit:        1,
+		RootDir:      tmp,
+		OutputDir:    filepath.Join(tmp, "reports"),
+		WorkDir:      filepath.Join(tmp, "work"),
+		ArtifactsDir: filepath.Join(tmp, "artifacts"),
+		Config:       config.Config{APIModel: "fake-model", CWD: tmp},
+		AgentRunner:  fakeAgentRunner{},
+		Now:          func() time.Time { return time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.PassRate != 1 || len(report.Results) != 1 {
+		t.Fatalf("report=%#v", report)
+	}
+	result := report.Results[0]
+	for _, path := range []string{result.PromptPath, result.TranscriptPath, result.TimelinePath, result.FinalPatchPath, result.TestOutputPath, result.ResultPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("missing artifact %s: %v", path, err)
+		}
+	}
+	if result.TTFTMillis == nil || *result.TTFTMillis != 10 {
+		t.Fatalf("ttft=%v", result.TTFTMillis)
+	}
+	if result.FirstToolCallMS == nil || *result.FirstToolCallMS != 20 {
+		t.Fatalf("first tool=%v", result.FirstToolCallMS)
+	}
+	if result.FirstTestMS == nil {
+		t.Fatalf("missing first test metric")
+	}
+	jsonPath, mdPath, err := agentbench.WriteReport(report, filepath.Join(tmp, "reports"), time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jsonPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mdPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOfficialBenchmarkReportPathsAreSeparated(t *testing.T) {
+	tmp := t.TempDir()
+	jsonPath, mdPath := agentbench.BuildSuiteReportPaths(tmp, agentbench.SuiteTerminalBench, time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
+	if filepath.Base(jsonPath) != "terminal-bench-20260705-120000.json" || filepath.Base(mdPath) != "terminal-bench-20260705-120000.md" {
+		t.Fatalf("terminal report paths=%s %s", jsonPath, mdPath)
+	}
+	jsonPath, mdPath = agentbench.BuildSuiteReportPaths(tmp, agentbench.SuiteTauBench, time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
+	if filepath.Base(jsonPath) != "tau-bench-20260705-120000.json" || filepath.Base(mdPath) != "tau-bench-20260705-120000.md" {
+		t.Fatalf("tau report paths=%s %s", jsonPath, mdPath)
+	}
+	jsonPath, mdPath = agentbench.BuildSuiteReportPaths(tmp, agentbench.SuiteSWEBenchVerified, time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
+	if filepath.Base(jsonPath) != "swebench-verified-20260705-120000.json" || filepath.Base(mdPath) != "swebench-verified-20260705-120000.md" {
+		t.Fatalf("swebench report paths=%s %s", jsonPath, mdPath)
+	}
+}
+
+func TestOfficialBenchmarkAdapterRunsHarnessWithoutMutatingUpstream(t *testing.T) {
+	tmp := t.TempDir()
+	upstream := filepath.Join(tmp, "terminal-bench")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runAgentBenchGit(t, upstream, "init")
+	runAgentBenchGit(t, upstream, "config", "user.name", "Agent Bench Test")
+	runAgentBenchGit(t, upstream, "config", "user.email", "agentbench@example.invalid")
+	if err := os.WriteFile(filepath.Join(upstream, "task.yaml"), []byte("id: original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runAgentBenchGit(t, upstream, "add", ".")
+	runAgentBenchGit(t, upstream, "commit", "-m", "init")
+
+	report, err := agentbench.RunSuite(context.Background(), agentbench.RunnerOptions{
+		Suite:        agentbench.SuiteTerminalBench,
+		RootDir:      tmp,
+		OutputDir:    filepath.Join(tmp, "reports"),
+		WorkDir:      filepath.Join(tmp, "work"),
+		ArtifactsDir: filepath.Join(tmp, "artifacts"),
+		BenchmarkDir: upstream,
+		HarnessCmd:   `test "$LUMINA_BENCHMARK_CASE" = "case-1" && test "$LUMINA_BENCHMARK_LIMIT" = "2" && test -n "$LUMINA_AGENT_RUNNER" && printf '{"total":2,"resolved":1,"pass_rate":0.5}\n'`,
+		CaseID:       "case-1",
+		Limit:        2,
+		Config:       config.Config{APIModel: "fake-model", APIType: "anthropic", CWD: tmp},
+		Now:          func() time.Time { return time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.DebugRun {
+		t.Fatalf("limit/case should mark official report as debug: %#v", report)
+	}
+	if report.HarnessExitCode == nil || *report.HarnessExitCode != 0 {
+		t.Fatalf("harness failed: %#v", report)
+	}
+	if report.Summary.TotalCases != 2 || report.Summary.ResolvedCases != 1 || report.Summary.PassRate != 0.5 {
+		t.Fatalf("summary should come from official harness output: %#v", report.Summary)
+	}
+	if report.UpstreamDirtyAfter {
+		t.Fatalf("official adapter should not mutate upstream, after=%q", report.UpstreamStatusAfter)
+	}
+	data, err := os.ReadFile(report.HarnessOutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"resolved":1`) {
+		t.Fatalf("harness output not saved: %s", data)
+	}
+}
+
+func runAgentBenchGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+}
+
+type fakeAgentRunner struct{}
+
+func (fakeAgentRunner) Run(_ context.Context, cfg config.Config, _ string, _ string) agentbench.AgentRunResult {
+	if err := os.WriteFile(filepath.Join(cfg.CWD, "result.txt"), []byte("terminal-bench-ok"), 0o644); err != nil {
+		panic(err)
+	}
+	ttft := 10.0
+	firstTool := 20.0
+	return agentbench.AgentRunResult{
+		Events: []agent.StreamEvent{
+			agent.NewStreamEvent("text", "done", nil),
+			agent.NewStreamEvent("tool_call", "bash", map[string]any{"id": "tool-1"}),
+			agent.NewStreamEvent("done", "", nil),
+		},
+		FinalText:       "done",
+		InputTokens:     123,
+		OutputTokens:    45,
+		EstimatedCost:   0.0123,
+		ToolCalls:       1,
+		TTFTMillis:      &ttft,
+		FirstToolCallMS: &firstTool,
+		Timeline: []agentbench.TimelineEvent{
+			{Name: "first_text_delta", ElapsedMillis: 10},
+			{Name: "first_tool_call", ElapsedMillis: 20},
+			{Name: "final_answer", ElapsedMillis: 30},
+		},
+	}
+}
