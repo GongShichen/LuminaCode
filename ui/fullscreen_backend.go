@@ -95,6 +95,7 @@ func (b *FullscreenRendererBackend) RenderWelcome(sessionID string, skillRegistr
 }
 
 func (b *FullscreenRendererBackend) GetInput(state any) (string, bool) {
+	b.PrepareRuntime()
 	b.InputEnabled = true
 	b.InputMode = "normal"
 	b.InputPlaceholder = "请输入消息并回车。"

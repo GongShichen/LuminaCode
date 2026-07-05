@@ -81,6 +81,20 @@ func TestFullscreenRendererBackendFactoryAndFrameStateMatchPython(t *testing.T) 
 	}
 }
 
+func TestFullscreenRendererBackendStartsScreenBeforeFirstInput(t *testing.T) {
+	var out bytes.Buffer
+	fullscreen := ui.NewFullscreenRendererBackend(strings.NewReader("\x03"), &out, &out)
+
+	_, ok := fullscreen.GetInput(nil)
+
+	if ok {
+		t.Fatal("Ctrl-C should cancel first input")
+	}
+	if !strings.Contains(out.String(), "\x1b[?1049h") || !strings.Contains(out.String(), "输入就绪") {
+		t.Fatalf("fullscreen should render before waiting for first input, got %q", out.String())
+	}
+}
+
 func TestFullscreenRendererBackendFocusScrollSearchAndTogglesMatchPython(t *testing.T) {
 	fullscreen := ui.NewFullscreenRendererBackend(strings.NewReader(""), nil, nil)
 
