@@ -1,2 +1,4 @@
 .Lumina/CONFIG/defaults.json
 .idea/
+.DS_Store
+tmp/
