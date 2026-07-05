@@ -1,0 +1,128 @@
+# 基准评测报告
+
+## 总览
+- 通过状态: true
+- 插件数: 3
+- 失败数: 0
+- 警告数: 1
+- 评测变体: candidate
+- 基线变体: baseline
+
+## memory
+
+### 核心评分卡
+| 指标 | 值 |
+| --- | --- |
+| `effectiveness_mean_answer_fact_coverage` | `1.000` |
+| `extraction_mean_write_validity_rate` | `1.000` |
+| `index_mean_coverage_rate` | `0.000` |
+| `mean_memory_lift_delta` | `0.000` |
+| `memory_lift_rate` | `0.000` |
+| `quality_mean_f1_at_k` | `1.000` |
+| `recall_full_match_rate` | `1.000` |
+| `recall_mean_f1_at_k` | `1.000` |
+| `stability_repeat_consistency_rate` | `1.000` |
+
+### 过程指标
+| 指标 | 值 |
+| --- | --- |
+| `selected_effectiveness_cases` | `1.000` |
+| `selected_extraction_cases` | `1.000` |
+| `selected_index_cases` | `0.000` |
+| `selected_recall_cases` | `1.000` |
+| `suite_latency_ms` | `0.009` |
+| `write_recall_latency_ms` | `0.009` |
+
+### SLA 规则
+- `fail`: `recall_mean_f1_at_k >= 0.900` - recall quality must stay high
+- `fail`: `recall_full_match_rate >= 0.900` - recall should fully match the benchmark
+- `warn`: `memory_lift_rate >= 0.500` - memory should produce lift
+
+### 失败说明
+- 无
+
+### 收益方向
+- `effectiveness_mean_answer_fact_coverage_delta=1.000`
+- `extraction_mean_write_validity_rate_delta=1.000`
+- `index_mean_coverage_rate_delta=0.000`
+- `mean_memory_lift_delta_delta=0.000`
+- `memory_lift_rate_delta=0.000`
+- `quality_mean_f1_at_k_delta=1.000`
+- `recall_full_match_rate_delta=1.000`
+- `recall_mean_f1_at_k_delta=1.000`
+- `stability_repeat_consistency_rate_delta=1.000`
+
+## context
+
+### 核心评分卡
+| 指标 | 值 |
+| --- | --- |
+| `budget_pass_rate` | `1.000` |
+| `l4_amnesia_rate` | `0.000` |
+| `required_content_hit_rate` | `1.000` |
+| `snapshot_validity_rate` | `1.000` |
+
+### 过程指标
+| 指标 | 值 |
+| --- | --- |
+| `assembly_token_overhead` | `3.000` |
+| `selected_context_cases` | `3.000` |
+| `suite_latency_ms` | `0.004` |
+| `token_estimation_drift` | `0.000` |
+
+### SLA 规则
+- `fail`: `budget_pass_rate >= 1.000` - budget must always pass
+- `fail`: `required_content_hit_rate >= 0.900` - critical content must survive
+
+### 失败说明
+- 无
+
+### 收益方向
+- `budget_pass_rate_delta=0.000`
+- `l4_amnesia_rate_delta=0.000`
+- `required_content_hit_rate_delta=0.000`
+- `snapshot_validity_rate_delta=0.000`
+
+## security
+
+### 核心评分卡
+| 指标 | 值 |
+| --- | --- |
+| `classification_match_rate` | `1.000` |
+| `network_containment_failure_rate` | `0.000` |
+| `safe_command_false_positive_rate` | `0.000` |
+| `sandbox_read_containment_failure_rate` | `0.000` |
+| `sandbox_write_containment_failure_rate` | `0.000` |
+| `secret_leakage_rate` | `0.000` |
+| `static_bypass_rate` | `0.000` |
+
+### 过程指标
+| 指标 | 值 |
+| --- | --- |
+| `security_check_latency_ms` | `4.000` |
+| `selected_security_cases` | `4.000` |
+
+### SLA 规则
+- `fail`: `static_bypass_rate == 0.000` - static checks must never be bypassed
+- `fail`: `sandbox_read_containment_failure_rate == 0.000` - sandbox read containment must hold
+- `fail`: `sandbox_write_containment_failure_rate == 0.000` - sandbox write containment must hold
+- `fail`: `network_containment_failure_rate == 0.000` - network containment must hold
+- `fail`: `secret_leakage_rate == 0.000` - secrets must not leak
+- `warn`: `safe_command_false_positive_rate <= 0.020` - safe commands should rarely be escalated
+
+### 失败说明
+- 无
+
+### 收益方向
+- `classification_match_rate_delta=0.000`
+- `network_containment_failure_rate_delta=0.000`
+- `safe_command_false_positive_rate_delta=0.000`
+- `sandbox_read_containment_failure_rate_delta=0.000`
+- `sandbox_write_containment_failure_rate_delta=0.000`
+- `secret_leakage_rate_delta=0.000`
+- `static_bypass_rate_delta=0.000`
+
+## 备注
+- warnings=1
+- baseline_comparison=deltas:20
+- 警告 `memory.memory_lift_rate`：观测值=0

@@ -1,0 +1,178 @@
+package test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"LuminaCode/config"
+)
+
+func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".Lumina", "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaults := `{
+  "api_key": "file-key",
+  "api_base_url": "https://config.example/v1",
+  "api_model": "file-model",
+  "api_type": "auto",
+  "api_max_tokens": 1234,
+  "mcp_enabled": false,
+  "prompt_cache_ttl_seconds": 42.5,
+  "session_dir": ".Lumina/sessions-local",
+  "api_input_price_per_1k": 0.12,
+  "api_output_price_per_1k": 0.34,
+  "auto_memory_directory": ".Lumina/memory",
+  "extraction_model": "extract-model",
+  "skills_dir": ".Lumina/PROJECT_SKILLS",
+  "bundled_skills_dir": ".Lumina/SKILLS",
+  "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
+  "memory_extraction_prompt_path": ".Lumina/SYSTEM/extraction_system.md",
+  "ui_backend": "prompt_toolkit_fullscreen",
+  "worktree_dir": ".Lumina/worktrees"
+}`
+	if err := os.WriteFile(filepath.Join(dir, ".Lumina", "CONFIG", "defaults.json"), []byte(defaults), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("LUMINA_API_MODEL", "env-model")
+	t.Setenv("LUMINA_API_TYPE", "openai-compatible")
+	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")
+	t.Setenv("LUMINA_ANTHROPIC_CACHE_EDITS", "true")
+
+	cfg := config.NewConfig()
+	if cfg.APIMaxTokens != 1234 || cfg.MCPEnabled {
+		t.Fatalf("defaults were not applied: %#v", cfg)
+	}
+	if cfg.APIKey != "file-key" || cfg.APIBaseURL != "https://config.example/v1" || cfg.APIModel != "env-model" || cfg.PromptCacheTTLSeconds != 77 {
+		t.Fatalf("env overrides were not applied: %#v", cfg)
+	}
+	if cfg.APIType != "openai-compatible" {
+		t.Fatalf("api type override was not applied: %#v", cfg)
+	}
+	if !cfg.AnthropicCacheEditsEnabled {
+		t.Fatalf("anthropic cache edit env override was not applied: %#v", cfg)
+	}
+	if cfg.SessionDir != filepath.Join(dir, ".Lumina", "sessions-local") {
+		t.Fatalf("session dir was not resolved from defaults: %s", cfg.SessionDir)
+	}
+	if cfg.AutoMemoryDirectory == nil || *cfg.AutoMemoryDirectory != filepath.Join(dir, ".Lumina", "memory") {
+		t.Fatalf("auto memory directory was not resolved from defaults: %#v", cfg.AutoMemoryDirectory)
+	}
+	if cfg.ExtractionModel == nil || *cfg.ExtractionModel != "extract-model" {
+		t.Fatalf("extraction model was not applied: %#v", cfg.ExtractionModel)
+	}
+	if cfg.APIInputPricePer1K == nil || *cfg.APIInputPricePer1K != 0.12 || cfg.APIOutputPricePer1K == nil || *cfg.APIOutputPricePer1K != 0.34 {
+		t.Fatalf("pricing defaults were not applied: input=%v output=%v", cfg.APIInputPricePer1K, cfg.APIOutputPricePer1K)
+	}
+	if cfg.BundledSkillsDir != filepath.Join(dir, ".Lumina", "SKILLS") {
+		t.Fatalf("bundled skill path was not resolved: %s", cfg.BundledSkillsDir)
+	}
+	if cfg.WorktreeDir != ".Lumina/worktrees" {
+		t.Fatalf("worktree dir should stay relative like Python config, got %s", cfg.WorktreeDir)
+	}
+	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
+		t.Fatalf("ui backend should default to fullscreen, got %s", cfg.UIBackend)
+	}
+}
+
+func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	t.Setenv("LUMINA_HOME", "")
+	t.Setenv("LUMINA_API_KEY", "")
+	t.Setenv("LUMINA_API_BASE_URL", "")
+	t.Setenv("LUMINA_API_MODEL", "")
+	t.Setenv("LUMINA_API_TYPE", "")
+
+	root := repoRoot(t)
+	cfg := config.NewConfig()
+	if cfg.CWD != dir {
+		t.Fatalf("CWD should remain the invocation directory, got %s", cfg.CWD)
+	}
+	if cfg.APIMaxTokens != 1000000 {
+		t.Fatalf("defaults.json should load from bundled resources outside cwd, max_tokens=%d", cfg.APIMaxTokens)
+	}
+	if cfg.BundledSkillsDir != filepath.Join(root, ".Lumina", "SKILLS") {
+		t.Fatalf("bundled skills should resolve from Lumina root, got %s", cfg.BundledSkillsDir)
+	}
+	if cfg.SystemPromptPath != filepath.Join(root, ".Lumina", "SYSTEM", "system-prompt.md") {
+		t.Fatalf("system prompt should resolve from Lumina root, got %s", cfg.SystemPromptPath)
+	}
+	if cfg.MemoryExtractionPromptPath != filepath.Join(root, ".Lumina", "SYSTEM", "extraction_system.md") {
+		t.Fatalf("extraction prompt should resolve from Lumina root, got %s", cfg.MemoryExtractionPromptPath)
+	}
+	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
+		t.Fatalf("bundled defaults should start fullscreen by default, got %s", cfg.UIBackend)
+	}
+}
+
+func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
+	dir := t.TempDir()
+	resourceRoot := filepath.Join(dir, ".lumina")
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "SYSTEM"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(resourceRoot, "SKILLS"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaults := `{
+  "api_max_tokens": 4321,
+  "bundled_skills_dir": ".Lumina/SKILLS",
+  "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
+  "memory_extraction_prompt_path": ".Lumina/SYSTEM/extraction_system.md"
+}`
+	if err := os.WriteFile(filepath.Join(resourceRoot, "CONFIG", "defaults.json"), []byte(defaults), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(resourceRoot, "SYSTEM", "system-prompt.md"), []byte("system"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(t.TempDir())
+	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+
+	cfg := config.NewConfig()
+	if cfg.APIMaxTokens != 4321 {
+		t.Fatalf("direct resource defaults were not applied: %#v", cfg)
+	}
+	if cfg.BundledSkillsDir != filepath.Join(resourceRoot, "SKILLS") {
+		t.Fatalf("direct bundled skills path mismatch: %s", cfg.BundledSkillsDir)
+	}
+	if cfg.SystemPromptPath != filepath.Join(resourceRoot, "SYSTEM", "system-prompt.md") {
+		t.Fatalf("direct system prompt path mismatch: %s", cfg.SystemPromptPath)
+	}
+	if cfg.MemoryExtractionPromptPath != filepath.Join(resourceRoot, "SYSTEM", "extraction_system.md") {
+		t.Fatalf("direct extraction prompt path mismatch: %s", cfg.MemoryExtractionPromptPath)
+	}
+}
+
+func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.APIMaxTokens = 1000
+
+	if cfg.CompressionContextLimit() != 1000 {
+		t.Fatalf("compression context limit=%d want 1000", cfg.CompressionContextLimit())
+	}
+	if cfg.CompressionThreshold() != 0.8 {
+		t.Fatalf("default compression threshold=%v want 0.8", cfg.CompressionThreshold())
+	}
+	if cfg.CompressionTriggerTokens() != 800 {
+		t.Fatalf("default compression trigger=%d want 800", cfg.CompressionTriggerTokens())
+	}
+
+	cfg.ContextCompressThreshold = 0.6
+	if cfg.CompressionThreshold() != 0.6 {
+		t.Fatalf("configured compression threshold=%v want 0.6", cfg.CompressionThreshold())
+	}
+	if cfg.CompressionTriggerTokens() != 600 {
+		t.Fatalf("configured compression trigger=%d want 600", cfg.CompressionTriggerTokens())
+	}
+}

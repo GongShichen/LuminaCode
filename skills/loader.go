@@ -1,0 +1,115 @@
+package skills
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"LuminaCode/config"
+)
+
+const SkillFilename = "SKILL.md"
+
+type SkillLoader struct {
+	Config    config.Config
+	seenPaths map[string]struct{}
+}
+
+func NewSkillLoader(cfg config.Config) *SkillLoader {
+	return &SkillLoader{Config: cfg, seenPaths: map[string]struct{}{}}
+}
+
+func (l *SkillLoader) LoadFrontmatterOnly() []SkillSpec {
+	l.seenPaths = map[string]struct{}{}
+	var skills []SkillSpec
+	skills = append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
+	skills = append(skills, l.loadDirectory(l.ProjectSkillsDir(), SkillSourceProject)...)
+	skills = append(skills, l.loadDirectory(l.BundledSkillsDir(), SkillSourceBundled)...)
+	return skills
+}
+
+func (l *SkillLoader) LoadFullContent(skill SkillSpec) SkillSpec {
+	if skill.Content != nil || skill.SkillFile == "" {
+		return skill
+	}
+	fm, content, err := ParseSkillMD(skill.SkillFile)
+	if err != nil {
+		return skill
+	}
+	skill.Frontmatter = fm
+	skill.Content = &content
+	skill.LoadedAt = loadedNow()
+	return skill
+}
+
+func (l *SkillLoader) ProjectSkillsDir() string {
+	return filepath.Join(l.Config.CWD, l.Config.SkillsDir)
+}
+
+func (l *SkillLoader) UserSkillsDir() string {
+	return expandSkillHome(l.Config.UserSkillsDir)
+}
+
+func (l *SkillLoader) BundledSkillsDir() string {
+	if l.Config.BundledSkillsDir != "" {
+		return l.Config.BundledSkillsDir
+	}
+	return filepath.Join(l.Config.CWD, ".Lumina", "SKILLS")
+}
+
+func (l *SkillLoader) loadDirectory(root string, source SkillSource) []SkillSpec {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name()) })
+	var skills []SkillSpec
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		skillFile := filepath.Join(dir, SkillFilename)
+		if _, err := os.Stat(skillFile); err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(skillFile)
+		if err != nil {
+			resolved, err = filepath.Abs(skillFile)
+			if err != nil {
+				resolved = skillFile
+			}
+		}
+		if _, seen := l.seenPaths[resolved]; seen {
+			continue
+		}
+		fm, _, err := ParseSkillMD(skillFile)
+		if err != nil {
+			continue
+		}
+		l.seenPaths[resolved] = struct{}{}
+		skills = append(skills, SkillSpec{
+			Frontmatter: fm, Source: source, Directory: dir, SkillFile: skillFile, CanonicalName: entry.Name(),
+		})
+	}
+	return skills
+}
+
+func expandSkillHome(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
