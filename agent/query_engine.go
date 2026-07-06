@@ -215,10 +215,10 @@ func (q *QueryEngine) buildOrRefreshSystemPrompt(state *AgentState) {
 		memorySection = agentContext.BuildMemorySection(&q.Config)
 	}
 	if prompt, err := agentContext.BuildSystemPromptWithConfig(cfg, memorySection); err == nil && strings.TrimSpace(prompt) != "" {
-		state.SystemPrompt = prompt
+		state.SystemPrompt = appendHarnessSystemPrompt(prompt, cfg.HarnessMode)
 		return
 	}
-	state.SystemPrompt = BuildSystemPrompt(cfg.CWD)
+	state.SystemPrompt = appendHarnessSystemPrompt(BuildSystemPrompt(cfg.CWD), cfg.HarnessMode)
 }
 
 func StripTransientContextMessages(messages []map[string]any) []map[string]any {

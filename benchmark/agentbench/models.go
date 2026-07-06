@@ -125,26 +125,55 @@ type TopFailingCase struct {
 	Duration  float64 `json:"duration_seconds"`
 }
 
+type HarnessArtifactCheck struct {
+	Path      string `json:"path"`
+	Concrete  bool   `json:"concrete"`
+	Exists    bool   `json:"exists"`
+	SizeBytes *int64 `json:"size_bytes,omitempty"`
+}
+
+type HarnessRepairDiagnostic struct {
+	Triggered           bool     `json:"triggered"`
+	ExitStatus          *int     `json:"exit_status,omitempty"`
+	MissingBeforeRepair []string `json:"missing_before_repair,omitempty"`
+}
+
+type HarnessDiagnostic struct {
+	TaskID                   string                  `json:"task_id,omitempty"`
+	Path                     string                  `json:"path"`
+	InstructionPath          string                  `json:"instruction_path,omitempty"`
+	AgentExitStatus          *int                    `json:"agent_exit_status,omitempty"`
+	FinalAgentExitStatus     *int                    `json:"final_agent_exit_status,omitempty"`
+	ExplicitArtifactChecks   []HarnessArtifactCheck  `json:"explicit_artifact_checks,omitempty"`
+	ExplicitMissingArtifacts []string                `json:"explicit_missing_artifacts,omitempty"`
+	PostFlightRepair         HarnessRepairDiagnostic `json:"post_flight_repair,omitempty"`
+	ProcessSnapshotPath      string                  `json:"process_snapshot_path,omitempty"`
+	HighCPUProcesses         []string                `json:"high_cpu_processes,omitempty"`
+	FailureCategory          string                  `json:"failure_category,omitempty"`
+	Raw                      map[string]any          `json:"raw,omitempty"`
+}
+
 type Report struct {
-	Suite                string         `json:"suite"`
-	GeneratedAt          string         `json:"generated_at"`
-	DebugRun             bool           `json:"debug_run"`
-	RootDir              string         `json:"root_dir"`
-	OutputDir            string         `json:"output_dir"`
-	WorkDir              string         `json:"work_dir"`
-	BenchmarkDir         string         `json:"benchmark_dir,omitempty"`
-	Model                string         `json:"model,omitempty"`
-	Summary              SuiteSummary   `json:"summary"`
-	Results              []CaseResult   `json:"results"`
-	PredictionsPath      string         `json:"predictions_path,omitempty"`
-	HarnessOutputPath    string         `json:"harness_output_path,omitempty"`
-	HarnessCommand       string         `json:"harness_command,omitempty"`
-	HarnessExitCode      *int           `json:"harness_exit_code,omitempty"`
-	HarnessParsedStats   map[string]any `json:"harness_parsed_stats,omitempty"`
-	OfficialMetrics      map[string]any `json:"official_metrics,omitempty"`
-	UpstreamStatusBefore string         `json:"upstream_status_before,omitempty"`
-	UpstreamStatusAfter  string         `json:"upstream_status_after,omitempty"`
-	UpstreamDirtyAfter   bool           `json:"upstream_dirty_after"`
+	Suite                string              `json:"suite"`
+	GeneratedAt          string              `json:"generated_at"`
+	DebugRun             bool                `json:"debug_run"`
+	RootDir              string              `json:"root_dir"`
+	OutputDir            string              `json:"output_dir"`
+	WorkDir              string              `json:"work_dir"`
+	BenchmarkDir         string              `json:"benchmark_dir,omitempty"`
+	Model                string              `json:"model,omitempty"`
+	Summary              SuiteSummary        `json:"summary"`
+	Results              []CaseResult        `json:"results"`
+	PredictionsPath      string              `json:"predictions_path,omitempty"`
+	HarnessOutputPath    string              `json:"harness_output_path,omitempty"`
+	HarnessCommand       string              `json:"harness_command,omitempty"`
+	HarnessExitCode      *int                `json:"harness_exit_code,omitempty"`
+	HarnessParsedStats   map[string]any      `json:"harness_parsed_stats,omitempty"`
+	OfficialMetrics      map[string]any      `json:"official_metrics,omitempty"`
+	LuminaDiagnostics    []HarnessDiagnostic `json:"lumina_diagnostics,omitempty"`
+	UpstreamStatusBefore string              `json:"upstream_status_before,omitempty"`
+	UpstreamStatusAfter  string              `json:"upstream_status_after,omitempty"`
+	UpstreamDirtyAfter   bool                `json:"upstream_dirty_after"`
 }
 
 type AgentRunner interface {

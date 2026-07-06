@@ -74,8 +74,11 @@ func RunOfficialSuite(ctx context.Context, options RunnerOptions) (Report, error
 	result := runOfficialHarness(ctx, options, start)
 	after := gitStatusShort(ctx, options.BenchmarkDir)
 	exitCode := result.ExitCode
-	metrics := parseOfficialHarnessMetrics(result.Stdout + "\n" + result.Stderr)
+	harnessOutput := result.Stdout + "\n" + result.Stderr
+	metrics := parseOfficialHarnessMetrics(harnessOutput)
 	summary := summaryFromOfficialHarness(exitCode, metrics)
+	diagnostics := collectOfficialHarnessDiagnostics(options, harnessOutput)
+	mergeDiagnosticFailures(&summary, diagnostics)
 	options.Config = config.ReloadDynamicConfig(options.Config)
 	report := Report{
 		Suite:                options.Suite,
@@ -93,6 +96,7 @@ func RunOfficialSuite(ctx context.Context, options RunnerOptions) (Report, error
 		HarnessExitCode:      &exitCode,
 		HarnessParsedStats:   metrics,
 		OfficialMetrics:      metrics,
+		LuminaDiagnostics:    diagnostics,
 		UpstreamStatusBefore: before,
 		UpstreamStatusAfter:  after,
 		UpstreamDirtyAfter:   strings.TrimSpace(after) != "",
@@ -184,6 +188,9 @@ func officialHarnessEnv(base []string, options RunnerOptions) []string {
 		"LUMINA_API_TYPE="+options.Config.APIType,
 		"LUMINA_MAX_PARENT_TURNS="+strconv.Itoa(options.Config.MaxParentTurns),
 	)
+	if options.Suite == SuiteTerminalBench {
+		env = append(env, "LUMINA_HARNESS_MODE=terminal-bench")
+	}
 	if repoRoot != "" {
 		env = append(env, prependPathEnv(base, "PYTHONPATH", repoRoot))
 		env = append(env, "LUMINA_TBENCH_AGENT_IMPORT_PATH=benchmark.agentbench.terminal_adapter.lumina_terminal_agent:LuminaTerminalAgent")

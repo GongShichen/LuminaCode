@@ -137,6 +137,21 @@ func RenderMarkdown(report Report) string {
 			fmt.Fprintf(&b, "- `%s`: %d\n", key, report.Summary.FailureCategories[key])
 		}
 	}
+	if len(report.LuminaDiagnostics) > 0 {
+		fmt.Fprintf(&b, "\n## Lumina Diagnostics\n\n")
+		fmt.Fprintf(&b, "| Task | Agent exit | Repair | Missing artifacts | Failure category | Diagnostics |\n")
+		fmt.Fprintf(&b, "| --- | ---: | --- | --- | --- | --- |\n")
+		for _, diagnostic := range report.LuminaDiagnostics {
+			fmt.Fprintf(&b, "| `%s` | %s | %s | %s | `%s` | `%s` |\n",
+				emptyDash(diagnostic.TaskID),
+				fmtIntPointer(diagnostic.FinalAgentExitStatus, diagnostic.AgentExitStatus),
+				fmtRepairDiagnostic(diagnostic.PostFlightRepair),
+				emptyDash(strings.Join(diagnostic.ExplicitMissingArtifacts, "<br>")),
+				emptyDash(diagnostic.FailureCategory),
+				diagnostic.Path,
+			)
+		}
+	}
 	if report.PredictionsPath != "" {
 		fmt.Fprintf(&b, "\n## SWE-bench\n\n")
 		fmt.Fprintf(&b, "- Predictions: `%s`\n", report.PredictionsPath)
@@ -220,4 +235,24 @@ func emptyDash(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func fmtIntPointer(primary *int, fallback *int) string {
+	if primary != nil {
+		return fmt.Sprintf("%d", *primary)
+	}
+	if fallback != nil {
+		return fmt.Sprintf("%d", *fallback)
+	}
+	return "-"
+}
+
+func fmtRepairDiagnostic(repair HarnessRepairDiagnostic) string {
+	if !repair.Triggered {
+		return "-"
+	}
+	if repair.ExitStatus == nil {
+		return "triggered"
+	}
+	return fmt.Sprintf("triggered (%d)", *repair.ExitStatus)
 }

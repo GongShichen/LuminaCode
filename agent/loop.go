@@ -1247,7 +1247,7 @@ func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *Agen
 		memorySection = agentContext.BuildMemorySection(&e.Config)
 	}
 	if prompt, err := agentContext.BuildSystemPromptWithConfig(e.Config, memorySection); err == nil && strings.TrimSpace(prompt) != "" {
-		state.SystemPrompt = prompt
+		state.SystemPrompt = appendHarnessSystemPrompt(prompt, e.Config.HarnessMode)
 	}
 }
 

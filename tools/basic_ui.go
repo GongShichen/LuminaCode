@@ -165,6 +165,7 @@ func BackfillBashInput(input BashInput) BashInput {
 	return BashInput{
 		Command:                   input.Command,
 		Timeout:                   input.Timeout,
+		TimeoutSeconds:            input.TimeoutSeconds,
 		Description:               description,
 		RunInBackground:           input.RunInBackground,
 		DangerouslyDisableSandbox: input.DangerouslyDisableSandbox,

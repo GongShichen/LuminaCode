@@ -32,8 +32,12 @@ func TestBashInputSchemaDefaultsMatchPython(t *testing.T) {
 	timeout := properties["timeout"].(map[string]any)
 	timeoutDefault, hasTimeoutDefault := timeout["default"]
 	if timeout["oneOf"] != nil || timeout["anyOf"] == nil || !hasTimeoutDefault || timeoutDefault != nil ||
-		timeout["description"] != "Optional timeout in milliseconds" {
+		!strings.Contains(timeout["description"].(string), "Optional timeout in milliseconds") {
 		t.Fatalf("timeout schema should match Python nullable/default shape, got %#v", timeout)
+	}
+	timeoutSeconds := properties["timeout_seconds"].(map[string]any)
+	if !strings.Contains(timeoutSeconds["description"].(string), "Optional timeout in seconds") {
+		t.Fatalf("timeout_seconds schema mismatch: %#v", timeoutSeconds)
 	}
 
 	description := properties["description"].(map[string]any)

@@ -52,6 +52,8 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	}
 	t.Chdir(dir)
 	t.Setenv("HOME", home)
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	t.Setenv("LUMINA_HOME", "")
 	t.Setenv("LUMINA_API_MODEL", "env-model")
 	t.Setenv("LUMINA_API_TYPE", "openai-compatible")
 	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")

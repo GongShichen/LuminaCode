@@ -60,7 +60,8 @@ type Config struct {
 	ProjectDocFilenames []string
 	ProjectDocMaxBytes  int
 
-	UIBackend string
+	UIBackend   string
+	HarnessMode string
 
 	WorktreeBaseRef string
 	WorktreeDir     string
@@ -129,7 +130,8 @@ func NewConfigForCWD(cwd string) Config {
 		ProjectDocFilenames:        []string{"LUMINA.md", "AGENTS.md"},
 		ProjectDocMaxBytes:         64 * 1024,
 
-		UIBackend: "prompt_toolkit_fullscreen",
+		UIBackend:   "prompt_toolkit_fullscreen",
+		HarnessMode: "",
 
 		WorktreeBaseRef: "HEAD",
 		WorktreeDir:     ".Lumina/worktrees",
@@ -138,6 +140,7 @@ func NewConfigForCWD(cwd string) Config {
 	}
 	applyLuminaDefaults(&cfg, UserDefaultsPath(homeDir), cwd, resourceDir)
 	applyEnvOverrides(&cfg)
+	ApplyHarnessDefaults(&cfg)
 	return cfg
 }
 
@@ -175,6 +178,10 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
 	updated.ProjectDocFilenames = fresh.ProjectDocFilenames
 	updated.ProjectDocMaxBytes = fresh.ProjectDocMaxBytes
+	if !isPinned(current, "harness_mode") {
+		updated.HarnessMode = fresh.HarnessMode
+	}
+	ApplyHarnessDefaults(&updated)
 	return updated
 }
 
@@ -214,6 +221,20 @@ func (c Config) CompressionTriggerTokens() int {
 		return 0
 	}
 	return int(math.Floor(float64(limit) * c.CompressionThreshold()))
+}
+
+func IsTerminalBenchHarnessMode(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "terminal-bench") ||
+		strings.EqualFold(strings.TrimSpace(mode), "terminal_bench")
+}
+
+func ApplyHarnessDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if IsTerminalBenchHarnessMode(cfg.HarnessMode) && cfg.ShellTimeoutSeconds == 30.0 {
+		cfg.ShellTimeoutSeconds = 120.0
+	}
 }
 
 func (c Config) ProjectRootMarkersOrDefault() []string {
@@ -287,6 +308,7 @@ type luminaDefaults struct {
 	ProjectDocFilenames                []string `json:"project_doc_filenames"`
 	ProjectDocMaxBytes                 *int     `json:"project_doc_max_bytes"`
 	UIBackend                          *string  `json:"ui_backend"`
+	HarnessMode                        *string  `json:"harness_mode"`
 	WorktreeBaseRef                    *string  `json:"worktree_base_ref"`
 	WorktreeDir                        *string  `json:"worktree_dir"`
 }
@@ -405,6 +427,9 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.UIBackend != nil {
 		cfg.UIBackend = *defaults.UIBackend
+	}
+	if defaults.HarnessMode != nil {
+		cfg.HarnessMode = strings.TrimSpace(*defaults.HarnessMode)
 	}
 	if defaults.WorktreeBaseRef != nil {
 		cfg.WorktreeBaseRef = *defaults.WorktreeBaseRef
@@ -590,6 +615,7 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.PromptCacheTTLSeconds = envFloat("LUMINA_PROMPT_CACHE_TTL_SECONDS", cfg.PromptCacheTTLSeconds)
 	cfg.AnthropicCacheEditsEnabled = envBool("LUMINA_ANTHROPIC_CACHE_EDITS", cfg.AnthropicCacheEditsEnabled)
 	cfg.MaxParentTurns = envInt("LUMINA_MAX_PARENT_TURNS", cfg.MaxParentTurns)
+	cfg.HarnessMode = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_HARNESS_MODE")), cfg.HarnessMode)
 	if inputPrice := envOptionalFloat("LUMINA_INPUT_PRICE_PER_1K"); inputPrice != nil {
 		cfg.APIInputPricePer1K = inputPrice
 	}

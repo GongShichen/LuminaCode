@@ -51,6 +51,7 @@ func run(args []string) error {
 	verbose := flags.Bool("verbose", false, "Enable debug output.")
 	verboseShort := flags.Bool("v", false, "Enable debug output.")
 	bare := flags.Bool("bare", false, "Disable auto-memory and other persistent features.")
+	harnessMode := flags.String("harness-mode", "", "Benchmark harness mode. Supported: terminal-bench.")
 	listFlag := flags.Bool("list", false, "List saved session files and exit.")
 	resume := flags.String("resume", "", "Resume a previous session by ID.")
 
@@ -97,6 +98,11 @@ func run(args []string) error {
 		cfg.AutoMemoryEnabled = false
 		cfg.AutoMemoryDirectory = nil
 	}
+	if *harnessMode != "" {
+		cfg.HarnessMode = strings.TrimSpace(*harnessMode)
+		config.PinFields(&cfg, "harness_mode")
+	}
+	config.ApplyHarnessDefaults(&cfg)
 	if !memory.IsAutoMemoryEnabled(cfg.AutoMemoryEnabled, *bare, false) {
 		cfg.AutoMemoryEnabled = false
 		cfg.AutoMemoryDirectory = nil

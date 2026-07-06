@@ -731,7 +731,8 @@ func (t *GlobMatchTool) Execute(_ context.Context, execCtx ExecutionContext, inp
 
 type BashInput struct {
 	Command                   string `json:"command" jsonschema_description:"The shell command to execute"`
-	Timeout                   *int   `json:"timeout,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in milliseconds"`
+	Timeout                   *int   `json:"timeout,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in milliseconds. Numeric strings are accepted by the runtime as seconds for benchmark compatibility. Maximum 120 seconds."`
+	TimeoutSeconds            any    `json:"timeout_seconds,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in seconds. Maximum 120 seconds."`
 	Description               string `json:"description,omitempty" jsonschema:"default=" jsonschema_description:"Brief activity description for UI display"`
 	RunInBackground           bool   `json:"run_in_background,omitempty" jsonschema:"default=false" jsonschema_description:"If True, execute asynchronously and return immediately"`
 	DangerouslyDisableSandbox bool   `json:"dangerouslyDisableSandbox,omitempty" jsonschema:"default=false" jsonschema_description:"If True, skip sandbox isolation (requires policy approval)"`
@@ -761,6 +762,21 @@ func NewBashTool() *BashTool {
 	}}, sandboxManager: bashpkg.NewSandboxManager()}
 }
 
+func (t *BashTool) DecodeInput(raw map[string]any) (any, error) {
+	normalized := copyAnyMap(raw)
+	if value, ok := normalized["timeout"]; ok {
+		if text, isString := value.(string); isString {
+			seconds, errMsg := parseBashTimeoutString(text, true)
+			if errMsg != "" {
+				return nil, fmt.Errorf("%s", errMsg)
+			}
+			millis := int(seconds * 1000)
+			normalized["timeout"] = millis
+		}
+	}
+	return t.BaseTool.DecodeInput(normalized)
+}
+
 func (t *BashTool) IsReadOnly(input any) bool {
 	in := deref[BashInput](input)
 	return bashpkg.ClassifyCommand(in.Command).CommandClass == bashpkg.CommandClassSafe
@@ -778,12 +794,13 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 	if cwd == "" {
 		cwd = config.GetConfig().CWD
 	}
-	timeoutSeconds := 30.0
+	var timeoutValue any
 	if in.Timeout != nil {
-		timeoutSeconds = float64(*in.Timeout) / 1000.0
+		timeoutValue = in.Timeout
 	}
-	if timeoutSeconds > 120 {
-		timeoutSeconds = 120
+	timeoutSeconds, timeoutErr := parseBashTimeoutSeconds(timeoutValue, in.TimeoutSeconds, config.GetConfig().ShellTimeoutSeconds)
+	if timeoutErr != "" {
+		return "<tool_use_error>\nInvalid timeout: " + timeoutErr + "\nUse timeout_seconds for seconds, or timeout as milliseconds/seconds string. Maximum 120 seconds.\n</tool_use_error>", nil
 	}
 	timeout := time.Duration(timeoutSeconds * float64(time.Second))
 
@@ -1566,6 +1583,119 @@ func truncateBashOutput(output string) string {
 	end := string(bytes.ToValidUTF8(data[len(data)-half:], []byte("\ufffd")))
 	removed := len(data) - maxOutputBytes
 	return fmt.Sprintf("%s\n\n... [OUTPUT TRUNCATED: %d bytes removed] ...\n\n%s", start, removed, end)
+}
+
+func ParseBashTimeoutSecondsForTest(timeout any, timeoutSeconds any, defaultSeconds float64) (float64, string) {
+	return parseBashTimeoutSeconds(timeout, timeoutSeconds, defaultSeconds)
+}
+
+func parseBashTimeoutSeconds(timeout any, timeoutSeconds any, defaultSeconds float64) (float64, string) {
+	if defaultSeconds <= 0 {
+		defaultSeconds = 30.0
+	}
+	seconds := defaultSeconds
+	var errMsg string
+	if timeoutSeconds != nil {
+		seconds, errMsg = parseBashTimeoutValue(timeoutSeconds, false)
+	} else if timeout != nil {
+		seconds, errMsg = parseBashTimeoutValue(timeout, true)
+	}
+	if errMsg != "" {
+		return 0, errMsg
+	}
+	if seconds > 120 {
+		seconds = 120
+	}
+	return seconds, ""
+}
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func parseBashTimeoutValue(value any, legacyTimeoutField bool) (float64, string) {
+	switch v := value.(type) {
+	case nil:
+		return 0, ""
+	case *int:
+		if v == nil {
+			return 0, ""
+		}
+		return numericBashTimeout(float64(*v), legacyTimeoutField), validatePositiveTimeout(float64(*v))
+	case int:
+		return numericBashTimeout(float64(v), legacyTimeoutField), validatePositiveTimeout(float64(v))
+	case int64:
+		return numericBashTimeout(float64(v), legacyTimeoutField), validatePositiveTimeout(float64(v))
+	case float64:
+		return numericBashTimeout(v, legacyTimeoutField), validatePositiveTimeout(v)
+	case float32:
+		f := float64(v)
+		return numericBashTimeout(f, legacyTimeoutField), validatePositiveTimeout(f)
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			return 0, "numeric timeout could not be parsed"
+		}
+		return numericBashTimeout(f, legacyTimeoutField), validatePositiveTimeout(f)
+	case string:
+		return parseBashTimeoutString(v, legacyTimeoutField)
+	default:
+		return 0, fmt.Sprintf("timeout must be numeric or a numeric string, got %T", value)
+	}
+}
+
+func numericBashTimeout(value float64, legacyTimeoutField bool) float64 {
+	if legacyTimeoutField {
+		return value / 1000.0
+	}
+	return value
+}
+
+func validatePositiveTimeout(value float64) string {
+	if value < 0 {
+		return "timeout must be non-negative"
+	}
+	return ""
+}
+
+func parseBashTimeoutString(raw string, legacyTimeoutField bool) (float64, string) {
+	text := strings.ToLower(strings.TrimSpace(raw))
+	if text == "" {
+		return 0, "timeout string is empty"
+	}
+	unit := ""
+	switch {
+	case strings.HasSuffix(text, "ms"):
+		unit = "ms"
+		text = strings.TrimSpace(strings.TrimSuffix(text, "ms"))
+	case strings.HasSuffix(text, "s"):
+		unit = "s"
+		text = strings.TrimSpace(strings.TrimSuffix(text, "s"))
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, "timeout string must be numeric, optionally ending in s or ms"
+	}
+	if msg := validatePositiveTimeout(value); msg != "" {
+		return 0, msg
+	}
+	if unit == "ms" {
+		return value / 1000.0, ""
+	}
+	if unit == "s" {
+		return value, ""
+	}
+	if legacyTimeoutField {
+		return value, ""
+	}
+	return value, ""
 }
 
 func firstFindingDescriptions(findings []bashpkg.SecurityFinding, limit int) string {
