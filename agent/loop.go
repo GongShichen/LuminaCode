@@ -53,6 +53,13 @@ type ModelTurn struct {
 	PTLErrorMsg     string
 }
 
+func ShouldCommitFinalTextAfterStreamError(turn *ModelTurn) bool {
+	return turn != nil &&
+		turn.StreamHadError &&
+		len(turn.ToolCalls) == 0 &&
+		strings.TrimSpace(turn.FullText) != ""
+}
+
 type RuntimeCacheEditState struct {
 	Pending          []api.CacheEdit
 	Pinned           []api.CacheEdit
@@ -591,6 +598,10 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			e.pinConsumedCacheEdits()
 		}
 
+		if ShouldCommitFinalTextAfterStreamError(turn) {
+			turn.StreamHadError = false
+			consecutiveAPIErrors = 0
+		}
 		if !turn.StreamHadError {
 			consecutiveAPIErrors = 0
 		}
@@ -794,6 +805,9 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 		}
 		turn.StreamHadError = true
 		consecutiveAPIErrors++
+		if ShouldCommitFinalTextAfterStreamError(turn) {
+			return StreamAction{Break: true, ConsecutiveAPIErrors: consecutiveAPIErrors}
+		}
 		e.rememberAPIError(state, msg)
 		ev := NewStreamEvent("error", msg, metadata)
 		if consecutiveAPIErrors >= MaxAPIErrorRetries {
@@ -817,6 +831,9 @@ func (e *CoreExecutionEngine) executeAndCommitTools(ctx context.Context, state *
 		toolResults = append(toolResults, executor.GetCompletedResults()...)
 		if executor.HasPendingWork() {
 			executor.WaitForActivity(ctx)
+			if executor.HasPendingWork() && !executor.HasRunningWork() {
+				break
+			}
 		}
 	}
 	for _, event := range e.drainSkillPermissionEvents() {

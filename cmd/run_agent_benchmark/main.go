@@ -27,6 +27,7 @@ func main() {
 	keep := flag.Int("keep", 8, "How many timestamped report pairs to retain.")
 	harnessCmd := flag.String("harness-cmd", "", "Official benchmark harness command for terminal_bench, tau_bench, or swebench_verified.")
 	swebenchHarnessCmd := flag.String("swebench-harness-cmd", "", "Legacy SWE-bench harness command. Prefer -harness-cmd.")
+	preparedEnv := flag.Bool("prepared-env", false, "Require the official harness to reuse prebuilt benchmark environments. For terminal_bench this validates --no-rebuild and --no-cleanup.")
 	flag.Parse()
 
 	cfg := config.NewConfig()
@@ -62,6 +63,7 @@ func main() {
 		Config:             cfg,
 		HarnessCmd:         *harnessCmd,
 		SWEBenchHarnessCmd: *swebenchHarnessCmd,
+		PreparedEnv:        *preparedEnv,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent benchmark failed: %v\n", err)

@@ -129,7 +129,7 @@ func NewConfigForCWD(cwd string) Config {
 
 		CWD: cwd,
 	}
-	applyLuminaDefaults(&cfg, filepath.Join(resourceDir, "CONFIG", "defaults.json"), cwd, resourceDir)
+	applyLuminaDefaults(&cfg, UserDefaultsPath(homeDir), cwd, resourceDir)
 	applyEnvOverrides(&cfg)
 	return cfg
 }
@@ -465,6 +465,13 @@ func LuminaResourcePath(root string, elems ...string) string {
 	return filepath.Join(parts...)
 }
 
+func UserDefaultsPath(homeDir string) string {
+	if homeDir == "" {
+		homeDir, _ = os.UserHomeDir()
+	}
+	return filepath.Join(homeDir, ".lumina", "CONFIG", "defaults.json")
+}
+
 func hasDirectLuminaResources(root string) bool {
 	for _, rel := range []string{
 		filepath.Join("CONFIG", "defaults.json"),
@@ -525,6 +532,7 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.Yolo = envBool("YOLO_MODE", cfg.Yolo)
 	cfg.PromptCacheTTLSeconds = envFloat("LUMINA_PROMPT_CACHE_TTL_SECONDS", cfg.PromptCacheTTLSeconds)
 	cfg.AnthropicCacheEditsEnabled = envBool("LUMINA_ANTHROPIC_CACHE_EDITS", cfg.AnthropicCacheEditsEnabled)
+	cfg.MaxParentTurns = envInt("LUMINA_MAX_PARENT_TURNS", cfg.MaxParentTurns)
 	if inputPrice := envOptionalFloat("LUMINA_INPUT_PRICE_PER_1K"); inputPrice != nil {
 		cfg.APIInputPricePer1K = inputPrice
 	}
@@ -612,6 +620,18 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 
+	return parsed
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
 	return parsed
 }
 

@@ -56,9 +56,14 @@ func TestMainSingleShotResolvesMCPTrustLikePythonRuntime(t *testing.T) {
 		t.Fatalf("go run failed: %v\n%s", err, output)
 	}
 	text := string(output)
-	for _, want := range []string{"权限请求", "mcp-project-trust", "fake-mcp --stdio"} {
+	for _, forbidden := range []string{"\x1b[?1049h", "LuminaCode", "输入已锁定"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("single-shot CLI should run headless, but output contained %q:\n%s", forbidden, output)
+		}
+	}
+	for _, want := range []string{"Permission needed for mcp-project-trust", "ok"} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("single-shot CLI should prompt for MCP trust with fullscreen UI, missing %q output:\n%s", want, output)
+			t.Fatalf("single-shot CLI should use headless permission flow, missing %q output:\n%s", want, output)
 		}
 	}
 

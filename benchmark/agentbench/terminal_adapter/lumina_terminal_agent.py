@@ -32,6 +32,7 @@ class LuminaTerminalAgent(AbstractInstalledAgent):
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_MODEL",
+            "LUMINA_MAX_PARENT_TURNS",
             "HTTPS_PROXY",
             "HTTP_PROXY",
             "NO_PROXY",
@@ -57,7 +58,11 @@ class LuminaTerminalAgent(AbstractInstalledAgent):
             "cat > /tmp/lumina-task.txt <<'LUMINA_TASK_EOF'\n"
             f"{instruction}\n"
             "LUMINA_TASK_EOF\n"
-            "lumina --bare --yolo -p \"$(cat /tmp/lumina-task.txt)\""
+            "lumina_status=0\n"
+            "lumina --bare --yolo -p \"$(cat /tmp/lumina-task.txt)\" || lumina_status=$?\n"
+            "echo \"LUMINA_EXIT_STATUS=${lumina_status}\"\n"
+            "tmux wait -S done\n"
+            "exit \"${lumina_status}\""
         )
         # The heredoc preserves the raw instruction; escaped_instruction is kept in
         # the generated command's shell context for easier debugging if needed.

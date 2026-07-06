@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -164,13 +165,78 @@ func run(args []string) error {
 }
 
 func runPrompt(ctx context.Context, engine *agent.QueryEngine, prompt string, state *agent.AgentState) error {
-	backend := luminaui.NewRendererBackend(engine.Config.UIBackend, os.Stdin, os.Stdout, os.Stderr)
-	configureBackendForEngine(backend, engine)
-	uiRuntime := luminaui.NewUiRuntime(engine, backend)
-	uiRuntime.RunSubmitMessage(ctx, prompt, state, uuid.NewString()[:12])
-	uiRuntime.Shutdown()
-	engine.Shutdown()
-	return nil
+	defer engine.Shutdown()
+	if state == nil {
+		s := agent.NewAgentState()
+		state = &s
+	}
+	if engine.Config.Yolo && state.PermissionState != nil {
+		state.PermissionState.YoloMode = true
+	}
+	reader := bufio.NewReader(os.Stdin)
+	var firstErr error
+	for event := range engine.SubmitMessage(ctx, prompt, state, uuid.NewString()[:12]) {
+		switch event.Type {
+		case "text":
+			fmt.Fprint(os.Stdout, event.Content)
+		case "error":
+			if event.Content != "" {
+				fmt.Fprintln(os.Stderr, event.Content)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s", event.Content)
+				}
+			}
+		case "permission_needed":
+			resolveHeadlessPermission(engine, event, reader, os.Stderr)
+		}
+	}
+	return firstErr
+}
+
+func resolveHeadlessPermission(engine *agent.QueryEngine, event agent.StreamEvent, reader *bufio.Reader, out io.Writer) {
+	granted := engine.Config.Yolo
+	decision := agent.PermissionOnce
+	if !granted {
+		fmt.Fprintf(out, "Permission needed for %s. Allow once? [y/N] ", headlessPermissionName(event))
+		answer, _ := reader.ReadString('\n')
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		switch answer {
+		case "y", "yes", "once":
+			granted = true
+			decision = agent.PermissionOnce
+		case "a", "always":
+			granted = true
+			decision = agent.PermissionAlways
+		default:
+			granted = false
+			decision = agent.PermissionDeny
+		}
+	}
+	if _, ok := event.Metadata["mcp_trust_request"]; ok {
+		engine.ResolveMCPTrust(granted)
+		return
+	}
+	if _, ok := event.Metadata["skill_shell_request"]; ok {
+		engine.ResolveSkillPermission(granted)
+		return
+	}
+	if !granted {
+		decision = agent.PermissionDeny
+	}
+	engine.ResolvePermission(decision, event.Content)
+}
+
+func headlessPermissionName(event agent.StreamEvent) string {
+	if _, ok := event.Metadata["mcp_trust_request"]; ok {
+		return "mcp-project-trust"
+	}
+	if _, ok := event.Metadata["skill_shell_request"]; ok {
+		return "skill-shell"
+	}
+	if event.Content != "" {
+		return event.Content
+	}
+	return "tool"
 }
 
 func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentState, store *session.Store, sessionID string) error {

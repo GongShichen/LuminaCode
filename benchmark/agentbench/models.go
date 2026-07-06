@@ -166,5 +166,6 @@ type RunnerOptions struct {
 	AgentRunner        AgentRunner
 	HarnessCmd         string
 	SWEBenchHarnessCmd string
+	PreparedEnv        bool
 	Now                func() time.Time
 }

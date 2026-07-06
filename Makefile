@@ -69,7 +69,17 @@ install: build
 		exit 1; \
 	fi; \
 	mkdir -p "$(APP_ROOT)"; \
+	preserved_config=""; \
+	if [ -f "$(APP_ROOT)/CONFIG/defaults.json" ]; then \
+		preserved_config="$$(mktemp)"; \
+		cp "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
+	fi; \
 	cp -R ".Lumina/." "$(APP_ROOT)/"; \
+	if [ -n "$$preserved_config" ]; then \
+		mkdir -p "$(APP_ROOT)/CONFIG"; \
+		cp "$$preserved_config" "$(APP_ROOT)/CONFIG/defaults.json"; \
+		rm -f "$$preserved_config"; \
+	fi; \
 	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then \
 		path_line='export PATH="$$HOME/.local/bin:$$PATH"'; \
 		path_marker='$$HOME/.local/bin'; \
@@ -98,6 +108,9 @@ install: build
 	fi; \
 	echo "Installed $(APP_NAME) to $(INSTALL_PATH)"; \
 	echo "Installed resources to $(APP_ROOT)"; \
+	if [ -n "$$preserved_config" ]; then \
+		echo "Preserved existing $(APP_ROOT)/CONFIG/defaults.json"; \
+	fi; \
 	echo "Detected $$os_name with $$shell_name ($$shell_path)"; \
 	if [ "$$added_path" = "1" ]; then \
 		echo "Updated PATH in $$rc_file"; \

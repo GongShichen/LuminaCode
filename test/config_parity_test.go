@@ -11,7 +11,20 @@ import (
 
 func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
+	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(dir, ".Lumina", "CONFIG"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".Lumina", "CONFIG", "defaults.json"), []byte(`{
+  "api_key": "project-key",
+  "api_base_url": "https://project.example/v1",
+  "api_model": "project-model",
+  "api_max_tokens": 9999
+}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	defaults := `{
@@ -34,10 +47,11 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "ui_backend": "legacy_terminal",
   "worktree_dir": ".Lumina/worktrees"
 }`
-	if err := os.WriteFile(filepath.Join(dir, ".Lumina", "CONFIG", "defaults.json"), []byte(defaults), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(userConfigDir, "defaults.json"), []byte(defaults), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
+	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_API_MODEL", "env-model")
 	t.Setenv("LUMINA_API_TYPE", "openai-compatible")
 	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")
@@ -96,11 +110,11 @@ func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 	if cfg.CWD != dir {
 		t.Fatalf("CWD should remain the invocation directory, got %s", cfg.CWD)
 	}
-	if cfg.APIMaxTokens != 1000000 {
-		t.Fatalf("defaults.json should load from bundled resources outside cwd, max_tokens=%d", cfg.APIMaxTokens)
+	if cfg.APIMaxTokens != 16000 {
+		t.Fatalf("bundled defaults should not be read as config, max_tokens=%d", cfg.APIMaxTokens)
 	}
-	if cfg.APIBaseURL != "https://api.deepseek.com/anthropic" || cfg.APIModel != "deepseek-v4-pro[1m]" || cfg.APIType != "anthropic" {
-		t.Fatalf("bundled defaults should match DeepSeek Anthropic config, base=%q model=%q type=%q", cfg.APIBaseURL, cfg.APIModel, cfg.APIType)
+	if cfg.APIBaseURL != "" || cfg.APIModel != "" {
+		t.Fatalf("bundled defaults should not provide API config, base=%q model=%q type=%q", cfg.APIBaseURL, cfg.APIModel, cfg.APIType)
 	}
 	if cfg.BundledSkillsDir != filepath.Join(root, ".Lumina", "SKILLS") {
 		t.Fatalf("bundled skills should resolve from Lumina root, got %s", cfg.BundledSkillsDir)
@@ -117,14 +131,16 @@ func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 }
 
 func TestConfigDoesNotProvideBuiltInModelDefault(t *testing.T) {
+	home := t.TempDir()
 	resourceRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(resourceRoot, "CONFIG", "defaults.json"), []byte(`{"api_max_tokens": 1000}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(resourceRoot, "CONFIG", "defaults.json"), []byte(`{"api_model":"resource-model","api_max_tokens":1000}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
+	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
 	t.Setenv("LUMINA_API_MODEL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
@@ -133,10 +149,14 @@ func TestConfigDoesNotProvideBuiltInModelDefault(t *testing.T) {
 	if cfg.APIModel != "" {
 		t.Fatalf("model should only come from user config/env/flag, got %q", cfg.APIModel)
 	}
+	if cfg.APIMaxTokens != 16000 {
+		t.Fatalf("resource defaults should not be read as config, got max_tokens=%d", cfg.APIMaxTokens)
+	}
 }
 
 func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	resourceRoot := filepath.Join(dir, ".lumina")
 	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
 		t.Fatal(err)
@@ -161,11 +181,12 @@ func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
 	}
 
 	t.Chdir(t.TempDir())
+	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
 
 	cfg := config.NewConfig()
-	if cfg.APIMaxTokens != 4321 {
-		t.Fatalf("direct resource defaults were not applied: %#v", cfg)
+	if cfg.APIMaxTokens != 16000 {
+		t.Fatalf("direct resource defaults should not be applied as config: %#v", cfg)
 	}
 	if cfg.BundledSkillsDir != filepath.Join(resourceRoot, "SKILLS") {
 		t.Fatalf("direct bundled skills path mismatch: %s", cfg.BundledSkillsDir)
@@ -202,11 +223,12 @@ func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
 }
 
 func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(t *testing.T) {
-	resourceRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+	home := t.TempDir()
+	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defaultsPath := filepath.Join(resourceRoot, "CONFIG", "defaults.json")
+	defaultsPath := filepath.Join(userConfigDir, "defaults.json")
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-one",
   "api_base_url": "https://one.example",
@@ -219,7 +241,7 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
-	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_API_MODEL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
 	current := config.NewConfigForCWD(workDir)
@@ -252,11 +274,12 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 }
 
 func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
-	resourceRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(resourceRoot, "CONFIG"), 0o755); err != nil {
+	home := t.TempDir()
+	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defaultsPath := filepath.Join(resourceRoot, "CONFIG", "defaults.json")
+	defaultsPath := filepath.Join(userConfigDir, "defaults.json")
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-one",
   "api_base_url": "https://one.example",
@@ -266,7 +289,7 @@ func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
-	t.Setenv("LUMINA_RESOURCE_ROOT", resourceRoot)
+	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_API_MODEL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
 	previous := config.GetConfig()

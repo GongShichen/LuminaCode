@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const defaultLLMHTTPTimeout = 5 * time.Minute
+
 type CacheEdit struct {
 	ToolUseID string `json:"tool_use_id"`
 	Action    string `json:"action"`
@@ -214,7 +216,7 @@ func NewLLMClientBase(
 		MaxTokens:            maxTokens,
 		ThinkingBudgetTokens: thinkingBudgetTokens,
 		RetryConfig:          cfg,
-		HTTPClient:           http.DefaultClient,
+		HTTPClient:           &http.Client{Timeout: defaultLLMHTTPTimeout},
 	}, nil
 }
 

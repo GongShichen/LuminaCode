@@ -54,6 +54,9 @@ func RunOfficialSuite(ctx context.Context, options RunnerOptions) (Report, error
 	if strings.TrimSpace(options.HarnessCmd) == "" {
 		return Report{}, fmt.Errorf("%s requires -harness-cmd pointing to the official benchmark harness command", options.Suite)
 	}
+	if err := validatePreparedOfficialHarness(options); err != nil {
+		return Report{}, err
+	}
 	if options.BenchmarkDir == "" {
 		options.BenchmarkDir = DefaultBenchmarkDir(options.RootDir, options.Suite)
 	}
@@ -95,6 +98,22 @@ func RunOfficialSuite(ctx context.Context, options RunnerOptions) (Report, error
 		UpstreamDirtyAfter:   strings.TrimSpace(after) != "",
 	}
 	return report, nil
+}
+
+func validatePreparedOfficialHarness(options RunnerOptions) error {
+	if !options.PreparedEnv || options.Suite != SuiteTerminalBench {
+		return nil
+	}
+	missing := []string{}
+	for _, flag := range []string{"--no-rebuild", "--no-cleanup"} {
+		if !strings.Contains(options.HarnessCmd, flag) {
+			missing = append(missing, flag)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("terminal_bench -prepared-env requires harness command to include %s so prebuilt task images are reused and not deleted", strings.Join(missing, " and "))
+	}
+	return nil
 }
 
 type officialHarnessResult struct {
@@ -143,6 +162,12 @@ func runOfficialHarness(ctx context.Context, options RunnerOptions, now time.Tim
 func officialHarnessEnv(base []string, options RunnerOptions) []string {
 	env := append([]string{}, base...)
 	repoRoot := findRepoRootFromCWD()
+	env = append(env, prependPathListEnv(base, defaultHarnessPathPrefixes()))
+	if !envHasKey(base, "DOCKER_HOST") {
+		if dockerHost := defaultDockerHost(); dockerHost != "" {
+			env = append(env, "DOCKER_HOST="+dockerHost)
+		}
+	}
 	env = append(env,
 		"LUMINA_BENCHMARK_SUITE="+options.Suite,
 		"LUMINA_BENCHMARK_ROOT="+options.RootDir,
@@ -157,6 +182,7 @@ func officialHarnessEnv(base []string, options RunnerOptions) []string {
 		"LUMINA_API_BASE_URL="+options.Config.APIBaseURL,
 		"LUMINA_API_MODEL="+options.Config.APIModel,
 		"LUMINA_API_TYPE="+options.Config.APIType,
+		"LUMINA_MAX_PARENT_TURNS="+strconv.Itoa(options.Config.MaxParentTurns),
 	)
 	if repoRoot != "" {
 		env = append(env, prependPathEnv(base, "PYTHONPATH", repoRoot))
@@ -178,6 +204,75 @@ func officialHarnessEnv(base []string, options RunnerOptions) []string {
 		env = append(env, "LUMINA_AGENT_RUNNER="+runnerCmd)
 	}
 	return env
+}
+
+func envHasKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultDockerHost() string {
+	candidates := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".colima", "default", "docker.sock"),
+			filepath.Join(home, ".docker", "run", "docker.sock"),
+		)
+	}
+	candidates = append(candidates, "/var/run/docker.sock")
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return "unix://" + path
+		}
+	}
+	return ""
+}
+
+func defaultHarnessPathPrefixes() []string {
+	values := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		values = append(values, filepath.Join(home, ".local", "bin"))
+	}
+	values = append(values, "/opt/homebrew/bin", "/usr/local/bin")
+	return values
+}
+
+func prependPathListEnv(base []string, values []string) string {
+	current := ""
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "PATH=") {
+			current = strings.TrimPrefix(entry, "PATH=")
+			break
+		}
+	}
+	seen := map[string]struct{}{}
+	parts := []string{}
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		parts = append(parts, value)
+	}
+	for _, value := range filepath.SplitList(current) {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		parts = append(parts, value)
+	}
+	return "PATH=" + strings.Join(parts, string(os.PathListSeparator))
 }
 
 func defaultAgentRunnerCommand() string {

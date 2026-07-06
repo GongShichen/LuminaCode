@@ -228,6 +228,23 @@ func TestOfficialBenchmarkAdapterRunsHarnessWithoutMutatingUpstream(t *testing.T
 	}
 }
 
+func TestAgentBenchPreparedTerminalBenchRequiresNoRebuildAndNoCleanup(t *testing.T) {
+	_, err := agentbench.RunSuite(context.Background(), agentbench.RunnerOptions{
+		Suite:       agentbench.SuiteTerminalBench,
+		RootDir:     t.TempDir(),
+		HarnessCmd:  `printf '{"total":0,"resolved":0}'`,
+		PreparedEnv: true,
+		Config:      config.Config{APIModel: "fake-model"},
+	})
+	if err == nil {
+		t.Fatal("expected prepared terminal_bench run to reject harness command without --no-rebuild and --no-cleanup")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--no-rebuild") || !strings.Contains(msg, "--no-cleanup") {
+		t.Fatalf("prepared-env error should mention required flags, got: %v", err)
+	}
+}
+
 func runAgentBenchGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

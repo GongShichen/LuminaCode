@@ -236,6 +236,10 @@ func (e *StreamingToolExecutor) hasRunningWork() bool {
 	return false
 }
 
+func (e *StreamingToolExecutor) HasRunningWork() bool {
+	return e.hasRunningWork()
+}
+
 func (e *StreamingToolExecutor) DrainProgress() []map[string]any {
 	var events []map[string]any
 	for {

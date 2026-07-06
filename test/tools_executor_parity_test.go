@@ -245,6 +245,84 @@ func TestStreamingToolExecutorBreaksWhenCancelledWithQueuedTools(t *testing.T) {
 	}
 }
 
+func TestModelTurnCommitsFinalTextAfterTrailingStreamError(t *testing.T) {
+	if agent.ShouldCommitFinalTextAfterStreamError(&agent.ModelTurn{StreamHadError: true}) {
+		t.Fatal("empty response after stream error should remain an error")
+	}
+	if !agent.ShouldCommitFinalTextAfterStreamError(&agent.ModelTurn{
+		FullText:       "done",
+		StreamHadError: true,
+	}) {
+		t.Fatal("final text followed by a trailing stream error should be committed")
+	}
+	if agent.ShouldCommitFinalTextAfterStreamError(&agent.ModelTurn{
+		FullText:       "need tool",
+		StreamHadError: true,
+		ToolCalls: []coretools.ToolCall{{
+			ID:   "tool-1",
+			Name: "bash",
+		}},
+	}) {
+		t.Fatal("tool calls with a stream error should not be treated as a final answer")
+	}
+}
+
+func TestStreamingToolExecutorOuterDrainLoopBreaksWhenCancelledWithQueuedTools(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ranSafe := make(chan struct{}, 1)
+	registry := coretools.NewToolRegistry(
+		newBlockingFailTool(started, release),
+		newQueuedSafeTool(ranSafe),
+	)
+	cfg := config.NewConfig()
+	cfg.SessionDir = t.TempDir()
+	state := agent.NewAgentState()
+	executor := agent.NewStreamingToolExecutor(registry, cfg, &state, coretools.ExecutionContext{})
+
+	executor.AddTool(coretools.ToolCall{ID: "fail-1", Name: "blocking_fail", Input: map[string]any{}})
+	if !executor.TryStartQueued("fail-1") {
+		t.Fatal("expected non-safe tool to start after explicit permission")
+	}
+	<-started
+	if executor.AddTool(coretools.ToolCall{ID: "safe-1", Name: "queued_safe", Input: map[string]any{}}) {
+		t.Fatal("expected safe tool to queue while non-safe tool is running")
+	}
+
+	close(release)
+	done := make(chan []map[string]any, 1)
+	go func() {
+		var results []map[string]any
+		for executor.HasPendingWork() {
+			results = append(results, executor.GetCompletedResults()...)
+			if executor.HasPendingWork() {
+				executor.WaitForActivity(context.Background())
+				if executor.HasPendingWork() && !executor.HasRunningWork() {
+					break
+				}
+			}
+		}
+		results = append(results, executor.GetCompletedResults()...)
+		results = append(results, executor.GetRemainingResults(context.Background())...)
+		done <- results
+	}()
+
+	select {
+	case results := <-done:
+		if len(results) != 1 || results[0]["tool_use_id"] != "fail-1" {
+			t.Fatalf("expected only failed tool result, got %#v", results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("outer tool drain loop hung with cancelled executor and queued tools")
+	}
+
+	select {
+	case <-ranSafe:
+		t.Fatal("queued safe tool should not run after cancellation")
+	default:
+	}
+}
+
 func TestStreamingToolExecutorPreservesSiblingAbortResult(t *testing.T) {
 	started := make(chan struct{})
 	sawAbortEvent := make(chan bool, 1)
