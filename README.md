@@ -2,10 +2,11 @@
 
 [简体中文](README.zh-CN.md)
 
-LuminaCode is a Go implementation of a terminal-first coding agent. It works
-inside the current project directory, builds context from local files and
-project instructions, uses tools with permission checks, and keeps sessions
-resumable across long-running development work.
+LuminaCode is a terminal-first coding agent with a Go backend runtime and a
+TypeScript terminal frontend. It works inside the current project directory,
+builds context from local files and project instructions, uses tools with
+permission checks, and keeps sessions resumable across long-running development
+work.
 
 The goal is not only to chat with a model, but to give the model an agent
 runtime: project context, skills, tools, memory, MCP integrations, session
@@ -26,6 +27,8 @@ state, and safety boundaries.
   fingerprints under the project root.
 - Maintains session state, message history, tool results, and recovery data so
   sessions can be resumed.
+- Stores each session in its own session directory, including transcript,
+  state, task, skill-recovery, and session-memory data.
 - Tracks context-window usage and uses the configured context limit for local
   compression decisions.
 - Supports OpenAI-compatible and Anthropic-compatible streaming APIs.
@@ -33,6 +36,33 @@ state, and safety boundaries.
   bodies, for easier debugging.
 - Separates user-visible conversation from internal reasoning, tool calls, tool
   results, and other runtime records.
+- Supports sub-agents with explicit per-call timeouts and graceful timeout
+  finalization.
+- Provides headless execution and benchmark harness modes without requiring the
+  interactive frontend.
+
+## Architecture
+
+The installed command is split into two processes:
+
+- `lumina`: the TypeScript terminal frontend and default user entry point.
+- `lumina-backend`: the Go runtime that owns agent execution, tools, skills,
+  MCP, memory, sessions, and headless/benchmark modes.
+
+Interactive sessions communicate with the backend over a localhost WebSocket.
+The backend endpoint is written to:
+
+```text
+~/.lumina/run/backend.json
+```
+
+The backend only listens on `127.0.0.1` and WebSocket connections must carry the
+generated auth token. Multiple sessions can exist at the same time; each session
+has independent runtime state, and only one active submit is allowed within a
+single session.
+
+Single-shot prompts, session listing, and benchmark/headless paths are forwarded
+to `lumina-backend` and do not depend on the interactive frontend.
 
 ## Quick Start
 
@@ -53,6 +83,18 @@ Run a single prompt and exit:
 
 ```sh
 lumina -p "Summarize this repository"
+```
+
+List saved sessions:
+
+```sh
+lumina --list
+```
+
+Resume a saved session:
+
+```sh
+lumina --resume <session-id>
 ```
 
 By default, the working directory is the directory where `lumina` is started.
@@ -95,6 +137,15 @@ local accounting and compression thresholds. The local compression threshold is
 
 LuminaCode does not force a provider-side completion `max_tokens` parameter into
 API requests.
+
+The installed defaults file is:
+
+```text
+~/.lumina/CONFIG/defaults.json
+```
+
+LuminaCode reloads runtime configuration before each agent turn, so edits to
+this file can affect new requests without reinstalling.
 
 ## Project Instructions
 
@@ -170,6 +221,7 @@ Common installed resources:
 - `SYSTEM/system-prompt.md`
 - `SYSTEM/extraction_system.md`
 - `SKILLS/`
+- `frontend/`
 
 Project-local runtime data lives under:
 
@@ -183,16 +235,41 @@ Common project-local data:
 - `.Lumina/CONFIG/trusted_mcp.json`
 - `.Lumina/PROJECT_SKILLS/`
 
-Session history lives under:
+Session history lives under the configured `session_dir`. The installed default
+configuration controls this path through `~/.lumina/CONFIG/defaults.json`. Each
+session is stored in its own subdirectory named by session id:
 
 ```text
-~/.Lumina/sessions/
+{session_dir}/{session_id}/
 ```
+
+Common per-session files:
+
+- `transcript.jsonl`
+- `transcript.md`
+- `meta.json`
+- `state.json`
+- `tasks.json`
+- `skill-recovery.json`
+- `skill-recovery.commit.json`
+- `session.sqlite`
+
+Large background tool outputs are stored under a shared `tool-results/`
+directory inside `session_dir`.
 
 ## CLI Reference
 
 ```text
 lumina [flags]
+```
+
+`lumina` starts the TypeScript frontend for interactive sessions. The Go
+backend can also be called directly:
+
+```sh
+lumina-backend -p "Summarize this repository"
+lumina-backend --list
+lumina-backend daemon --host 127.0.0.1 --port 0
 ```
 
 Common flags:
@@ -210,7 +287,9 @@ Common flags:
 - `-bare`: disable auto-memory and other persistent features
 - `-verbose`, `-v`: enable debug output
 
-The fullscreen interface is the only supported interactive mode.
+The old Go interactive TUI has been removed. Interactive use goes through the
+TypeScript `lumina` frontend; headless use goes through `lumina` passthrough or
+`lumina-backend`.
 
 ## Installation
 
@@ -232,8 +311,9 @@ Uninstall:
 make uninstall
 ```
 
-`make uninstall` removes the installed binary and `~/.lumina` resources. It does
-not edit shell rc files and does not remove project-local `.Lumina` data.
+`make uninstall` removes the installed `lumina` and `lumina-backend` commands
+and the `~/.lumina` resource directory. It does not edit shell rc files and does
+not remove project-local `.Lumina` data.
 
 ## Development
 
@@ -241,12 +321,13 @@ Run tests:
 
 ```sh
 go test ./...
+npm --prefix frontend test
 ```
 
 Build:
 
 ```sh
-go build ./...
+make build
 ```
 
 Install locally:
@@ -260,13 +341,16 @@ make install
 - `agent/`: agent loop, state, permissions, memory injection, and tool execution
 - `agentContext/`: context compression and injection pipeline
 - `api/`: streaming LLM clients and provider protocol normalization
+- `backend/`: WebSocket daemon, session manager, and frontend IPC bridge
 - `cli/`: slash command classification and completion helpers
 - `config/`: configuration loading, environment overrides, and path resolution
+- `frontend/`: TypeScript terminal frontend
 - `mcp/`: MCP config, trust, and dynamic tool registration
 - `memory/`: auto-memory storage and recall
 - `security/`: command and path safety checks
-- `session/`: session persistence and recovery
+- `session/`: session persistence, migration, and recovery
+- `sessionmemory/`: per-session memory commit log and history tools
 - `skills/`: skill loading, prompt processing, discovery, and execution
 - `tools/`: built-in tools
-- `ui/`: interactive runtime frame model and terminal rendering
+- `ui/`: shared runtime frame model and legacy renderer tests
 - `test/`: parity and regression tests

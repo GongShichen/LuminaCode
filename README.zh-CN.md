@@ -1,6 +1,6 @@
 # LuminaCode
 
-LuminaCode 是一个用 Go 编写的终端编码 Agent。它在当前项目目录中运行，读取本地文件和项目说明，按权限策略调用工具，并把长时间开发任务所需的会话状态保存下来，方便后续恢复。
+LuminaCode 是一个终端优先的编码 Agent，由 Go 后端 runtime 和 TypeScript 终端前端组成。它在当前项目目录中运行，读取本地文件和项目说明，按权限策略调用工具，并把长时间开发任务所需的会话状态保存下来，方便后续恢复。
 
 LuminaCode 的重点不是“和模型聊天”，而是给模型提供一个真正的 Agent Runtime：项目上下文、skills、工具、记忆、MCP、会话状态和安全边界。
 
@@ -13,10 +13,30 @@ LuminaCode 的重点不是“和模型聊天”，而是给模型提供一个真
 - 调用文件和 Shell 工具，并在敏感操作前进行权限确认和安全检查。
 - 支持项目声明的 MCP 服务，并把受信任 MCP 服务的 fingerprint 保存在项目根目录。
 - 保存消息历史、工具结果、任务恢复信息和 skill 恢复信息，支持恢复历史会话。
+- 每个 session 使用独立目录保存 transcript、state、任务、skill recovery 和 session memory 数据。
 - 统计上下文窗口使用情况，并基于配置的上下文长度决定本地压缩阈值。
 - 支持 OpenAI-compatible 和 Anthropic-compatible 流式 API。
 - 透出供应商 API 错误的原始状态码和响应体，方便定位模型或供应商配置问题。
 - 将用户可见对话和内部 thinking、工具调用、工具结果等运行记录分离。
+- 支持 sub-agent，并允许主 Agent 为 sub-agent 指定超时时间；超时后 sub-agent 会基于已知内容返回结果，而不是直接丢失信息。
+- 支持 headless 执行和 benchmark harness 模式，不依赖交互前端。
+
+## 架构
+
+安装后会有两个命令：
+
+- `lumina`：TypeScript 终端前端，也是默认用户入口。
+- `lumina-backend`：Go runtime，负责 Agent 执行、工具、skills、MCP、记忆、session、headless 和 benchmark 模式。
+
+交互会话通过 localhost WebSocket 与后端通信。后端 endpoint 写入：
+
+```text
+~/.lumina/run/backend.json
+```
+
+后端只监听 `127.0.0.1`，WebSocket 连接必须携带自动生成的 auth token。后端可以同时维护多个 session；不同 session 的运行状态相互独立，同一个 session 同一时间只允许一个 active submit。
+
+一次性 prompt、session 列表、benchmark/headless 路径会转发到 `lumina-backend`，不依赖交互前端。
 
 ## 快速开始
 
@@ -37,6 +57,18 @@ lumina
 
 ```sh
 lumina -p "分析一下这个项目"
+```
+
+列出历史 session：
+
+```sh
+lumina --list
+```
+
+恢复历史 session：
+
+```sh
+lumina --resume <session-id>
 ```
 
 默认工作目录就是启动 `lumina` 时所在的目录。通常不需要传 `--cwd`。
@@ -74,6 +106,14 @@ lumina \
 `--max-tokens` 表示模型上下文窗口长度，用于本地上下文统计和压缩阈值计算。LuminaCode 会使用该值的 `80%` 作为本地压缩阈值。
 
 API 请求不会强制携带供应商侧的 completion `max_tokens` 参数。
+
+安装后的默认配置文件位于：
+
+```text
+~/.lumina/CONFIG/defaults.json
+```
+
+LuminaCode 会在每一轮 Agent 请求前重新加载 runtime 配置，因此修改该文件后，新的请求可以在不重新安装的情况下使用新配置。
 
 ## 项目说明文件
 
@@ -144,6 +184,7 @@ LuminaCode 会保存足够的运行状态来恢复历史会话，包括消息、
 - `SYSTEM/system-prompt.md`
 - `SYSTEM/extraction_system.md`
 - `SKILLS/`
+- `frontend/`
 
 项目运行数据位于项目根目录：
 
@@ -157,18 +198,37 @@ LuminaCode 会保存足够的运行状态来恢复历史会话，包括消息、
 - `.Lumina/CONFIG/trusted_mcp.json`
 - `.Lumina/PROJECT_SKILLS/`
 
-会话历史位于：
+会话历史位于配置项 `session_dir` 指定的位置。安装后的默认配置会通过 `~/.lumina/CONFIG/defaults.json` 控制该路径。每个 session 会保存在以 session id 命名的独立子目录中：
 
 ```text
-~/.Lumina/sessions/
+{session_dir}/{session_id}/
 ```
 
-注意大小写：当前实现中安装资源使用 `~/.lumina`，会话和用户 skills 使用 `~/.Lumina`。
+常见 session 文件：
+
+- `transcript.jsonl`
+- `transcript.md`
+- `meta.json`
+- `state.json`
+- `tasks.json`
+- `skill-recovery.json`
+- `skill-recovery.commit.json`
+- `session.sqlite`
+
+大型后台工具输出会保存在 `session_dir` 下共享的 `tool-results/` 目录中。
 
 ## CLI 参数
 
 ```text
 lumina [flags]
+```
+
+`lumina` 用于启动 TypeScript 交互前端。也可以直接调用 Go 后端：
+
+```sh
+lumina-backend -p "分析一下这个项目"
+lumina-backend --list
+lumina-backend daemon --host 127.0.0.1 --port 0
 ```
 
 常用参数：
@@ -186,7 +246,7 @@ lumina [flags]
 - `-bare`：禁用 auto-memory 等持久化能力。
 - `-verbose`, `-v`：开启调试输出。
 
-fullscreen 是唯一支持的交互模式。
+旧的 Go 交互 TUI 已经删除。交互模式通过 TypeScript `lumina` 前端运行；headless 模式通过 `lumina` passthrough 或 `lumina-backend` 运行。
 
 ## 安装与卸载
 
@@ -208,7 +268,7 @@ make doctor
 make uninstall
 ```
 
-`make uninstall` 会删除已安装的二进制和 `~/.lumina` 资源目录。它不会修改 shell rc 文件，也不会删除项目目录下的 `.Lumina` 数据。
+`make uninstall` 会删除已安装的 `lumina`、`lumina-backend` 命令和 `~/.lumina` 资源目录。它不会修改 shell rc 文件，也不会删除项目目录下的 `.Lumina` 数据。
 
 ## 开发
 
@@ -216,12 +276,13 @@ make uninstall
 
 ```sh
 go test ./...
+npm --prefix frontend test
 ```
 
 构建：
 
 ```sh
-go build ./...
+make build
 ```
 
 本地安装：
@@ -235,13 +296,16 @@ make install
 - `agent/`：Agent 主循环、状态、权限、记忆注入和工具执行。
 - `agentContext/`：上下文压缩和注入流程。
 - `api/`：LLM 流式客户端和供应商协议适配。
+- `backend/`：WebSocket daemon、session manager 和前端 IPC bridge。
 - `cli/`：slash 命令分类和补全辅助逻辑。
 - `config/`：配置加载、环境变量覆盖和路径解析。
+- `frontend/`：TypeScript 终端前端。
 - `mcp/`：MCP 配置、信任和动态工具注册。
 - `memory/`：自动记忆存储和召回。
 - `security/`：命令和路径安全检查。
-- `session/`：会话保存和恢复。
+- `session/`：会话保存、迁移和恢复。
+- `sessionmemory/`：per-session memory commit log 和历史查询工具。
 - `skills/`：skill 加载、解析、发现和执行。
 - `tools/`：内置工具。
-- `ui/`：交互运行时 frame 和终端渲染。
+- `ui/`：共享 runtime frame model 和旧 renderer 回归测试。
 - `test/`：回归测试和 parity 测试。
