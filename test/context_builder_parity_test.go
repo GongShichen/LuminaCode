@@ -139,6 +139,39 @@ func TestContextBuilderSystemPromptAndSubagentSections(t *testing.T) {
 	}
 }
 
+func TestInitialContextCanBeRebuiltFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(dir, "service")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "LUMINA.md"), []byte("Root rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "AGENTS.md"), []byte("Service rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.NewConfigForCWD(nested)
+	cfg.CWD = nested
+
+	initial, err := agentContext.BuildInitialContext(cfg, "## Persistent Memory\n\nMemory behavior.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := initial.Render()
+	if initial.CWD != nested || len(initial.ProjectDocs.Docs) != 2 {
+		t.Fatalf("unexpected initial context metadata: %#v", initial.ProjectDocs)
+	}
+	if !strings.Contains(rendered, "Root rule.") ||
+		!strings.Contains(rendered, "Service rule.") ||
+		!strings.Contains(rendered, "Memory behavior.") {
+		t.Fatalf("rebuilt initial context is missing expected sections: %q", rendered)
+	}
+}
+
 func TestBuildMemorySectionMatchesPythonTemplateWithLuminaRename(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.NewConfig()

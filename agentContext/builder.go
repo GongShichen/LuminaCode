@@ -122,6 +122,33 @@ type PromptSection struct {
 	Optional bool
 }
 
+type ProjectDoc struct {
+	Path      string
+	Dir       string
+	Filename  string
+	Content   string
+	Truncated bool
+}
+
+type ProjectDocDiscoveryResult struct {
+	Root         string
+	CWD          string
+	Docs         []ProjectDoc
+	FallbackPath string
+}
+
+type InitialContext struct {
+	CWD              string
+	Sections         []PromptSection
+	ProjectDocs      ProjectDocDiscoveryResult
+	MemorySection    string
+	SystemPromptPath string
+}
+
+func (ctx InitialContext) Render() string {
+	return AssemblePromptSections(ctx.Sections)
+}
+
 type PromptAttachmentBudget struct {
 	MaxChars int
 	MaxLines *int
@@ -272,54 +299,160 @@ func runGitCommand(cwd string, timeout time.Duration, args ...string) (string, b
 }
 
 func readProjectInstructionFile(directory string) (string, error) {
-	for _, filename := range projectInstructionFilenames {
+	doc, err := readProjectInstructionFileWithOptions(directory, projectInstructionFilenames, 0)
+	if err != nil {
+		return "", err
+	}
+	return doc.Content, nil
+}
+
+func readProjectInstructionFileWithOptions(directory string, filenames []string, maxBytes int) (ProjectDoc, error) {
+	if len(filenames) == 0 {
+		filenames = projectInstructionFilenames
+	}
+	for _, filename := range filenames {
 		instructionFilePath := filepath.Join(directory, filename)
 		info, err := os.Stat(instructionFilePath)
 		if err != nil || info.IsDir() {
 			continue
 		}
-		content, err := os.ReadFile(instructionFilePath)
+		content, truncated, err := readFileWithByteLimit(instructionFilePath, maxBytes)
 		if err != nil {
-			return "", err
+			return ProjectDoc{}, err
 		}
-		return strings.ToValidUTF8(string(content), "\uFFFD"), nil
+		return ProjectDoc{
+			Path:      instructionFilePath,
+			Dir:       directory,
+			Filename:  filename,
+			Content:   strings.ToValidUTF8(string(content), "\uFFFD"),
+			Truncated: truncated,
+		}, nil
 	}
-	return "", errors.New("project instruction file not found")
+	return ProjectDoc{}, errors.New("project instruction file not found")
+}
+
+func readFileWithByteLimit(path string, maxBytes int) ([]byte, bool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if maxBytes <= 0 || len(content) <= maxBytes {
+		return content, false, nil
+	}
+	return content[:maxBytes], true, nil
 }
 
 func LoadProjectInstructions(cwd string) (string, error) {
-	workDir, err := projectInstructionDirectory(cwd)
+	cfg := config.NewConfigForCWD(cwd)
+	return LoadProjectInstructionsWithConfig(cwd, cfg)
+}
+
+func LoadProjectInstructionsWithConfig(cwd string, cfg config.Config) (string, error) {
+	result, err := DiscoverProjectDocs(cwd, cfg)
 	if err != nil {
 		return "", err
 	}
-	content, readErr := readProjectInstructionFile(workDir)
-	if readErr == nil {
-		return content, nil
+	parts := make([]string, 0, len(result.Docs))
+	for _, doc := range result.Docs {
+		parts = append(parts, doc.Content)
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		content, homeErr := readProjectInstructionFile(filepath.Join(home, ".lumina"))
-		if homeErr == nil {
-			return content, nil
+	return strings.Join(parts, projectInstructionSeparator), nil
+}
+
+func DiscoverProjectDocs(cwd string, cfg config.Config) (ProjectDocDiscoveryResult, error) {
+	workDir, err := projectInstructionDirectory(cwd)
+	if err != nil {
+		return ProjectDocDiscoveryResult{}, err
+	}
+	result := ProjectDocDiscoveryResult{CWD: workDir}
+	root := findProjectRootByMarkers(workDir, cfg.ProjectRootMarkersOrDefault())
+	if root == "" {
+		root = workDir
+	}
+	result.Root = root
+
+	var docs []ProjectDoc
+	for _, dir := range dirsFromRootToCWD(root, workDir) {
+		doc, readErr := readProjectInstructionFileWithOptions(dir, cfg.ProjectDocFilenamesOrDefault(), cfg.ProjectDocMaxBytesOrDefault())
+		if readErr == nil {
+			docs = append(docs, doc)
 		}
 	}
-	return "", nil
+	if len(docs) > 0 {
+		result.Docs = docs
+		return result, nil
+	}
+
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		doc, homeErr := readProjectInstructionFileWithOptions(filepath.Join(home, ".lumina"), cfg.ProjectDocFilenamesOrDefault(), cfg.ProjectDocMaxBytesOrDefault())
+		if homeErr == nil {
+			result.Docs = []ProjectDoc{doc}
+			result.FallbackPath = doc.Path
+			return result, nil
+		}
+	}
+	return result, nil
 }
 
 func findLuminaProjectRoot(cwd string) (string, error) {
-	workDir, err := projectInstructionDirectory(cwd)
+	cfg := config.NewConfigForCWD(cwd)
+	result, err := DiscoverProjectDocs(cwd, cfg)
 	if err != nil {
 		return "", err
 	}
-	if _, err := readProjectInstructionFile(workDir); err == nil {
-		return workDir, nil
+	if result.FallbackPath != "" {
+		return filepath.Dir(result.FallbackPath), nil
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		homeDir := filepath.Join(home, ".lumina")
-		if _, err := readProjectInstructionFile(homeDir); err == nil {
-			return homeDir, nil
-		}
+	if len(result.Docs) > 0 {
+		return result.Root, nil
 	}
 	return "", errors.New("project instruction file not found")
+}
+
+func findProjectRootByMarkers(start string, markers []string) string {
+	current := start
+	for {
+		for _, marker := range markers {
+			marker = strings.TrimSpace(marker)
+			if marker == "" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
+				return current
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func dirsFromRootToCWD(root, cwd string) []string {
+	root = filepath.Clean(root)
+	cwd = filepath.Clean(cwd)
+	if root == cwd {
+		return []string{root}
+	}
+	var reversed []string
+	current := cwd
+	for {
+		reversed = append(reversed, current)
+		if current == root {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return []string{cwd}
+		}
+		current = parent
+	}
+	out := make([]string, 0, len(reversed))
+	for i := len(reversed) - 1; i >= 0; i-- {
+		out = append(out, reversed[i])
+	}
+	return out
 }
 
 func projectInstructionDirectory(cwd string) (string, error) {
@@ -458,9 +591,12 @@ func pythonSplitLines(text string) []string {
 
 func BuildEnvSection(cwd string) PromptSection {
 	env := GetEnvInfo()
-	displayCwd := filepath.ToSlash(env["cwd"])
+	displayCwd := cwd
+	if hook := currentPromptHooks().EnvInfo; hook != nil && env["cwd"] != "" {
+		displayCwd = env["cwd"]
+	}
 	if displayCwd == "" {
-		displayCwd = cwd
+		displayCwd = env["cwd"]
 	}
 	displayCwd = filepath.ToSlash(displayCwd)
 	content := fmt.Sprintf(
@@ -529,7 +665,12 @@ func BuildBudgetGitSection(cwd, role string) (PromptSection, error) {
 }
 
 func BuildBudgetProjectInstructionsSection(cwd, role string) (PromptSection, error) {
-	projectInstructions, err := LoadProjectInstructions(cwd)
+	cfg := config.NewConfigForCWD(cwd)
+	return BuildBudgetProjectInstructionsSectionWithConfig(cwd, role, cfg)
+}
+
+func BuildBudgetProjectInstructionsSectionWithConfig(cwd, role string, cfg config.Config) (PromptSection, error) {
+	projectInstructions, err := LoadProjectInstructionsWithConfig(cwd, cfg)
 	if err != nil {
 		return PromptSection{}, err
 	}
@@ -613,32 +754,58 @@ func BuildSubagentPromptSections(agentName, description, cwd string, maxTurns in
 }
 
 func BuildSystemPromptSection(cwd, memorySection string) ([]PromptSection, error) {
-	if cwd == "" {
-		newCwd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		cwd = newCwd
-	}
-	sections, err := loadSystemPromptTemplateSectionsForCWD(cwd)
+	cfg := config.NewConfigForCWD(cwd)
+	ctx, err := BuildInitialContext(cfg, memorySection)
 	if err != nil {
 		return nil, err
 	}
+	return ctx.Sections, nil
+}
+
+func BuildSystemPromptSectionWithConfig(cfg config.Config, memorySection string) ([]PromptSection, error) {
+	ctx, err := BuildInitialContext(cfg, memorySection)
+	if err != nil {
+		return nil, err
+	}
+	return ctx.Sections, nil
+}
+
+func BuildInitialContext(cfg config.Config, memorySection string) (InitialContext, error) {
+	cwd := cfg.CWD
+	if cwd == "" {
+		newCwd, err := os.Getwd()
+		if err != nil {
+			return InitialContext{}, err
+		}
+		cwd = newCwd
+		cfg.CWD = cwd
+	}
+	sections, err := loadSystemPromptTemplateSectionsForCWD(cwd)
+	if err != nil {
+		return InitialContext{}, err
+	}
+	projectDocs, projectErr := DiscoverProjectDocs(cwd, cfg)
 
 	sections = append(sections, BuildEnvSection(cwd))
 	gitSection, err := BuildBudgetGitSection(cwd, "main")
 	if err == nil {
 		sections = append(sections, gitSection)
 	}
-	projectSection, err := BuildBudgetProjectInstructionsSection(cwd, "main")
-	if err == nil {
+	projectSection, err := BuildBudgetProjectInstructionsSectionWithConfig(cwd, "main", cfg)
+	if err == nil && projectErr == nil {
 		sections = append(sections, projectSection)
 	}
 	memoryPromptSection, err := BuildMemoryBehaviorSection(memorySection)
 	if err == nil {
 		sections = append(sections, memoryPromptSection)
 	}
-	return sections, nil
+	return InitialContext{
+		CWD:              cwd,
+		Sections:         sections,
+		ProjectDocs:      projectDocs,
+		MemorySection:    memorySection,
+		SystemPromptPath: resolveTemplatePathForCWD(cwd),
+	}, nil
 }
 
 func AssemblePromptSections(sections []PromptSection) string {
@@ -658,6 +825,14 @@ func BuildSystemPrompt(cwd, memorySection string) (string, error) {
 		return "", err
 	}
 	return AssemblePromptSections(sections), nil
+}
+
+func BuildSystemPromptWithConfig(cfg config.Config, memorySection string) (string, error) {
+	initialContext, err := BuildInitialContext(cfg, memorySection)
+	if err != nil {
+		return "", err
+	}
+	return initialContext.Render(), nil
 }
 
 func BuildMemorySection(cfg *config.Config) string {

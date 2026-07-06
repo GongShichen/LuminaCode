@@ -56,6 +56,10 @@ type Config struct {
 	SystemPromptPath           string
 	MemoryExtractionPromptPath string
 
+	ProjectRootMarkers  []string
+	ProjectDocFilenames []string
+	ProjectDocMaxBytes  int
+
 	UIBackend string
 
 	WorktreeBaseRef string
@@ -121,6 +125,9 @@ func NewConfigForCWD(cwd string) Config {
 		BundledSkillsDir:           filepath.Join(resourceDir, "SKILLS"),
 		SystemPromptPath:           filepath.Join(resourceDir, "SYSTEM", "system-prompt.md"),
 		MemoryExtractionPromptPath: filepath.Join(resourceDir, "SYSTEM", "extraction_system.md"),
+		ProjectRootMarkers:         []string{".git"},
+		ProjectDocFilenames:        []string{"LUMINA.md", "AGENTS.md"},
+		ProjectDocMaxBytes:         64 * 1024,
 
 		UIBackend: "prompt_toolkit_fullscreen",
 
@@ -165,6 +172,9 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.APIOutputPricePer1K = fresh.APIOutputPricePer1K
 	updated.ExtractionModel = fresh.ExtractionModel
 	updated.MemoryRecallPrefetchTimeoutSeconds = fresh.MemoryRecallPrefetchTimeoutSeconds
+	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
+	updated.ProjectDocFilenames = fresh.ProjectDocFilenames
+	updated.ProjectDocMaxBytes = fresh.ProjectDocMaxBytes
 	return updated
 }
 
@@ -206,6 +216,41 @@ func (c Config) CompressionTriggerTokens() int {
 	return int(math.Floor(float64(limit) * c.CompressionThreshold()))
 }
 
+func (c Config) ProjectRootMarkersOrDefault() []string {
+	return nonEmptyStringsOrDefault(c.ProjectRootMarkers, []string{".git"})
+}
+
+func (c Config) ProjectDocFilenamesOrDefault() []string {
+	return nonEmptyStringsOrDefault(c.ProjectDocFilenames, []string{"LUMINA.md", "AGENTS.md"})
+}
+
+func (c Config) ProjectDocMaxBytesOrDefault() int {
+	if c.ProjectDocMaxBytes > 0 {
+		return c.ProjectDocMaxBytes
+	}
+	return 64 * 1024
+}
+
+func nonEmptyStringsOrDefault(values []string, fallback []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return append([]string(nil), fallback...)
+}
+
 type luminaDefaults struct {
 	APIKey                             *string  `json:"api_key"`
 	APIBaseURL                         *string  `json:"api_base_url"`
@@ -238,6 +283,9 @@ type luminaDefaults struct {
 	BundledSkillsDir                   *string  `json:"bundled_skills_dir"`
 	SystemPromptPath                   *string  `json:"system_prompt_path"`
 	MemoryExtractionPromptPath         *string  `json:"memory_extraction_prompt_path"`
+	ProjectRootMarkers                 []string `json:"project_root_markers"`
+	ProjectDocFilenames                []string `json:"project_doc_filenames"`
+	ProjectDocMaxBytes                 *int     `json:"project_doc_max_bytes"`
 	UIBackend                          *string  `json:"ui_backend"`
 	WorktreeBaseRef                    *string  `json:"worktree_base_ref"`
 	WorktreeDir                        *string  `json:"worktree_dir"`
@@ -345,6 +393,15 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.MemoryExtractionPromptPath != nil {
 		cfg.MemoryExtractionPromptPath = resolveResourcePath(resourceDir, *defaults.MemoryExtractionPromptPath)
+	}
+	if len(defaults.ProjectRootMarkers) > 0 {
+		cfg.ProjectRootMarkers = nonEmptyStringsOrDefault(defaults.ProjectRootMarkers, cfg.ProjectRootMarkers)
+	}
+	if len(defaults.ProjectDocFilenames) > 0 {
+		cfg.ProjectDocFilenames = nonEmptyStringsOrDefault(defaults.ProjectDocFilenames, cfg.ProjectDocFilenames)
+	}
+	if defaults.ProjectDocMaxBytes != nil && *defaults.ProjectDocMaxBytes > 0 {
+		cfg.ProjectDocMaxBytes = *defaults.ProjectDocMaxBytes
 	}
 	if defaults.UIBackend != nil {
 		cfg.UIBackend = *defaults.UIBackend

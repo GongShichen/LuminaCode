@@ -31,6 +31,25 @@ type largeReadTool struct {
 	coretools.BaseTool
 }
 
+func TestStripTransientContextMessagesRemovesSkillMemoryAndTaskContext(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "user", "content": "real user"},
+		{"role": "user", "content": "skill", "metadata": map[string]any{"source": "skill_listing"}},
+		memory.BuildMetaUserMessage("memory index", memory.MemoryIndexSource),
+		memory.BuildMetaUserMessage("memory recall", memory.MemoryRecallSource),
+		{"role": "user", "content": "task done", "metadata": map[string]any{"source": "task_notification"}},
+		{"role": "assistant", "content": "real assistant"},
+	}
+
+	got := agent.StripTransientContextMessages(messages)
+	if len(got) != 2 {
+		t.Fatalf("expected only real conversation messages, got %#v", got)
+	}
+	if got[0]["content"] != "real user" || got[1]["content"] != "real assistant" {
+		t.Fatalf("unexpected kept messages: %#v", got)
+	}
+}
+
 func newLargeReadTool() *largeReadTool {
 	return &largeReadTool{BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
 		Name:            "large_read",

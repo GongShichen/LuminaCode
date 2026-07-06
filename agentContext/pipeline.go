@@ -28,6 +28,12 @@ type CompressionStats struct {
 	CollapsedRegions     []CollapsedRegion `json:"collapsed_regions"`
 }
 
+type CompactionReplacementHistory struct {
+	UserRequests []string         `json:"user_requests"`
+	Summary      string           `json:"summary"`
+	Recent       []map[string]any `json:"recent"`
+}
+
 func DefaultCompressionStats() *CompressionStats {
 	return &CompressionStats{
 		LevelReached:         0,
@@ -301,9 +307,9 @@ func (p *ContextPipeline) autoCompact(
 
 	summaryPrompt := buildAutoCompactPrompt(messages)
 
-	compactSystem := "You are a conversation summarizer. Create a concise structured summary " +
-		"of the conversation below. Include: key decisions made, files modified, " +
-		"errors encountered, and the current task state. Keep it under 200 words."
+	compactSystem := "You are creating a handoff summary for a coding agent. " +
+		"Preserve the user's goals, constraints, decisions, files touched, tool findings, " +
+		"errors, and the current next step. Do not invent facts. Keep it concise."
 
 	msgs := []map[string]any{
 		{
@@ -344,7 +350,16 @@ func (p *ContextPipeline) autoCompact(
 }
 
 func buildAutoCompactPrompt(messages []map[string]any) string {
-	parts := []string{"Summarize this conversation:\n\n"}
+	parts := []string{
+		"Create a handoff summary for the next model invocation. The summary will replace old conversation history, while the system prompt and project instructions will be rebuilt separately before the next request.\n\n",
+		"Include:\n",
+		"- Current user goal and explicit constraints\n",
+		"- Important implementation decisions already made\n",
+		"- Files, commands, and tool results that matter\n",
+		"- Known failures or blockers\n",
+		"- Concrete next step\n\n",
+		"Conversation excerpts:\n\n",
+	}
 	for _, msg := range messages {
 		role := GetString(msg, "role", "system")
 		content := msg["content"]
@@ -452,26 +467,121 @@ func injectSummary(messages []map[string]any, summary string, keepRecent int) []
 	if summary == "" || len(messages) <= keepRecent*2 {
 		return messages
 	}
-	summaryMessage := map[string]any{
-		"role": "user",
-		"content": []map[string]any{
-			map[string]any{
-				"type": "text",
-				"text": fmt.Sprintf("[Conversation summary]\n%s", summary),
-			},
-		},
+	replacement := BuildCompactionReplacementHistory(messages, summary, keepRecent)
+	result := []map[string]any{
+		buildCompactionHandoffMessage(replacement),
+	}
+	result = append(result, replacement.Recent...)
+	return result
+}
+
+func BuildCompactionReplacementHistory(messages []map[string]any, summary string, keepRecent int) CompactionReplacementHistory {
+	if keepRecent < 0 {
+		keepRecent = 0
 	}
 	start := len(messages) - keepRecent*2
 	if start < 0 {
 		start = 0
 	}
-
-	result := []map[string]any{
-		messages[0],
-		summaryMessage,
+	return CompactionReplacementHistory{
+		UserRequests: collectRealUserRequests(messages[:start], 12),
+		Summary:      strings.TrimSpace(summary),
+		Recent:       append([]map[string]any(nil), messages[start:]...),
 	}
+}
 
-	result = append(result, messages[start:]...)
+func buildCompactionHandoffMessage(replacement CompactionReplacementHistory) map[string]any {
+	var parts []string
+	if len(replacement.UserRequests) > 0 {
+		parts = append(parts, "[Previous user requests]")
+		for _, request := range replacement.UserRequests {
+			parts = append(parts, "- "+request)
+		}
+		parts = append(parts, "")
+	}
+	parts = append(parts, "[Compaction handoff summary]")
+	parts = append(parts, replacement.Summary)
+	return map[string]any{
+		"role": "user",
+		"content": []map[string]any{
+			{
+				"type": "text",
+				"text": strings.TrimSpace(strings.Join(parts, "\n")),
+			},
+		},
+	}
+}
 
-	return result
+func collectRealUserRequests(messages []map[string]any, limit int) []string {
+	var requests []string
+	for _, message := range messages {
+		if GetString(message, "role", "") != "user" || isTransientContextMessage(message) || hasToolResultBlock(message) {
+			continue
+		}
+		text := strings.TrimSpace(textFromMessage(message))
+		if text == "" {
+			continue
+		}
+		requests = append(requests, TruncateRunes(oneLine(text), 500))
+	}
+	if limit > 0 && len(requests) > limit {
+		requests = requests[len(requests)-limit:]
+	}
+	return requests
+}
+
+func isTransientContextMessage(message map[string]any) bool {
+	if isMeta, _ := message["isMeta"].(bool); isMeta {
+		return true
+	}
+	metadata, _ := message["metadata"].(map[string]any)
+	if metadata["lumina_memory_context"] == true {
+		return true
+	}
+	switch source, _ := metadata["source"].(string); source {
+	case "skill_inline", "skill_listing", "skill_recovery", "memory_index", "memory_recall", "task_notification":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasToolResultBlock(message map[string]any) bool {
+	blocks, ok := contentBlocks(message["content"])
+	if !ok {
+		return false
+	}
+	for _, block := range blocks {
+		if GetString(block, "type", "") == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+func textFromMessage(message map[string]any) string {
+	content := message["content"]
+	switch c := content.(type) {
+	case string:
+		return c
+	default:
+		blocks, ok := contentBlocks(content)
+		if !ok {
+			return ""
+		}
+		var texts []string
+		for _, block := range blocks {
+			if GetString(block, "type", "") != "text" {
+				continue
+			}
+			if text, ok := GetString(block, "text", "").(string); ok && text != "" {
+				texts = append(texts, text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+}
+
+func oneLine(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }

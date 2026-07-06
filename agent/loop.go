@@ -1231,10 +1231,24 @@ func (e *CoreExecutionEngine) maybeCompressContext(ctx context.Context, state *A
 	}
 	if stats.AutoTriggered {
 		agentContext.RunPostCompactCleanUp(ctx, state, recentReadFilesForPostCompact(state, 5))
+		e.rebuildSystemPromptAfterHistoryReplace(state)
 		e.clearRuntimeCompressionStateAfterHistoryReplace(state)
 		return
 	}
 	e.l3Regions = append([]agentContext.CollapsedRegion(nil), stats.CollapsedRegions...)
+}
+
+func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *AgentState) {
+	if state == nil {
+		return
+	}
+	memorySection := ""
+	if e.Config.AutoMemoryEnabled && e.Config.AutoMemoryDirectory != nil && *e.Config.AutoMemoryDirectory != "" {
+		memorySection = agentContext.BuildMemorySection(&e.Config)
+	}
+	if prompt, err := agentContext.BuildSystemPromptWithConfig(e.Config, memorySection); err == nil && strings.TrimSpace(prompt) != "" {
+		state.SystemPrompt = prompt
+	}
 }
 
 func (e *CoreExecutionEngine) clearRuntimeCompressionStateAfterHistoryReplace(state *AgentState) {

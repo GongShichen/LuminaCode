@@ -8,6 +8,7 @@ import (
 
 	"LuminaCode/agentContext"
 	"LuminaCode/config"
+	"LuminaCode/memory"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
 
@@ -104,7 +105,7 @@ func (q *QueryEngine) Compact(state *AgentState) (AgentState, agentContext.Compr
 		empty := NewAgentState()
 		return empty, *agentContext.DefaultCompressionStats()
 	}
-	state.Messages = skills.StripSkillContextMessages(state.Messages, nil)
+	state.Messages = StripTransientContextMessages(state.Messages)
 	currentTokens := agentContext.TokenCountWithEstimation(state.Messages)
 	pipeline := agentContext.DefaultContextPipeline()
 	pipeline.Config = q.Config
@@ -151,7 +152,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				state.PermissionState.YoloMode = true
 			}
 		}
-		state.Messages = skills.StripSkillContextMessages(state.Messages, nil)
+		state.Messages = StripTransientContextMessages(state.Messages)
 		q.buildOrRefreshSystemPrompt(state)
 		normalizedPrompt := userPrompt
 		if strings.HasPrefix(userPrompt, "/") {
@@ -207,17 +208,35 @@ func (q *QueryEngine) buildOrRefreshSystemPrompt(state *AgentState) {
 	if state == nil {
 		return
 	}
-	cwd := skills.ResolveSkillContextCWD(q.Config.CWD, nil)
+	cfg := q.Config
+	cfg.CWD = skills.ResolveSkillContextCWD(q.Config.CWD, nil)
+	memorySection := ""
 	if q.Config.AutoMemoryEnabled && q.Config.AutoMemoryDirectory != nil && *q.Config.AutoMemoryDirectory != "" {
-		prompt, err := agentContext.BuildSystemPrompt(cwd, agentContext.BuildMemorySection(&q.Config))
-		if err == nil && strings.TrimSpace(prompt) != "" {
-			state.SystemPrompt = prompt
-			return
+		memorySection = agentContext.BuildMemorySection(&q.Config)
+	}
+	if prompt, err := agentContext.BuildSystemPromptWithConfig(cfg, memorySection); err == nil && strings.TrimSpace(prompt) != "" {
+		state.SystemPrompt = prompt
+		return
+	}
+	state.SystemPrompt = BuildSystemPrompt(cfg.CWD)
+}
+
+func StripTransientContextMessages(messages []map[string]any) []map[string]any {
+	messages = skills.StripSkillContextMessages(messages, nil)
+	messages = memory.StripMemoryContextMessages(messages, "")
+	return stripTaskNotificationMessages(messages)
+}
+
+func stripTaskNotificationMessages(messages []map[string]any) []map[string]any {
+	kept := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		metadata, _ := message["metadata"].(map[string]any)
+		if source, _ := metadata["source"].(string); source == "task_notification" {
+			continue
 		}
+		kept = append(kept, message)
 	}
-	if state.SystemPrompt == "" {
-		state.SystemPrompt = BuildSystemPrompt(cwd)
-	}
+	return kept
 }
 
 func (q *QueryEngine) parseSkillInvocation(userPrompt string) (*skills.SkillSpec, string) {

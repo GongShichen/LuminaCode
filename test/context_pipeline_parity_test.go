@@ -376,6 +376,31 @@ func TestContextPipelineAutoCompactClientCreationFailureIncrementsCircuitLikePyt
 	}
 }
 
+func TestCompactionReplacementHistoryKeepsRealUserRequestsOnly(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "user", "content": "first real request"},
+		{"role": "user", "content": "memory index", "isMeta": true, "metadata": map[string]any{"source": "memory_index", "lumina_memory_context": true}},
+		{"role": "assistant", "content": []map[string]any{{"type": "text", "text": "thinking done"}}},
+		{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "call-1", "content": "tool output"}}},
+		{"role": "user", "content": "second real request"},
+		{"role": "assistant", "content": "recent assistant"},
+		{"role": "user", "content": "recent user"},
+	}
+
+	replacement := agentContext.BuildCompactionReplacementHistory(messages, "handoff summary", 1)
+	if strings.Join(replacement.UserRequests, "|") != "first real request|second real request" {
+		t.Fatalf("unexpected user request summary: %#v", replacement.UserRequests)
+	}
+	if replacement.Summary != "handoff summary" {
+		t.Fatalf("unexpected summary: %q", replacement.Summary)
+	}
+	if len(replacement.Recent) != 2 ||
+		replacement.Recent[0]["content"] != "recent assistant" ||
+		replacement.Recent[1]["content"] != "recent user" {
+		t.Fatalf("unexpected recent history: %#v", replacement.Recent)
+	}
+}
+
 func TestContextPipelineAutocompactFailuresPersistOnAgentStateAcrossInstancesLikePython(t *testing.T) {
 	state := agent.NewAgentState()
 	messages := []map[string]any{{
