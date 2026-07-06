@@ -1,10 +1,14 @@
 APP_NAME ?= lumina
+BACKEND_NAME ?= lumina-backend
 GO ?= go
+NPM ?= npm
 BUILD_DIR ?= tmp
 INSTALL_DIR ?= $(shell os=$$(uname -s); if [ "$$os" = "Darwin" ] && [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then printf /opt/homebrew/bin; elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then printf /usr/local/bin; else printf '%s/.local/bin' "$$HOME"; fi)
 APP_ROOT ?= $(HOME)/.lumina
 BUILD_PATH := $(BUILD_DIR)/$(APP_NAME)
+BACKEND_BUILD_PATH := $(BUILD_DIR)/$(BACKEND_NAME)
 INSTALL_PATH := $(INSTALL_DIR)/$(APP_NAME)
+BACKEND_INSTALL_PATH := $(INSTALL_DIR)/$(BACKEND_NAME)
 
 .PHONY: help build install uninstall doctor clean
 
@@ -13,8 +17,8 @@ help:
 		'LuminaCode Makefile' \
 		'' \
 		'Targets:' \
-		'  make build      Build ./tmp/lumina' \
-		'  make install    Build lumina, install it into a PATH bin dir, and copy resources into ~/.lumina' \
+		'  make build      Build ./tmp/lumina and ./tmp/lumina-backend' \
+		'  make install    Install TS lumina frontend, Go lumina-backend, and resources into ~/.lumina' \
 		'  make doctor     Show detected OS, shell, rc file, and install path' \
 		'  make uninstall  Remove the installed lumina binary' \
 		'  make clean      Remove local build output' \
@@ -27,7 +31,28 @@ help:
 
 build:
 	@mkdir -p "$(BUILD_DIR)"
-	$(GO) build -o "$(BUILD_PATH)" .
+	$(GO) build -o "$(BACKEND_BUILD_PATH)" .
+	$(NPM) --prefix frontend install
+	$(NPM) --prefix frontend run build
+	@set -eu; \
+	repo_frontend="$(CURDIR)/frontend"; \
+	build_dir_abs="$(CURDIR)/$(BUILD_DIR)"; \
+	{ \
+		printf '%s\n' '#!/usr/bin/env sh'; \
+		printf '%s\n' 'set -eu'; \
+		printf '%s\n' 'script_dir="$$(CDPATH= cd -- "$$(dirname -- "$$0")" && pwd)"'; \
+		printf '%s\n' 'if [ -x "$$script_dir/$(BACKEND_NAME)" ]; then export LUMINA_BACKEND_BIN="$$script_dir/$(BACKEND_NAME)"; fi'; \
+		printf '%s\n' 'resource_root="$${LUMINA_RESOURCE_ROOT:-$$HOME/.lumina}"'; \
+		printf '%s\n' "if [ \"\$$script_dir\" = \"$$build_dir_abs\" ]; then"; \
+		printf '%s\n' '  frontend_root="$${LUMINA_FRONTEND_ROOT:-'"$$repo_frontend"'}"'; \
+		printf '%s\n' 'else'; \
+		printf '%s\n' '  frontend_root="$${LUMINA_FRONTEND_ROOT:-$$resource_root/frontend}"'; \
+		printf '%s\n' 'fi'; \
+		printf '%s\n' "if [ ! -f \"\$$frontend_root/dist/index.js\" ]; then frontend_root=\"$$repo_frontend\"; fi"; \
+		printf '%s\n' 'export NODE_PATH="$$frontend_root/node_modules$${NODE_PATH:+:$$NODE_PATH}"'; \
+		printf '%s\n' 'exec node "$$frontend_root/dist/index.js" "$$@"'; \
+	} > "$(BUILD_PATH)"; \
+	chmod 0755 "$(BUILD_PATH)"
 
 install: build
 	@set -eu; \
@@ -64,6 +89,7 @@ install: build
 	esac; \
 	mkdir -p "$(INSTALL_DIR)"; \
 	install -m 0755 "$(BUILD_PATH)" "$(INSTALL_PATH)"; \
+	install -m 0755 "$(BACKEND_BUILD_PATH)" "$(BACKEND_INSTALL_PATH)"; \
 	if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
 		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
 		exit 1; \
@@ -75,6 +101,9 @@ install: build
 		cp "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
 	fi; \
 	cp -R ".Lumina/." "$(APP_ROOT)/"; \
+	rm -rf "$(APP_ROOT)/frontend"; \
+	mkdir -p "$(APP_ROOT)/frontend"; \
+	cp -R "frontend/dist" "frontend/node_modules" "frontend/package.json" "$(APP_ROOT)/frontend/"; \
 	if [ -n "$$preserved_config" ]; then \
 		mkdir -p "$(APP_ROOT)/CONFIG"; \
 		cp "$$preserved_config" "$(APP_ROOT)/CONFIG/defaults.json"; \
@@ -106,7 +135,11 @@ install: build
 	if [ "$(INSTALL_PATH)" != "$$HOME/.local/bin/$(APP_NAME)" ]; then \
 		rm -f "$$HOME/.local/bin/$(APP_NAME)"; \
 	fi; \
+	if [ "$(BACKEND_INSTALL_PATH)" != "$$HOME/.local/bin/$(BACKEND_NAME)" ]; then \
+		rm -f "$$HOME/.local/bin/$(BACKEND_NAME)"; \
+	fi; \
 	echo "Installed $(APP_NAME) to $(INSTALL_PATH)"; \
+	echo "Installed $(BACKEND_NAME) to $(BACKEND_INSTALL_PATH)"; \
 	echo "Installed resources to $(APP_ROOT)"; \
 	if [ -n "$$preserved_config" ]; then \
 		echo "Preserved existing $(APP_ROOT)/CONFIG/defaults.json"; \
@@ -168,6 +201,7 @@ doctor:
 	printf 'Shell type:   %s\n' "$$shell_name"; \
 	printf 'RC file:      %s\n' "$$rc_file"; \
 	printf 'Install path: %s\n' "$(INSTALL_PATH)"; \
+	printf 'Backend path: %s\n' "$(BACKEND_INSTALL_PATH)"; \
 	printf 'Resource root:%s\n' " $(APP_ROOT)"; \
 	if printf '%s' "$$PATH" | tr ':' '\n' | grep -Fxqs "$(INSTALL_DIR)"; then \
 		printf 'PATH status:  install dir is in current PATH\n'; \
@@ -183,21 +217,32 @@ doctor:
 		printf 'Command:      %s\n' "$$(command -v "$(APP_NAME)")"; \
 	else \
 		printf 'Command:      not found in current PATH\n'; \
+	fi; \
+	if command -v "$(BACKEND_NAME)" >/dev/null 2>&1; then \
+		printf 'Backend:      %s\n' "$$(command -v "$(BACKEND_NAME)")"; \
+	else \
+		printf 'Backend:      not found in current PATH\n'; \
 	fi
 
 uninstall:
 	@rm -f "$(INSTALL_PATH)"
+	@rm -f "$(BACKEND_INSTALL_PATH)"
 	@if [ "$(INSTALL_PATH)" != "$(HOME)/.local/bin/$(APP_NAME)" ]; then \
 		rm -f "$(HOME)/.local/bin/$(APP_NAME)"; \
+	fi
+	@if [ "$(BACKEND_INSTALL_PATH)" != "$(HOME)/.local/bin/$(BACKEND_NAME)" ]; then \
+		rm -f "$(HOME)/.local/bin/$(BACKEND_NAME)"; \
 	fi
 	@if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
 		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
 		exit 1; \
 	fi
 	@rm -rf "$(APP_ROOT)"
+	@rm -f "$(HOME)/.lumina/run/backend.json"
 	@echo "Removed $(INSTALL_PATH)"
+	@echo "Removed $(BACKEND_INSTALL_PATH)"
 	@echo "Removed $(APP_ROOT)"
 	@echo "PATH lines in shell rc files are left untouched."
 
 clean:
-	@rm -rf "$(BUILD_DIR)/$(APP_NAME)"
+	@rm -rf "$(BUILD_DIR)/$(APP_NAME)" "$(BUILD_DIR)/$(BACKEND_NAME)" frontend/dist

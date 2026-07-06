@@ -195,7 +195,10 @@ func Open(ctx context.Context, cfg config.Config, sessionID string, complete Sum
 	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(cfg.SessionDir, safeSessionID(sessionID)+".sqlite")
+	path := sessionSQLitePath(cfg.SessionDir, sessionID)
+	if err := migrateLegacySQLite(cfg.SessionDir, sessionID, path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -708,6 +711,25 @@ func safeSessionID(sessionID string) string {
 		return "session"
 	}
 	return clean
+}
+
+func sessionSQLitePath(sessionDir, sessionID string) string {
+	return filepath.Join(sessionDir, safeSessionID(sessionID), "session.sqlite")
+}
+
+func migrateLegacySQLite(sessionDir, sessionID, targetPath string) error {
+	legacyPath := filepath.Join(sessionDir, safeSessionID(sessionID)+".sqlite")
+	if _, err := os.Stat(legacyPath); err != nil {
+		return os.MkdirAll(filepath.Dir(targetPath), 0o755)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(targetPath); err == nil {
+		_ = os.Remove(legacyPath)
+		return nil
+	}
+	return os.Rename(legacyPath, targetPath)
 }
 
 func messageHash(userTurn int, role string, content []byte) string {

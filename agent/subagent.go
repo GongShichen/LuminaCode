@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
@@ -14,8 +15,12 @@ import (
 )
 
 const (
-	MaxSubagentTurns       = 50
-	MaxContinuationRetries = 2
+	MaxSubagentTurns                   = 50
+	MaxContinuationRetries             = 2
+	DefaultSubagentTimeoutSeconds      = 300
+	SubagentFinalizeSeconds            = 30
+	AgentToolHardTimeoutGraceSecs      = 10
+	AgentToolDefaultHardTimeoutSeconds = DefaultSubagentTimeoutSeconds + SubagentFinalizeSeconds + AgentToolHardTimeoutGraceSecs
 )
 
 var truncatedStopReasons = stringSet("max_tokens", "length", "token_limit")
@@ -38,6 +43,7 @@ type SubAgentRequestResult struct {
 	FinalText         string
 	TotalInputTokens  int
 	TotalOutputTokens int
+	TimedOut          bool
 }
 
 type SubAgent struct {
@@ -53,6 +59,7 @@ type SubAgent struct {
 	Aborted           bool
 	TotalInputTokens  int
 	TotalOutputTokens int
+	TimeoutSeconds    int
 }
 
 func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition AgentDef, parentState *AgentState, modelOverride, agentType string, extraContext coretools.ExecutionContext, thinkingBudgetTokens ...*int) *SubAgent {
@@ -71,7 +78,11 @@ func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition
 	if len(thinkingBudgetTokens) > 0 {
 		thinkingBudget = thinkingBudgetTokens[0]
 	}
-	return &SubAgent{Config: cfg, Registry: registry, Definition: definition, ParentState: parentState, Model: model, AgentType: agentType, ExtraContext: extraContext, ThinkingBudget: thinkingBudget, MaxTurns: maxTurns}
+	timeoutSeconds := intFromAny(extraContext["subagent_timeout_seconds"])
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = DefaultSubagentTimeoutSeconds
+	}
+	return &SubAgent{Config: cfg, Registry: registry, Definition: definition, ParentState: parentState, Model: model, AgentType: agentType, ExtraContext: extraContext, ThinkingBudget: thinkingBudget, MaxTurns: maxTurns, TimeoutSeconds: timeoutSeconds}
 }
 
 func (s *SubAgent) Abort() {
@@ -79,8 +90,21 @@ func (s *SubAgent) Abort() {
 }
 
 func (s *SubAgent) Run(ctx context.Context, prompt string) (string, error) {
-	sessionState := s.createSessionState(ctx, prompt)
-	result := s.ExecuteOneRequest(ctx, prompt, sessionState)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := s.subagentRunContext(ctx)
+	defer cancel()
+	sessionState := s.createSessionState(runCtx, prompt)
+	result := s.ExecuteOneRequest(runCtx, prompt, sessionState)
+	if result.TimedOut && ctx.Err() == nil {
+		finalizeCtx, finalizeCancel := context.WithTimeout(ctx, time.Duration(SubagentFinalizeSeconds)*time.Second)
+		result = s.finalizeTimedOutRun(finalizeCtx, prompt, sessionState, result.FinalText)
+		finalizeCancel()
+	}
+	if result.TimedOut {
+		result.FinalText = s.wrapTimedOutResult(result.FinalText)
+	}
 	s.TotalInputTokens += result.TotalInputTokens
 	s.TotalOutputTokens += result.TotalOutputTokens
 	return result.FinalText, nil
@@ -123,6 +147,9 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 	fullText := ""
 
 	for turn := 0; turn < s.MaxTurns; turn++ {
+		if ctx.Err() != nil {
+			return s.contextStopResult(sessionState, fullText, ctx.Err())
+		}
 		if s.Aborted || sessionState.AbortCheck() {
 			return SubAgentRequestResult{
 				FinalText:         "Sub-agent aborted by user.",
@@ -165,6 +192,9 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 
 		for result := range client.StreamChat(ctx, systemPrompt, prepareSubagentAPIMessages(messages), toolSchemas, nil) {
 			if result.Err != nil {
+				if ctx.Err() != nil {
+					return s.contextStopResult(sessionState, fullText, ctx.Err())
+				}
 				return SubAgentRequestResult{
 					FinalText:         "Sub-agent API call failed: " + result.Err.Error(),
 					TotalInputTokens:  sessionState.TotalInputTokens,
@@ -209,6 +239,9 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 				sessionState.TotalInputTokens += intFromAny(event["input_tokens"])
 				sessionState.TotalOutputTokens += intFromAny(event["output_tokens"])
 			case "error":
+				if ctx.Err() != nil {
+					return s.contextStopResult(sessionState, fullText, ctx.Err())
+				}
 				msg := stringFromAny(event["message"])
 				return SubAgentRequestResult{
 					FinalText:         "Sub-agent error: " + msg,
@@ -216,6 +249,9 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 					TotalOutputTokens: sessionState.TotalOutputTokens,
 				}
 			}
+		}
+		if ctx.Err() != nil {
+			return s.contextStopResult(sessionState, fullText, ctx.Err())
 		}
 
 		assistantContent := append([]map[string]any{}, thinkingBlocks...)
@@ -288,6 +324,150 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 		TotalInputTokens:  sessionState.TotalInputTokens,
 		TotalOutputTokens: sessionState.TotalOutputTokens,
 	}
+}
+
+func (s *SubAgent) subagentRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	softDeadline := time.Now().Add(time.Duration(s.timeoutSeconds()) * time.Second)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(softDeadline) {
+		return context.WithDeadline(ctx, parentDeadline)
+	}
+	return context.WithDeadline(ctx, softDeadline)
+}
+
+func (s *SubAgent) timeoutSeconds() int {
+	if s.TimeoutSeconds > 0 {
+		return s.TimeoutSeconds
+	}
+	return DefaultSubagentTimeoutSeconds
+}
+
+func (s *SubAgent) contextStopResult(sessionState *SubAgentSessionState, currentText string, err error) SubAgentRequestResult {
+	if err == context.Canceled {
+		return SubAgentRequestResult{
+			FinalText:         "Sub-agent aborted by user.",
+			TotalInputTokens:  sessionState.TotalInputTokens,
+			TotalOutputTokens: sessionState.TotalOutputTokens,
+		}
+	}
+	return SubAgentRequestResult{
+		FinalText:         s.partialTimeoutText(sessionState, currentText),
+		TotalInputTokens:  sessionState.TotalInputTokens,
+		TotalOutputTokens: sessionState.TotalOutputTokens,
+		TimedOut:          true,
+	}
+}
+
+func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessionState *SubAgentSessionState, fallback string) SubAgentRequestResult {
+	if sessionState == nil {
+		return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
+	}
+	finalPrompt := fmt.Sprintf("You have reached the %d second sub-agent time limit. Stop using tools. Based only on the original task, conversation, tool results already available above, and the runtime partial-progress summary below, return the most useful final answer now. Be concise but include concrete findings, uncertainties, and next steps.\n\nOriginal task:\n%s\n\nRuntime partial-progress summary:\n%s", s.timeoutSeconds(), prompt, fallback)
+	messages := append([]map[string]any{}, sessionState.Messages...)
+	messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": finalPrompt}}})
+	model := s.Model
+	if model == "" {
+		model = s.Config.APIModel
+	}
+	client, err := api.CreateLLMClient(s.Config.APIKey, s.Config.APIBaseURL, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr(), s.Config.APIType)
+	if err != nil {
+		return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
+	}
+	fullText := ""
+	for result := range client.StreamChat(ctx, sessionState.SystemPrompt, prepareSubagentAPIMessages(messages), nil, nil) {
+		if result.Err != nil {
+			return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
+		}
+		event := result.Event
+		switch stringFromAny(event["type"]) {
+		case "text_delta":
+			fullText += stringFromAny(event["text"])
+		case "usage":
+			sessionState.TotalInputTokens += intFromAny(event["input_tokens"])
+			sessionState.TotalOutputTokens += intFromAny(event["output_tokens"])
+		}
+	}
+	fullText = strings.TrimSpace(fullText)
+	if fullText == "" {
+		fullText = fallback
+	}
+	sessionState.Messages = append(messages, map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": fullText}}})
+	return SubAgentRequestResult{
+		FinalText:         fullText,
+		TotalInputTokens:  sessionState.TotalInputTokens,
+		TotalOutputTokens: sessionState.TotalOutputTokens,
+		TimedOut:          true,
+	}
+}
+
+func (s *SubAgent) partialTimeoutText(sessionState *SubAgentSessionState, currentText string) string {
+	var sections []string
+	if strings.TrimSpace(currentText) != "" {
+		sections = append(sections, "Partial assistant text:\n"+strings.TrimSpace(currentText))
+	} else if text := latestAssistantText(sessionState.Messages); text != "" {
+		sections = append(sections, "Latest assistant text:\n"+text)
+	}
+	if observations := formatRecentSubagentObservations(sessionState.RecentToolObservations, 6); len(observations) > 0 {
+		sections = append(sections, "Recent tool observations:\n"+strings.Join(observations, "\n"))
+	}
+	if len(sections) == 0 {
+		sections = append(sections, "No text or tool observations were produced before the timeout.")
+	}
+	return fmt.Sprintf("Sub-agent reached its %ds timeout and is returning partial progress instead of a tool error.\n\n%s", s.timeoutSeconds(), strings.Join(sections, "\n\n"))
+}
+
+func (s *SubAgent) wrapTimedOutResult(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		text = "No final text was produced before the timeout."
+	}
+	return fmt.Sprintf("[Sub-agent timeout]\nThis sub-agent reached its %d second timeout. The answer below is based only on information already collected before timeout. If this is insufficient, the main agent may ask this sub-agent, or a narrower follow-up sub-agent, to continue querying from a more focused prompt.\n\n%s", s.timeoutSeconds(), text)
+}
+
+func latestAssistantText(messages []map[string]any) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if stringFromAny(message["role"]) != "assistant" {
+			continue
+		}
+		var parts []string
+		for _, block := range contentBlocks(message["content"]) {
+			if stringFromAny(block["type"]) == "text" {
+				if text := strings.TrimSpace(stringFromAny(block["text"])); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			return strings.TrimSpace(strings.Join(parts, "\n\n"))
+		}
+	}
+	return ""
+}
+
+func formatRecentSubagentObservations(observations []map[string]any, limit int) []string {
+	if limit <= 0 || len(observations) == 0 {
+		return nil
+	}
+	start := len(observations) - limit
+	if start < 0 {
+		start = 0
+	}
+	out := make([]string, 0, len(observations)-start)
+	for _, observation := range observations[start:] {
+		toolName := "tool"
+		if tc, ok := observation["call"].(coretools.ToolCall); ok && tc.Name != "" {
+			toolName = tc.Name
+		}
+		content := strings.TrimSpace(stringFromAny(observation["content"]))
+		if content == "" {
+			content = "(empty result)"
+		}
+		out = append(out, fmt.Sprintf("- %s: %s", toolName, TruncateResult(strings.Split(content, "\n")[0], 240)))
+	}
+	return out
 }
 
 func (s *SubAgent) buildSystemPrompt() string {

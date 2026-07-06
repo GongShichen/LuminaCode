@@ -2,5 +2,7 @@
 .idea/
 .DS_Store
 tmp/
+frontend/dist/
+frontend/node_modules/
 __pycache__/
 *.pyc

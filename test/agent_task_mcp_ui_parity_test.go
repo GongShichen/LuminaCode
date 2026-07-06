@@ -3,6 +3,7 @@ package test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"LuminaCode/agent"
 	coretools "LuminaCode/tools"
@@ -34,6 +35,12 @@ func TestAgentRenderToolUseAndResultMatchPython(t *testing.T) {
 
 func TestAgentAndTaskToolDescriptionsMatchPython(t *testing.T) {
 	agentTool := agent.NewAgentTool()
+	if got := agentTool.Timeout(); got != time.Duration(agent.AgentToolDefaultHardTimeoutSeconds)*time.Second {
+		t.Fatalf("Agent hard timeout should leave room for subagent soft timeout, got %s", got)
+	}
+	if got := agentTool.TimeoutForInput(agent.AgentInput{TimeoutSeconds: 42}); got != time.Duration(42+agent.SubagentFinalizeSeconds+agent.AgentToolHardTimeoutGraceSecs)*time.Second {
+		t.Fatalf("Agent timeout should follow timeout_seconds input, got %s", got)
+	}
 	if !strings.Contains(agentTool.Description(), "Available agent types:") ||
 		!strings.Contains(agentTool.Description(), "Coordinator: task orchestration only.") ||
 		!strings.Contains(agentTool.Description(), "Workers are automatically isolated via git worktrees.") {
@@ -41,6 +48,10 @@ func TestAgentAndTaskToolDescriptionsMatchPython(t *testing.T) {
 	}
 	schema := agentTool.ToAPISchema()["input_schema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
+	timeoutSeconds := properties["timeout_seconds"].(map[string]any)
+	if !strings.Contains(timeoutSeconds["description"].(string), "Defaults to 300") {
+		t.Fatalf("timeout_seconds schema should describe default: %#v", timeoutSeconds)
+	}
 	subagentType := properties["subagent_type"].(map[string]any)
 	if !strings.Contains(subagentType["description"].(string), "Available types include") ||
 		!strings.Contains(subagentType["description"].(string), "docs-lookup") {

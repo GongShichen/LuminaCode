@@ -236,6 +236,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 			r.DrainTaskEvents()
 			r.Flush(true)
 		case <-ctx.Done():
+			r.finishSubmitFrame()
 			if r.Dirty {
 				r.Flush(true)
 			}
@@ -703,8 +704,15 @@ func appendAssistantTranscriptMessage(entries []map[string]any, content any) []m
 }
 
 func appendTranscriptSnapshotEntry(entries []map[string]any, kind, text string) []map[string]any {
-	if strings.TrimSpace(text) == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return entries
+	}
+	if kind == "user" && len(entries) > 0 {
+		last := entries[len(entries)-1]
+		if last["kind"] == kind && strings.TrimSpace(stringFromAny(last["text"])) == text {
+			return entries
+		}
 	}
 	return append(entries, map[string]any{"kind": kind, "text": text})
 }

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"LuminaCode/agent"
-	"LuminaCode/config"
 	"LuminaCode/memory"
 	"LuminaCode/skills"
 )
@@ -36,7 +35,7 @@ Read carefully: $ARGUMENTS
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.SkillsEnabled = true
 	engine := agent.NewQueryEngine(&cfg)
@@ -99,7 +98,7 @@ func TestCoreQueryLoopInlineSkillIntegerLikeEffortSetsThinkingBudgetLikePython(t
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -157,7 +156,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.SkillsEnabled = true
@@ -195,7 +194,7 @@ Inline output: !` + "`printf shell-ok`" + `
 }
 
 func TestQueryEngineManualCompactUsesPythonPipeline(t *testing.T) {
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.APIMaxTokens = 1000
 	engine := agent.NewQueryEngine(&cfg)
 	state := agent.NewAgentState()
@@ -236,7 +235,7 @@ Lumina identity.
 		t.Fatal(err)
 	}
 	memDir := filepath.Join(dir, ".Lumina", "memory")
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.AutoMemoryEnabled = true
 	cfg.AutoMemoryDirectory = &memDir
@@ -300,7 +299,7 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -371,7 +370,7 @@ func TestCoreQueryLoopSlowMemoryRecallDoesNotBlockFirstRequestLikePython(t *test
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -474,7 +473,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -514,7 +513,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 }
 
 func TestQueryEngineShutdownTearsDownRuntimeLikePython(t *testing.T) {
-	cfg := config.NewConfig()
+	cfg := isolatedConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1"
 	engine := agent.NewQueryEngine(&cfg)

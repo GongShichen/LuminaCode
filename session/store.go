@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/google/uuid"
 	orderedmap "github.com/pb33f/ordered-map/v2"
+	_ "modernc.org/sqlite"
 )
 
 type Meta struct {
@@ -33,10 +35,13 @@ type Store struct {
 
 func NewStore(sessionDir string) *Store {
 	_ = os.MkdirAll(sessionDir, 0o755)
-	return &Store{dir: sessionDir}
+	store := &Store{dir: sessionDir}
+	store.migrateAllLegacySessions()
+	return store
 }
 
 func (s *Store) Save(sessionID string, messages []map[string]any, turnCount int) error {
+	s.migrateLegacySession(sessionID)
 	if err := atomicWriteJSONL(s.sessionPath(sessionID), messages); err != nil {
 		return err
 	}
@@ -45,6 +50,7 @@ func (s *Store) Save(sessionID string, messages []map[string]any, turnCount int)
 }
 
 func (s *Store) SaveWithMeta(sessionID string, messages []map[string]any, meta *Meta, turnCount int) error {
+	s.migrateLegacySession(sessionID)
 	if err := atomicWriteJSONL(s.sessionPath(sessionID), messages); err != nil {
 		return err
 	}
@@ -62,9 +68,9 @@ func (s *Store) SaveState(sessionID string, state *agent.AgentState) error {
 }
 
 func (s *Store) Load(sessionID string) []map[string]any {
-	file, err := os.Open(s.sessionPath(sessionID))
+	file, err := os.Open(s.sessionReadPath(sessionID))
 	if err != nil {
-		return nil
+		return s.loadSQLiteMessages(sessionID)
 	}
 	defer file.Close()
 	var messages []map[string]any
@@ -87,6 +93,7 @@ func (s *Store) SaveStateWithRecovery(sessionID string, state *agent.AgentState,
 	if state == nil {
 		return nil
 	}
+	s.migrateLegacySession(sessionID)
 	generation := newGenerationID()
 	stateMap := orderedAgentStateSnapshot(state)
 	recoveryPayload := newOrderedJSONMap()
@@ -136,7 +143,7 @@ func (s *Store) SaveSnapshotWithRecovery(sessionID string, state *agent.AgentSta
 }
 
 func (s *Store) LoadState(sessionID string) *agent.AgentState {
-	data := loadJSONMap(s.statePath(sessionID))
+	data := loadJSONMap(s.stateReadPath(sessionID))
 	if data == nil {
 		return nil
 	}
@@ -172,7 +179,7 @@ func (s *Store) LoadState(sessionID string) *agent.AgentState {
 }
 
 func (s *Store) LoadSkillRecovery(sessionID string) map[string]any {
-	stateData, recoveryData, commitData := s.loadGenerationTriplet(sessionID, s.skillRecoveryPath(sessionID))
+	stateData, recoveryData, commitData := s.loadGenerationTriplet(sessionID, s.skillRecoveryReadPath(sessionID))
 	if stateData == nil || recoveryData == nil || commitData == nil || intFromAny(recoveryData["version"]) != 1 {
 		return nil
 	}
@@ -180,7 +187,7 @@ func (s *Store) LoadSkillRecovery(sessionID string) map[string]any {
 }
 
 func (s *Store) LoadTaskRuntimeSnapshot(sessionID string) []map[string]any {
-	stateData, taskData, commitData := s.loadGenerationTriplet(sessionID, s.taskRuntimePath(sessionID))
+	stateData, taskData, commitData := s.loadGenerationTriplet(sessionID, s.taskRuntimeReadPath(sessionID))
 	if stateData == nil || taskData == nil || commitData == nil || intFromAny(taskData["version"]) != 1 {
 		return nil
 	}
@@ -198,7 +205,9 @@ func (s *Store) LoadTaskRuntimeSnapshot(sessionID string) []map[string]any {
 }
 
 func (s *Store) ListSessions() []Meta {
-	matches, _ := filepath.Glob(filepath.Join(s.dir, "*.meta.json"))
+	matches, _ := filepath.Glob(filepath.Join(s.dir, "*", "meta.json"))
+	legacyMatches, _ := filepath.Glob(filepath.Join(s.dir, "*.meta.json"))
+	matches = append(matches, legacyMatches...)
 	sort.Slice(matches, func(i, j int) bool {
 		ii, _ := os.Stat(matches[i])
 		jj, _ := os.Stat(matches[j])
@@ -209,19 +218,37 @@ func (s *Store) ListSessions() []Meta {
 	})
 	var metas []Meta
 	for _, path := range matches {
-		id := filepath.Base(path)
-		id = id[:len(id)-len(".meta.json")]
+		id := sessionIDFromMetaPath(s.dir, path)
 		if meta := s.LoadMeta(id); meta != nil {
 			metas = append(metas, *meta)
 		}
 	}
+	seen := map[string]struct{}{}
+	for _, meta := range metas {
+		seen[meta.SessionID] = struct{}{}
+	}
+	sqliteMatches, _ := filepath.Glob(filepath.Join(s.dir, "*", "session.sqlite"))
+	legacySQLiteMatches, _ := filepath.Glob(filepath.Join(s.dir, "*.sqlite"))
+	sqliteMatches = append(sqliteMatches, legacySQLiteMatches...)
+	for _, path := range sqliteMatches {
+		id := sessionIDFromSQLitePath(s.dir, path)
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if meta := s.loadSQLiteMeta(id); meta != nil {
+			metas = append(metas, *meta)
+		}
+	}
+	sort.Slice(metas, func(i, j int) bool {
+		return metas[i].LastUpdated > metas[j].LastUpdated
+	})
 	return metas
 }
 
 func (s *Store) LoadMeta(sessionID string) *Meta {
-	data := loadJSONMap(s.metaPath(sessionID))
+	data := loadJSONMap(s.metaReadPath(sessionID))
 	if data == nil {
-		return nil
+		return s.loadSQLiteMeta(sessionID)
 	}
 	meta := &Meta{
 		SessionID:    stringFromAny(data["session_id"]),
@@ -236,6 +263,65 @@ func (s *Store) LoadMeta(sessionID string) *Meta {
 	return meta
 }
 
+func (s *Store) loadSQLiteMessages(sessionID string) []map[string]any {
+	path := s.sqliteReadPath(sessionID)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT role, content_json FROM messages ORDER BY id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var messages []map[string]any
+	for rows.Next() {
+		var role, contentJSON string
+		if err := rows.Scan(&role, &contentJSON); err != nil {
+			continue
+		}
+		var content any
+		if err := json.Unmarshal([]byte(contentJSON), &content); err != nil {
+			continue
+		}
+		messages = append(messages, map[string]any{"role": role, "content": content})
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	return messages
+}
+
+func (s *Store) loadSQLiteMeta(sessionID string) *Meta {
+	path := s.sqliteReadPath(sessionID)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	meta := &Meta{SessionID: sessionID}
+	var messageCount, turnCount int
+	if err := db.QueryRow(`SELECT created_at, updated_at FROM session_info WHERE session_id = ?`, sessionID).Scan(&meta.CreatedAt, &meta.LastUpdated); err != nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			meta.CreatedAt = float64(info.ModTime().UnixNano()) / 1e9
+			meta.LastUpdated = meta.CreatedAt
+		} else {
+			return nil
+		}
+	}
+	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(user_turn_count), 0) FROM messages`).Scan(&messageCount, &turnCount)
+	meta.MessageCount = messageCount
+	meta.TurnCount = turnCount
+	return meta
+}
+
 func (s *Store) Delete(sessionID string) {
 	_ = os.Remove(s.sessionPath(sessionID))
 	_ = os.Remove(s.metaPath(sessionID))
@@ -243,7 +329,11 @@ func (s *Store) Delete(sessionID string) {
 	_ = os.Remove(s.skillRecoveryPath(sessionID))
 	_ = os.Remove(s.skillRecoveryCommitPath(sessionID))
 	_ = os.Remove(s.taskRuntimePath(sessionID))
-	_ = os.Remove(filepath.Join(s.dir, sessionID+".sqlite"))
+	_ = os.Remove(s.sqlitePath(sessionID))
+	_ = os.RemoveAll(s.sessionDir(sessionID))
+	for _, path := range s.legacySessionPaths(sessionID) {
+		_ = os.Remove(path)
+	}
 }
 
 func (s *Store) upsertMeta(sessionID string, messageCount, turnCount int, provided *Meta) (*Meta, error) {
@@ -262,9 +352,9 @@ func (s *Store) upsertMeta(sessionID string, messageCount, turnCount int, provid
 }
 
 func (s *Store) loadGenerationTriplet(sessionID, payloadPath string) (map[string]any, map[string]any, map[string]any) {
-	stateData := loadJSONMap(s.statePath(sessionID))
+	stateData := loadJSONMap(s.stateReadPath(sessionID))
 	payloadData := loadJSONMap(payloadPath)
-	commitData := loadJSONMap(s.skillRecoveryCommitPath(sessionID))
+	commitData := loadJSONMap(s.skillRecoveryCommitReadPath(sessionID))
 	if stateData == nil || payloadData == nil || commitData == nil {
 		return nil, nil, nil
 	}
@@ -278,27 +368,184 @@ func (s *Store) loadGenerationTriplet(sessionID, payloadPath string) (map[string
 }
 
 func (s *Store) sessionPath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".jsonl")
+	return filepath.Join(s.sessionDir(sessionID), "transcript.jsonl")
 }
 
 func (s *Store) metaPath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".meta.json")
+	return filepath.Join(s.sessionDir(sessionID), "meta.json")
 }
 
 func (s *Store) statePath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".state.json")
+	return filepath.Join(s.sessionDir(sessionID), "state.json")
 }
 
 func (s *Store) skillRecoveryPath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".skill-recovery.json")
+	return filepath.Join(s.sessionDir(sessionID), "skill-recovery.json")
 }
 
 func (s *Store) skillRecoveryCommitPath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".skill-recovery.commit.json")
+	return filepath.Join(s.sessionDir(sessionID), "skill-recovery.commit.json")
 }
 
 func (s *Store) taskRuntimePath(sessionID string) string {
-	return filepath.Join(s.dir, sessionID+".tasks.json")
+	return filepath.Join(s.sessionDir(sessionID), "tasks.json")
+}
+
+func (s *Store) sqlitePath(sessionID string) string {
+	return filepath.Join(s.sessionDir(sessionID), "session.sqlite")
+}
+
+func (s *Store) sessionDir(sessionID string) string {
+	return filepath.Join(s.dir, safeSessionID(sessionID))
+}
+
+func (s *Store) sessionReadPath(sessionID string) string {
+	return firstExistingPath(s.sessionPath(sessionID), filepath.Join(s.dir, sessionID+".jsonl"))
+}
+
+func (s *Store) metaReadPath(sessionID string) string {
+	return firstExistingPath(s.metaPath(sessionID), filepath.Join(s.dir, sessionID+".meta.json"))
+}
+
+func (s *Store) stateReadPath(sessionID string) string {
+	return firstExistingPath(s.statePath(sessionID), filepath.Join(s.dir, sessionID+".state.json"))
+}
+
+func (s *Store) skillRecoveryReadPath(sessionID string) string {
+	return firstExistingPath(s.skillRecoveryPath(sessionID), filepath.Join(s.dir, sessionID+".skill-recovery.json"))
+}
+
+func (s *Store) skillRecoveryCommitReadPath(sessionID string) string {
+	return firstExistingPath(s.skillRecoveryCommitPath(sessionID), filepath.Join(s.dir, sessionID+".skill-recovery.commit.json"))
+}
+
+func (s *Store) taskRuntimeReadPath(sessionID string) string {
+	return firstExistingPath(s.taskRuntimePath(sessionID), filepath.Join(s.dir, sessionID+".tasks.json"))
+}
+
+func (s *Store) sqliteReadPath(sessionID string) string {
+	return firstExistingPath(s.sqlitePath(sessionID), filepath.Join(s.dir, sessionID+".sqlite"))
+}
+
+func firstExistingPath(primary, fallback string) string {
+	if _, err := os.Stat(primary); err == nil {
+		return primary
+	}
+	return fallback
+}
+
+func (s *Store) migrateAllLegacySessions() {
+	ids := map[string]struct{}{}
+	patterns := []string{
+		"*.jsonl",
+		"*.meta.json",
+		"*.state.json",
+		"*.skill-recovery.json",
+		"*.skill-recovery.commit.json",
+		"*.tasks.json",
+		"*.sqlite",
+		"*.transcript.md",
+	}
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(filepath.Join(s.dir, pattern))
+		for _, path := range matches {
+			if id := legacySessionIDFromPath(path); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	for id := range ids {
+		s.migrateLegacySession(id)
+	}
+}
+
+func (s *Store) migrateLegacySession(sessionID string) {
+	mappings := []struct {
+		old string
+		new string
+	}{
+		{filepath.Join(s.dir, sessionID+".jsonl"), s.sessionPath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".meta.json"), s.metaPath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".state.json"), s.statePath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".skill-recovery.json"), s.skillRecoveryPath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".skill-recovery.commit.json"), s.skillRecoveryCommitPath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".tasks.json"), s.taskRuntimePath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".sqlite"), s.sqlitePath(sessionID)},
+		{filepath.Join(s.dir, sessionID+".transcript.md"), filepath.Join(s.sessionDir(sessionID), "transcript.md")},
+	}
+	for _, mapping := range mappings {
+		if _, err := os.Stat(mapping.old); err != nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(mapping.new), 0o755); err != nil {
+			continue
+		}
+		if _, err := os.Stat(mapping.new); err == nil {
+			_ = os.Remove(mapping.old)
+			continue
+		}
+		if err := os.Rename(mapping.old, mapping.new); err != nil {
+			continue
+		}
+	}
+}
+
+func (s *Store) legacySessionPaths(sessionID string) []string {
+	return []string{
+		filepath.Join(s.dir, sessionID+".jsonl"),
+		filepath.Join(s.dir, sessionID+".meta.json"),
+		filepath.Join(s.dir, sessionID+".state.json"),
+		filepath.Join(s.dir, sessionID+".skill-recovery.json"),
+		filepath.Join(s.dir, sessionID+".skill-recovery.commit.json"),
+		filepath.Join(s.dir, sessionID+".tasks.json"),
+		filepath.Join(s.dir, sessionID+".sqlite"),
+		filepath.Join(s.dir, sessionID+".transcript.md"),
+	}
+}
+
+func legacySessionIDFromPath(path string) string {
+	base := filepath.Base(path)
+	suffixes := []string{
+		".skill-recovery.commit.json",
+		".skill-recovery.json",
+		".transcript.md",
+		".meta.json",
+		".state.json",
+		".tasks.json",
+		".jsonl",
+		".sqlite",
+	}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix)
+		}
+	}
+	return ""
+}
+
+func sessionIDFromMetaPath(root, path string) string {
+	if filepath.Base(path) == "meta.json" {
+		return filepath.Base(filepath.Dir(path))
+	}
+	id := filepath.Base(path)
+	return strings.TrimSuffix(id, ".meta.json")
+}
+
+func sessionIDFromSQLitePath(root, path string) string {
+	if filepath.Base(path) == "session.sqlite" {
+		return filepath.Base(filepath.Dir(path))
+	}
+	id := filepath.Base(path)
+	return strings.TrimSuffix(id, ".sqlite")
+}
+
+func safeSessionID(sessionID string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
+	clean := strings.Trim(replacer.Replace(sessionID), "._-")
+	if clean == "" {
+		return "session"
+	}
+	return clean
 }
 
 func atomicWriteJSON(path string, value any) error {

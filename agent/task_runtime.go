@@ -414,6 +414,14 @@ func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string
 	startOutputTokens := sessionState.TotalOutputTokens
 	startToolUseCount := sessionState.TotalToolUseCount
 	result := sub.ExecuteOneRequest(ctx, prompt, sessionState)
+	if result.TimedOut && ctx.Err() == nil {
+		finalizeCtx, finalizeCancel := context.WithTimeout(ctx, time.Duration(SubagentFinalizeSeconds)*time.Second)
+		result = sub.finalizeTimedOutRun(finalizeCtx, prompt, sessionState, result.FinalText)
+		finalizeCancel()
+	}
+	if result.TimedOut {
+		result.FinalText = sub.wrapTimedOutResult(result.FinalText)
+	}
 	inputDelta := result.TotalInputTokens - startInputTokens
 	outputDelta := result.TotalOutputTokens - startOutputTokens
 	toolUseDelta := sessionState.TotalToolUseCount - startToolUseCount

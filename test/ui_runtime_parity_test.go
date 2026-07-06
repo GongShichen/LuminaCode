@@ -224,6 +224,33 @@ func TestUIRuntimePermissionModalAndTaskActivity(t *testing.T) {
 	}
 }
 
+func TestUIRuntimeSnapshotSkipsConsecutiveDuplicateUserTurns(t *testing.T) {
+	state := agent.NewAgentState()
+	state.Messages = []map[string]any{
+		{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "分析一下"}},
+		},
+		{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": "分析一下"}},
+		},
+		{
+			"role":    "assistant",
+			"content": []map[string]any{{"type": "text", "text": "好的"}},
+		},
+	}
+
+	entries := ui.TranscriptEntriesFromState(&state)
+	if len(entries) != 2 ||
+		entries[0]["kind"] != "user" ||
+		entries[0]["text"] != "分析一下" ||
+		entries[1]["kind"] != "assistant" ||
+		entries[1]["text"] != "好的" {
+		t.Fatalf("consecutive duplicate user messages should be hidden from transcript snapshot, got %#v", entries)
+	}
+}
+
 type permissionBackend struct {
 	prompt    any
 	dangerous bool
@@ -542,6 +569,30 @@ func (e *delayedSubmitEngine) SubmitMessage(ctx context.Context, userInput strin
 		}
 	}()
 	return out
+}
+
+type cancelAwareSubmitEngine struct{}
+
+func (e *cancelAwareSubmitEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+	out := make(chan agent.StreamEvent)
+	go func() {
+		defer close(out)
+		<-ctx.Done()
+	}()
+	return out
+}
+
+func TestUIRuntimeRunSubmitMessageRestoresInputAfterAbort(t *testing.T) {
+	backend := &permissionBackend{}
+	rt := ui.NewUiRuntime(&cancelAwareSubmitEngine{}, backend)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	rt.RunSubmitMessage(ctx, "abort me", nil, "session-1")
+
+	if !rt.Frame.InputEnabled || rt.Frame.InputMode != "normal" || rt.Frame.InputPlaceholder != "请输入消息并回车。" {
+		t.Fatalf("aborted submit should restore input-ready frame, frame=%#v", rt.Frame)
+	}
 }
 
 func TestUIRuntimeRunSubmitMessageTicksAnimationWhileWaiting(t *testing.T) {

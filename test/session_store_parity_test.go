@@ -1,6 +1,7 @@
 package test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/session"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestSessionStoreStateRecoveryAndTaskGeneration(t *testing.T) {
@@ -25,7 +28,7 @@ func TestSessionStoreStateRecoveryAndTaskGeneration(t *testing.T) {
 	if err := store.SaveStateWithRecovery("sess", &state, recovery, tasks); err != nil {
 		t.Fatal(err)
 	}
-	stateData, err := os.ReadFile(filepath.Join(dir, "sess.state.json"))
+	stateData, err := os.ReadFile(filepath.Join(dir, "sess", "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,17 +90,98 @@ func TestSessionStoreStateRecoveryAndTaskGeneration(t *testing.T) {
 	if loadedTasks := store.LoadTaskRuntimeSnapshot("sess"); len(loadedTasks) != 1 || loadedTasks[0]["task_id"] != "task-1" {
 		t.Fatalf("unexpected task snapshot: %#v", loadedTasks)
 	}
-	recoveryData, err := os.ReadFile(filepath.Join(dir, "sess.skill-recovery.json"))
+	recoveryData, err := os.ReadFile(filepath.Join(dir, "sess", "skill-recovery.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	requireSubstringsInOrder(t, string(recoveryData), `"version"`, `"generation"`, `"agent_scopes"`)
 
-	if err := os.WriteFile(filepath.Join(dir, "sess.skill-recovery.commit.json"), []byte(`{"generation":"wrong","version":1}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sess", "skill-recovery.commit.json"), []byte(`{"generation":"wrong","version":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if store.LoadSkillRecovery("sess") != nil || store.LoadTaskRuntimeSnapshot("sess") != nil {
 		t.Fatal("expected generation mismatch to suppress recovery and task snapshots")
+	}
+}
+
+func TestSessionStoreMigratesLegacyFlatFilesIntoSessionDirectory(t *testing.T) {
+	dir := t.TempDir()
+	legacyFiles := map[string]string{
+		"sess.jsonl":                      `{"role": "user", "content": "hello"}` + "\n",
+		"sess.meta.json":                  `{"session_id":"sess","created_at":1,"last_updated":2,"message_count":1,"turn_count":1}`,
+		"sess.state.json":                 `{"generation":"abc","state":{"messages":[]}}`,
+		"sess.skill-recovery.json":        `{"version":1,"generation":"abc","agent_scopes":{}}`,
+		"sess.skill-recovery.commit.json": `{"version":1,"generation":"abc"}`,
+		"sess.tasks.json":                 `{"version":1,"generation":"abc","tasks":[]}`,
+		"sess.sqlite":                     "",
+		"sess.transcript.md":              "# transcript\n",
+	}
+	for name, content := range legacyFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := session.NewStore(dir)
+	for oldName := range legacyFiles {
+		if _, err := os.Stat(filepath.Join(dir, oldName)); !os.IsNotExist(err) {
+			t.Fatalf("legacy file %s should be removed after migration, stat err=%v", oldName, err)
+		}
+	}
+	for _, newName := range []string{
+		"transcript.jsonl",
+		"meta.json",
+		"state.json",
+		"skill-recovery.json",
+		"skill-recovery.commit.json",
+		"tasks.json",
+		"session.sqlite",
+		"transcript.md",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, "sess", newName)); err != nil {
+			t.Fatalf("expected migrated %s: %v", newName, err)
+		}
+	}
+	if meta := store.LoadMeta("sess"); meta == nil || meta.SessionID != "sess" {
+		t.Fatalf("expected migrated meta to load, got %#v", meta)
+	}
+}
+
+func TestSessionStoreLoadsSQLiteOnlySessionMemoryFallback(t *testing.T) {
+	dir := t.TempDir()
+	sessionID := "sqlite-only"
+	db, err := sql.Open("sqlite", filepath.Join(dir, sessionID+".sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stmts := []string{
+		`CREATE TABLE session_info(session_id TEXT PRIMARY KEY, created_at REAL, updated_at REAL, cwd TEXT, model TEXT)`,
+		`CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_count INTEGER, user_turn_count INTEGER, role TEXT, content_json TEXT NOT NULL, text_preview TEXT, message_hash TEXT UNIQUE, created_at REAL, last_accessed_at REAL)`,
+		`INSERT INTO session_info(session_id, created_at, updated_at, cwd, model) VALUES('sqlite-only', 10, 20, '/tmp/project', 'model')`,
+		`INSERT INTO messages(turn_count, user_turn_count, role, content_json, text_preview, message_hash, created_at, last_accessed_at) VALUES(1, 1, 'user', '"hello"', 'hello', 'h1', 10, 10)`,
+		`INSERT INTO messages(turn_count, user_turn_count, role, content_json, text_preview, message_hash, created_at, last_accessed_at) VALUES(1, 1, 'assistant', '[{"type":"text","text":"world"}]', 'world', 'h2', 11, 11)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := session.NewStore(dir)
+	if _, err := os.Stat(filepath.Join(dir, sessionID, "session.sqlite")); err != nil {
+		t.Fatalf("expected legacy sqlite to migrate into session directory: %v", err)
+	}
+	messages := store.Load(sessionID)
+	if len(messages) != 2 || messages[0]["role"] != "user" || messages[0]["content"] != "hello" {
+		t.Fatalf("expected sqlite fallback messages, got %#v", messages)
+	}
+	meta := store.LoadMeta(sessionID)
+	if meta == nil || meta.SessionID != sessionID || meta.MessageCount != 2 || meta.TurnCount != 1 || meta.LastUpdated != 20 {
+		t.Fatalf("expected sqlite fallback meta, got %#v", meta)
+	}
+	list := store.ListSessions()
+	if len(list) != 1 || list[0].SessionID != sessionID {
+		t.Fatalf("expected sqlite-only session in list, got %#v", list)
 	}
 }
 
@@ -149,7 +233,7 @@ func TestSessionStoreSaveSnapshotWritesJSONLBeforeStateStyleSnapshot(t *testing.
 		t.Fatal(err)
 	}
 
-	if data, err := os.ReadFile(filepath.Join(dir, "sess.jsonl")); err != nil || !strings.Contains(string(data), `"role": "user"`) {
+	if data, err := os.ReadFile(filepath.Join(dir, "sess", "transcript.jsonl")); err != nil || !strings.Contains(string(data), `"role": "user"`) {
 		t.Fatalf("expected JSONL transcript to be saved like Python before/with state snapshot, data=%q err=%v", data, err)
 	}
 	if loaded := store.LoadState("sess"); loaded == nil || len(loaded.Messages) != 1 || loaded.TurnCount != 7 {
@@ -174,7 +258,7 @@ func TestSessionStoreNilTaskSnapshotPersistsEmptyList(t *testing.T) {
 	if err := store.SaveStateWithRecovery("sess", &state, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "sess.tasks.json"))
+	data, err := os.ReadFile(filepath.Join(dir, "sess", "tasks.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +319,7 @@ func TestSessionStoreLoadersIgnoreMalformedFilesLikePython(t *testing.T) {
 	if err := store.SaveStateWithRecovery("sess", &state, map[string]any{"version": 1, "agent_scopes": map[string]any{}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sess.skill-recovery.json"), []byte("{broken"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sess", "skill-recovery.json"), []byte("{broken"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if store.LoadSkillRecovery("sess") != nil {
@@ -244,7 +328,7 @@ func TestSessionStoreLoadersIgnoreMalformedFilesLikePython(t *testing.T) {
 	if err := store.SaveStateWithRecovery("sess", &state, map[string]any{"version": 1, "agent_scopes": map[string]any{}}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sess.tasks.json"), []byte("{broken"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sess", "tasks.json"), []byte("{broken"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if store.LoadTaskRuntimeSnapshot("sess") != nil {
@@ -255,7 +339,10 @@ func TestSessionStoreLoadersIgnoreMalformedFilesLikePython(t *testing.T) {
 func TestSessionStoreLoadSkipsTruncatedJSONLLinesLikePython(t *testing.T) {
 	dir := t.TempDir()
 	store := session.NewStore(dir)
-	path := filepath.Join(dir, "sess.jsonl")
+	path := filepath.Join(dir, "sess", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	line := `{"role": "user", "content": []}` + "\n{broken\n"
 	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
 		t.Fatal(err)
@@ -275,9 +362,9 @@ func TestSessionStoreDeleteRemovesRecoveryAndTaskFilesLikePython(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"sess.skill-recovery.json",
-		"sess.skill-recovery.commit.json",
-		"sess.tasks.json",
+		filepath.Join("sess", "skill-recovery.json"),
+		filepath.Join("sess", "skill-recovery.commit.json"),
+		filepath.Join("sess", "tasks.json"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("expected %s before delete: %v", name, err)
@@ -287,9 +374,9 @@ func TestSessionStoreDeleteRemovesRecoveryAndTaskFilesLikePython(t *testing.T) {
 	store.Delete("sess")
 
 	for _, name := range []string{
-		"sess.skill-recovery.json",
-		"sess.skill-recovery.commit.json",
-		"sess.tasks.json",
+		filepath.Join("sess", "skill-recovery.json"),
+		filepath.Join("sess", "skill-recovery.commit.json"),
+		filepath.Join("sess", "tasks.json"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed, stat err=%v", name, err)
@@ -336,7 +423,7 @@ func TestSessionStoreJSONLMatchesPythonTextConventions(t *testing.T) {
 	if err := store.Save("sess", messages, 1); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "sess.jsonl"))
+	data, err := os.ReadFile(filepath.Join(dir, "sess", "transcript.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}

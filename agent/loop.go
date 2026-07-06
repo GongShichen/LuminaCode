@@ -93,6 +93,7 @@ type CoreExecutionEngine struct {
 	cacheEditState     RuntimeCacheEditState
 	SessionID          string
 	sessionMemory      *sessionmemory.Manager
+	StateObserver      func(*AgentState)
 }
 
 type permissionDecision struct {
@@ -436,6 +437,7 @@ func (e *CoreExecutionEngine) QueryLoop(ctx context.Context, state *AgentState) 
 }
 
 func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, out chan<- StreamEvent) {
+	e.clearAbort()
 	outputRecovery := NewOutputRecoveryState(e.Config.APIMaxTokens)
 	ptlRecovery := PTLRecoveryManager{Config: e.Config}
 	consecutiveAPIErrors := 0
@@ -560,6 +562,12 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 		for result := range client.StreamChat(ctx, state.SystemPrompt, messages, activeRegistry.GetAPISchemas(), requestOptions) {
 			if result.Err != nil {
+				if ctx.Err() != nil || e.isAborted() {
+					e.restoreInFlightCacheEdits()
+					e.LastState = state
+					sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
+					return
+				}
 				msg := result.Err.Error()
 				if IsFatalAPIError(msg) {
 					e.restoreInFlightCacheEdits()
@@ -586,6 +594,12 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				sendStream(ctx, out, NewStreamEvent("error", "API error (recovered): "+msg, nil))
 				turn.StreamHadError = true
 				break
+			}
+			if ctx.Err() != nil || e.isAborted() {
+				e.restoreInFlightCacheEdits()
+				e.LastState = state
+				sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
+				return
 			}
 			action := e.HandleStreamEvent(result.Event, turn, executor, state, consecutiveAPIErrors)
 			consecutiveAPIErrors = action.ConsecutiveAPIErrors
@@ -886,6 +900,9 @@ func (e *CoreExecutionEngine) executeAndCommitTools(ctx context.Context, state *
 }
 
 func (e *CoreExecutionEngine) requestSkillShellPermission(ctx context.Context, executor *StreamingToolExecutor, req skills.SkillShellPermissionRequest) bool {
+	if e != nil && e.Config.Yolo {
+		return true
+	}
 	ch := make(chan bool, 1)
 	e.mu.Lock()
 	if e.skillPermissionCh != nil {
@@ -1256,6 +1273,9 @@ func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *Ag
 	if err := e.sessionMemory.Observe(ctx, e.Config, e.SessionID, state.Messages, force); err != nil {
 		slog.Warn("session memory observe failed", "session_id", e.SessionID, "error", err)
 	}
+	if e.StateObserver != nil {
+		e.StateObserver(state)
+	}
 }
 
 func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *AgentState) {
@@ -1422,6 +1442,12 @@ func (e *CoreExecutionEngine) isAborted() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.aborted
+}
+
+func (e *CoreExecutionEngine) clearAbort() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.aborted = false
 }
 
 func IsFatalAPIError(msg string) bool {

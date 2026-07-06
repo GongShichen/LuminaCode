@@ -1,0 +1,20 @@
+{
+  "name": "lumina-tui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --outDir dist && chmod +x dist/index.js",
+    "test": "tsc --noEmit"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^24.0.10",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.6",
+    "typescript": "^5.8.3"
+  }
+}

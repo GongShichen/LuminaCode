@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"LuminaCode/config"
 	coretools "LuminaCode/tools"
@@ -23,6 +25,7 @@ type AgentInput struct {
 	WorkerLabel     string `json:"worker_label,omitempty" jsonschema:"description=Optional human-readable worker label. task_id is still system-generated."`
 	Reusable        bool   `json:"reusable,omitempty" jsonschema:"description=If true keep the background worker idle for SendMessage reuse after it finishes."`
 	Isolation       string `json:"isolation,omitempty" jsonschema:"description=Filesystem isolation mode: null shared filesystem or 'worktree' git worktree."`
+	TimeoutSeconds  any    `json:"timeout_seconds,omitempty" jsonschema:"description=Optional sub-agent work timeout in seconds. Defaults to 300. When reached, the sub-agent is asked to stop using tools and return a final answer from known context."`
 }
 
 type AgentTool struct{ coretools.BaseTool }
@@ -32,6 +35,7 @@ func NewAgentTool() *AgentTool {
 		Name:            "Agent",
 		Description:     "Launch a new agent to handle complex, multi-step tasks.\n\nAvailable agent types:\n- general-purpose: all tools.\n- Explore: read-only code search.\n- Plan: read-only implementation planning.\n- Coordinator: task orchestration only. Always use run_in_background=true when spawning workers. Never use sync mode. Use TaskWait to wait for workers. Never busy-poll with repeated TaskList calls. Use TaskList and TaskGet for inspection and result retrieval only. After all target workers settle, synthesize their results into one final answer. Workers are automatically isolated via git worktrees.\n- docs-lookup: documentation lookup.",
 		InputPrototype:  AgentInput{},
+		TimeoutSeconds:  AgentToolDefaultHardTimeoutSeconds,
 		ReadOnly:        coretools.BoolPtr(false),
 		ConcurrencySafe: coretools.BoolPtr(true),
 		Destructive:     coretools.BoolPtr(false),
@@ -46,13 +50,25 @@ func (t *AgentTool) ValidateInput(_ coretools.ExecutionContext, input any) (bool
 	if strings.TrimSpace(in.Prompt) == "" {
 		return false, "prompt must not be empty."
 	}
+	if _, msg := agentTimeoutSeconds(in); msg != "" {
+		return false, msg
+	}
 	return true, ""
+}
+
+func (t *AgentTool) TimeoutForInput(input any) time.Duration {
+	seconds, _ := agentTimeoutSeconds(derefAgentInput(input))
+	return time.Duration(seconds+SubagentFinalizeSeconds+AgentToolHardTimeoutGraceSecs) * time.Second
 }
 
 func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionContext, input any) (string, error) {
 	in := derefAgentInput(input)
 	if in.SubagentType == "" {
 		in.SubagentType = "general-purpose"
+	}
+	timeoutSeconds, timeoutErr := agentTimeoutSeconds(in)
+	if timeoutErr != "" {
+		return "Error: " + timeoutErr, nil
 	}
 	cfg, ok := configFromContext(execCtx)
 	if !ok {
@@ -118,6 +134,7 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 			return fmt.Sprintf("Error: Too many active background workers in this scope. Limit is %d.", MaxBackgroundWorkersPerScope), nil
 		}
 		extraContext := copyAgentExtraContext(execCtx)
+		extraContext["subagent_timeout_seconds"] = timeoutSeconds
 		if worktreePath != "" {
 			extraContext["worktree_path"] = worktreePath
 			extraContext["worktree_cwd"] = worktreePath
@@ -130,6 +147,7 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 	record := taskRuntime.RegisterForegroundTask(taskID, parentTaskID, parentScopeID, workerLabel, in.Description, in.SubagentType)
 	taskRuntime.EnsureScope(subagentScopeID)
 	extraContext := copyAgentExtraContext(execCtx)
+	extraContext["subagent_timeout_seconds"] = timeoutSeconds
 	extraContext["scope_id"] = subagentScopeID
 	extraContext["current_task_id"] = taskID
 	extraContext["parent_scope_id"] = parentScopeID
@@ -161,6 +179,53 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 		result = fmt.Sprintf("Sub-agent returned before its background child tasks settled. Stopped and discarded %d background task(s).\n\nPartial sub-agent output:\n%s", cleanupReport["active_tasks_stopped"], result)
 	}
 	return fmt.Sprintf("[Sub-agent: %s]\n[Task: %s]\n[Tokens: %d in / %d out]\n\n%s", in.SubagentType, in.Description, sub.TotalInputTokens, sub.TotalOutputTokens, result), nil
+}
+
+func agentTimeoutSeconds(input AgentInput) (int, string) {
+	return parseAgentTimeoutSeconds(input.TimeoutSeconds)
+}
+
+func parseAgentTimeoutSeconds(raw any) (int, string) {
+	if raw == nil {
+		return DefaultSubagentTimeoutSeconds, ""
+	}
+	switch v := raw.(type) {
+	case int:
+		return validateAgentTimeoutSeconds(v)
+	case int32:
+		return validateAgentTimeoutSeconds(int(v))
+	case int64:
+		return validateAgentTimeoutSeconds(int(v))
+	case float32:
+		return validateAgentTimeoutSeconds(int(v))
+	case float64:
+		return validateAgentTimeoutSeconds(int(v))
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, "timeout_seconds must be an integer number of seconds."
+		}
+		return validateAgentTimeoutSeconds(int(n))
+	case string:
+		text := strings.TrimSpace(strings.TrimSuffix(v, "s"))
+		if text == "" {
+			return 0, "timeout_seconds must not be empty."
+		}
+		n, err := strconv.Atoi(text)
+		if err != nil {
+			return 0, "timeout_seconds must be an integer number of seconds."
+		}
+		return validateAgentTimeoutSeconds(n)
+	default:
+		return 0, fmt.Sprintf("timeout_seconds must be an integer number of seconds, got %T.", raw)
+	}
+}
+
+func validateAgentTimeoutSeconds(seconds int) (int, string) {
+	if seconds <= 0 {
+		return 0, "timeout_seconds must be greater than 0."
+	}
+	return seconds, ""
 }
 
 func derefAgentInput(input any) AgentInput {

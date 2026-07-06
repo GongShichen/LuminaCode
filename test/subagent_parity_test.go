@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"LuminaCode/agent"
 	"LuminaCode/config"
@@ -112,6 +113,94 @@ func TestSubAgentAbortCheckReturnsAbortText(t *testing.T) {
 	}
 	if !strings.Contains(result, "Sub-agent aborted by user") {
 		t.Fatalf("expected abort text, got %q", result)
+	}
+}
+
+func TestSubAgentDeadlineReturnsPartialProgressInsteadOfToolError(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.APIKey = "test-key"
+	cfg.APIBaseURL = "http://127.0.0.1:1"
+	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
+	def := agent.AgentDef{Name: "general-purpose", Description: "test", MaxTurns: 5}
+	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(newSearchTool()), def, nil, "", "general-purpose", coretools.ExecutionContext{})
+	session := &agent.SubAgentSessionState{
+		Messages: []map[string]any{
+			{
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "text", "text": "partial project findings"}},
+			},
+		},
+		RecentToolObservations: []map[string]any{
+			{
+				"call":    coretools.ToolCall{Name: "search"},
+				"content": "found package manifest\nsecond line",
+			},
+		},
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	result := sub.ExecuteOneRequest(ctx, "inspect", session)
+
+	for _, want := range []string{"300s timeout", "partial project findings", "search: found package manifest"} {
+		if !strings.Contains(result.FinalText, want) {
+			t.Fatalf("partial timeout result missing %q:\n%s", want, result.FinalText)
+		}
+	}
+	if strings.Contains(result.FinalText, "<tool_use_error>") {
+		t.Fatalf("subagent timeout should not be surfaced as a tool_use_error:\n%s", result.FinalText)
+	}
+}
+
+func TestSubAgentRunAsksModelToFinalizeAfterTimeout(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		call := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if call == 1 {
+			time.Sleep(1200 * time.Millisecond)
+			fmt.Fprint(w, "data: {\"id\":\"msg-1\",\"choices\":[{\"delta\":{\"content\":\"late text\"}}]}\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "Stop using tools") ||
+			!strings.Contains(string(body), "time limit") {
+			t.Fatalf("finalize request should instruct subagent to stop and summarize known context:\n%s", string(body))
+		}
+		fmt.Fprint(w, "data: {\"id\":\"msg-2\",\"choices\":[{\"delta\":{\"content\":\"finalized from known facts\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"msg-2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := config.NewConfig()
+	cfg.APIKey = "test-key"
+	cfg.APIBaseURL = server.URL
+	cfg.APIModel = "gpt-5"
+	cfg.APIType = "openai_compatible"
+	cfg.APIMaxTokens = 256
+	cfg.SessionDir = t.TempDir()
+	def := agent.AgentDef{Name: "general-purpose", Description: "test", MaxTurns: 5}
+	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "general-purpose", coretools.ExecutionContext{
+		"subagent_timeout_seconds": 1,
+	})
+
+	result, err := sub.Run(context.Background(), "inspect slowly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[Sub-agent timeout]", "1 second timeout", "main agent may ask", "finalized from known facts"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("timeout finalized result missing %q:\n%s", want, result)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected timed-out request plus finalize request, got %d", calls.Load())
 	}
 }
 

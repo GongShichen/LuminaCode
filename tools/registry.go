@@ -217,7 +217,13 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 		}
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, tool.Timeout())
+	timeout := tool.Timeout()
+	if timeouter, ok := tool.(InputTimeoutTool); ok {
+		if inputTimeout := timeouter.TimeoutForInput(input); inputTimeout > 0 {
+			timeout = inputTimeout
+		}
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	type execResult struct {
@@ -242,7 +248,7 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 			Content: fmt.Sprintf(
 				"<tool_use_error>\nTool '%s' timed out after %.0fs.\nThe operation took too long to complete. Consider:\n  - Breaking the task into smaller steps.\n  - Using a more targeted query or path.\n  - Increasing the timeout if this is expected to be slow.\nDo NOT retry the exact same call - it will time out again.\n</tool_use_error>",
 				tool.Name(),
-				tool.Timeout().Seconds(),
+				timeout.Seconds(),
 			),
 			IsError: true,
 		}

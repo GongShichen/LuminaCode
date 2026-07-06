@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
 	"LuminaCode/memory"
@@ -36,6 +37,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "daemon" {
+		return backend.RunDaemonCLI(args[1:])
+	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
@@ -112,6 +116,9 @@ func run(args []string) error {
 	if *listFlag {
 		printSessions(store)
 		return nil
+	}
+	if *prompt == "" {
+		return fmt.Errorf("interactive Go TUI has been removed. Use the TypeScript frontend command 'lumina', or run 'lumina-backend -p <prompt>' for headless mode")
 	}
 
 	if cfg.AutoMemoryEnabled {

@@ -20,6 +20,9 @@ func TestSessionMemoryCommitsOneSummaryPerInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	if want := filepath.Join(cfg.SessionDir, "sess", "session.sqlite"); store.Path() != want {
+		t.Fatalf("session memory sqlite should live under the session directory, got %s want %s", store.Path(), want)
+	}
 
 	if err := store.IngestMessages(context.Background(), sessionMemoryMessages(4)); err != nil {
 		t.Fatal(err)

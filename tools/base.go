@@ -63,6 +63,10 @@ type ObservableInputBackfiller interface {
 	BackfillObservableInput(input any, ctx ExecutionContext) any
 }
 
+type InputTimeoutTool interface {
+	TimeoutForInput(input any) time.Duration
+}
+
 type ToolSpec struct {
 	Name              string
 	Description       string

@@ -48,13 +48,13 @@ var BuiltinCommands = buildBuiltinCommands()
 var CommandMeta = buildCommandMeta()
 
 type CommandCompletionItem struct {
-	Name        string
-	Description string
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type CommandHelpRow struct {
-	Command     string
-	Description string
+	Command     string `json:"command"`
+	Description string `json:"description"`
 }
 
 type SlashDispatchKind string

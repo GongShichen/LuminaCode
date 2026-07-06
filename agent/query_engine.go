@@ -145,8 +145,14 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 		if state == nil {
 			s := NewAgentState()
 			state = &s
-			if q.Config.Yolo && state.PermissionState != nil {
-				state.PermissionState.YoloMode = true
+		}
+		if q.Config.Yolo && state.PermissionState != nil {
+			state.PermissionState.YoloMode = true
+		}
+		if state.PermissionState != nil && state.PermissionState.YoloMode {
+			q.Config.Yolo = true
+			if q.CoreEngine != nil {
+				q.CoreEngine.Config.Yolo = true
 			}
 		}
 		sid := ""
@@ -284,6 +290,9 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 }
 
 func (q *QueryEngine) requestSkillShellPermission(ctx context.Context, out chan<- StreamEvent, req skills.SkillShellPermissionRequest) bool {
+	if q != nil && q.Config.Yolo {
+		return true
+	}
 	ch := make(chan bool, 1)
 	q.skillPermissionMu.Lock()
 	if q.skillPermissionCh != nil {
@@ -355,6 +364,13 @@ func (e *CoreExecutionEngine) skillRegistryMessage(skill skills.SkillSpec, promp
 }
 
 func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string) {
+	if stateHasConsecutiveUserPrompt(state, normalizedPrompt) {
+		state.LastQuery = normalizedPrompt
+		if q.CoreEngine != nil {
+			q.CoreEngine.LastState = state
+		}
+		return
+	}
 	state.LastQuery = normalizedPrompt
 	state.UserTurnCount++
 	state.MemoryWritesSinceExtraction = false
@@ -369,4 +385,45 @@ func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string)
 	if q.CoreEngine != nil {
 		q.CoreEngine.LastState = state
 	}
+}
+
+func stateHasConsecutiveUserPrompt(state *AgentState, normalizedPrompt string) bool {
+	if state == nil || len(state.Messages) == 0 {
+		return false
+	}
+	last := state.Messages[len(state.Messages)-1]
+	if stringFromAny(last["role"]) != "user" {
+		return false
+	}
+	return userMessagePlainText(last["content"]) == strings.TrimSpace(normalizedPrompt)
+}
+
+func userMessagePlainText(content any) string {
+	if text, ok := content.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	var parts []string
+	switch blocks := content.(type) {
+	case []map[string]any:
+		for _, block := range blocks {
+			if stringFromAny(block["type"]) == "text" {
+				parts = append(parts, strings.TrimSpace(stringFromAny(block["text"])))
+			}
+		}
+	case []any:
+		for _, raw := range blocks {
+			block, ok := raw.(map[string]any)
+			if !ok || stringFromAny(block["type"]) != "text" {
+				continue
+			}
+			parts = append(parts, strings.TrimSpace(stringFromAny(block["text"])))
+		}
+	}
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			filtered = append(filtered, strings.TrimSpace(part))
+		}
+	}
+	return strings.TrimSpace(strings.Join(filtered, "\n\n"))
 }
