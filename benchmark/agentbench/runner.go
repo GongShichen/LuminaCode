@@ -156,7 +156,6 @@ func runCase(ctx context.Context, c CaseSpec, options RunnerOptions) CaseResult 
 	result.FirstToolCallMS = agentResult.FirstToolCallMS
 	result.InputTokens = agentResult.InputTokens
 	result.OutputTokens = agentResult.OutputTokens
-	result.EstimatedCost = agentResult.EstimatedCost
 	result.ToolCalls = agentResult.ToolCalls
 
 	validationStart := time.Now()
@@ -291,7 +290,7 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		FailureCategories:       map[string]int{},
 		BenchmarkSuiteBreakdown: map[string]float64{},
 	}
-	var durations, ttft, firstTool, firstTest, inputTokens, outputTokens, costs, patchRates, testRates []float64
+	var durations, ttft, firstTool, firstTest, inputTokens, outputTokens, patchRates, testRates []float64
 	var failing []TopFailingCase
 	byBenchmarkTotal := map[string]int{}
 	byBenchmarkResolved := map[string]int{}
@@ -308,7 +307,6 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		}
 		inputTokens = append(inputTokens, float64(result.InputTokens))
 		outputTokens = append(outputTokens, float64(result.OutputTokens))
-		costs = append(costs, result.EstimatedCost)
 		patchRates = append(patchRates, result.PatchApplyRate)
 		testRates = append(testRates, result.TestPassRate)
 		summary.TotalToolCalls += result.ToolCalls
@@ -335,10 +333,8 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 	summary.FirstTestMillis = latencySummary(firstTest)
 	summary.AverageInputTokens = Average(inputTokens)
 	summary.AverageOutputTokens = Average(outputTokens)
-	summary.AverageEstimatedCost = Average(costs)
 	summary.InputTokens = latencySummary(inputTokens)
 	summary.OutputTokens = latencySummary(outputTokens)
-	summary.EstimatedCost = latencySummary(costs)
 	summary.AveragePatchApplyRate = Average(patchRates)
 	summary.AverageTestPassRate = Average(testRates)
 	for benchmark, total := range byBenchmarkTotal {

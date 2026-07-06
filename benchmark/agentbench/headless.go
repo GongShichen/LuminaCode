@@ -60,19 +60,12 @@ func (HeadlessAgentRunner) Run(ctx context.Context, cfg config.Config, prompt st
 			engine.ResolvePermission(agent.PermissionOnce, event.Content)
 		case "error":
 			result.ErrorType = event.Content
-		case "cost":
-			if cost, ok := floatFromAny(event.Metadata["cost"]); ok {
-				result.EstimatedCost = cost
-			}
 		case "done":
 			timeline = append(timeline, newTimelineEvent(start, time.Now(), "final_answer", nil))
 		}
 	}
 	result.FinalText = final.String()
 	result.InputTokens, result.OutputTokens = state.TokenTotals()
-	if result.EstimatedCost == 0 {
-		result.EstimatedCost = engine.SessionCost
-	}
 	result.Timeline = timeline
 	return result
 }
@@ -84,26 +77,4 @@ func newTimelineEvent(start time.Time, at time.Time, name string, metadata map[s
 		TimestampUnixNano: at.UnixNano(),
 		Metadata:          metadata,
 	}
-}
-
-func floatFromAny(value any) (float64, bool) {
-	switch v := value.(type) {
-	case float64:
-		return v, true
-	case float32:
-		return float64(v), true
-	case int:
-		return float64(v), true
-	case int64:
-		return float64(v), true
-	case jsonNumber:
-		f, err := v.Float64()
-		return f, err == nil
-	default:
-		return 0, false
-	}
-}
-
-type jsonNumber interface {
-	Float64() (float64, error)
 }

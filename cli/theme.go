@@ -57,7 +57,6 @@ var RichTheme = map[string]string{
 	"tool.result":      "dim",
 	"tool.success":     "green",
 	"tool.error":       "bold red",
-	"cost":             "dim",
 	"separator":        "dim",
 	"info":             "dim",
 	"warning":          "bold yellow",

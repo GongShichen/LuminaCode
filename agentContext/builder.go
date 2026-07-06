@@ -40,6 +40,12 @@ const memorySectionTemplate = "## Persistent Memory\n\n" +
 	"- Content already in LUMINA.md or AGENTS.md\n" +
 	"- Ephemeral task details"
 
+const sessionMemorySection = "## Session History Recall\n\n" +
+	"This session keeps a local SQLite commit log of summarized conversation intervals. " +
+	"When earlier conversation details may have been compressed or forgotten, use the read-only " +
+	"`session_history_list` tool first, then `session_history_get` for the relevant commit. " +
+	"Session history is auxiliary evidence and does not override the current user request, project instructions, or fresh tool output."
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -699,6 +705,17 @@ func BuildMemoryBehaviorSection(memorySection string) (PromptSection, error) {
 	}, nil
 }
 
+func BuildSessionMemoryBehaviorSection(enabled bool) (PromptSection, error) {
+	if !enabled {
+		return PromptSection{}, errors.New("session memory disabled")
+	}
+	return PromptSection{
+		"session-memory-behavior",
+		sessionMemorySection,
+		true,
+	}, nil
+}
+
 func BuildSubagentIdentitySection(agentName, description string) PromptSection {
 	content := fmt.Sprintf(
 		"You are a %s sub-agent. %s", agentName, description)
@@ -798,6 +815,10 @@ func BuildInitialContext(cfg config.Config, memorySection string) (InitialContex
 	memoryPromptSection, err := BuildMemoryBehaviorSection(memorySection)
 	if err == nil {
 		sections = append(sections, memoryPromptSection)
+	}
+	sessionMemoryPromptSection, err := BuildSessionMemoryBehaviorSection(cfg.SessionMemoryEnabled)
+	if err == nil {
+		sections = append(sections, sessionMemoryPromptSection)
 	}
 	return InitialContext{
 		CWD:              cwd,

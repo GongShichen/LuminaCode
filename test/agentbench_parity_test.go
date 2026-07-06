@@ -85,7 +85,6 @@ func TestAgentBenchBuildSummaryIncludesTailMetrics(t *testing.T) {
 			FirstTestMS:     &firstTest,
 			InputTokens:     100,
 			OutputTokens:    20,
-			EstimatedCost:   0.1,
 			PatchApplyRate:  1,
 			TestPassRate:    1,
 		},
@@ -96,7 +95,6 @@ func TestAgentBenchBuildSummaryIncludesTailMetrics(t *testing.T) {
 			TTFTMillis:      &ttftB,
 			InputTokens:     300,
 			OutputTokens:    40,
-			EstimatedCost:   0.3,
 			ErrorType:       "validation_failed",
 		},
 	})
@@ -271,7 +269,6 @@ func (fakeAgentRunner) Run(_ context.Context, cfg config.Config, _ string, _ str
 		FinalText:       "done",
 		InputTokens:     123,
 		OutputTokens:    45,
-		EstimatedCost:   0.0123,
 		ToolCalls:       1,
 		TTFTMillis:      &ttft,
 		FirstToolCallMS: &firstTool,

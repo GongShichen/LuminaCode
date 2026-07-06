@@ -54,58 +54,6 @@ type LLMClient interface {
 	) (string, error)
 }
 
-type Pricing struct {
-	Input  float64 `json:"input"`
-	Output float64 `json:"output"`
-}
-
-var pricing = map[string]Pricing{
-	"claude-opus-4":     {Input: 15.00, Output: 75.00},
-	"claude-sonnet-4":   {Input: 3.00, Output: 15.00},
-	"claude-haiku-4":    {Input: 0.80, Output: 4.00},
-	"deepseek-v4-pro":   {Input: 0.55, Output: 2.19},
-	"deepseek-v4-flash": {Input: 0.14, Output: 0.28},
-	"deepseek-reasoner": {Input: 0.55, Output: 2.19},
-	"deepseek-chat":     {Input: 0.27, Output: 1.10},
-	"gpt-5":             {Input: 1.25, Output: 10.00},
-	"gpt-5-mini":        {Input: 0.35, Output: 2.00},
-	"gpt-5-nano":        {Input: 0.10, Output: 0.50},
-	"gpt-4.1":           {Input: 2.00, Output: 8.00},
-	"gpt-4.1-mini":      {Input: 0.40, Output: 2.00},
-	"gpt-4.1-nano":      {Input: 0.10, Output: 0.80},
-	"gpt-4o":            {Input: 2.50, Output: 10.00},
-	"gpt-4o-mini":       {Input: 0.15, Output: 0.60},
-	"o4-mini":           {Input: 1.10, Output: 4.40},
-	"o3":                {Input: 10.00, Output: 40.00},
-	"o3-mini":           {Input: 1.10, Output: 4.40},
-	"o1":                {Input: 15.00, Output: 60.00},
-}
-
-var defaultPricing = Pricing{Input: 3.00, Output: 15.00}
-
-func GetPricing(model string) Pricing {
-	modelLower := strings.ToLower(strings.TrimSpace(model))
-	if p, ok := pricing[modelLower]; ok {
-		return p
-	}
-
-	prefixes := make([]string, 0, len(pricing))
-	for prefix := range pricing {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Slice(prefixes, func(i, j int) bool {
-		return len(prefixes[i]) > len(prefixes[j])
-	})
-
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(modelLower, prefix) {
-			return pricing[prefix]
-		}
-	}
-
-	return defaultPricing
-}
-
 func isDeepSeekModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "deepseek")
 }

@@ -14,7 +14,6 @@ func TestCLICommandMetadataMatchesPythonBuiltins(t *testing.T) {
 		"/clear",
 		"/save",
 		"/s",
-		"/cost",
 		"/tokens",
 		"/compact",
 		"/compress",
@@ -34,7 +33,7 @@ func TestCLICommandMetadataMatchesPythonBuiltins(t *testing.T) {
 			t.Fatalf("command[%d]=%q want %q", i, luminacli.BuiltinCommands[i], want)
 		}
 	}
-	if luminacli.CommandMeta["/s"] != "Alias for /save" || luminacli.CommandMeta["/tokens"] != "Alias for /cost" {
+	if luminacli.CommandMeta["/s"] != "Alias for /save" {
 		t.Fatalf("alias metadata mismatch: %#v", luminacli.CommandMeta)
 	}
 	for _, command := range []string{"/q", "/quit", "/exit"} {

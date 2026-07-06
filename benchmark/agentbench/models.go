@@ -55,7 +55,6 @@ type AgentRunResult struct {
 	ErrorType       string              `json:"error_type,omitempty"`
 	InputTokens     int                 `json:"input_tokens"`
 	OutputTokens    int                 `json:"output_tokens"`
-	EstimatedCost   float64             `json:"estimated_cost"`
 	ToolCalls       int                 `json:"tool_calls"`
 	TTFTMillis      *float64            `json:"ttft_ms,omitempty"`
 	FirstToolCallMS *float64            `json:"first_tool_call_ms,omitempty"`
@@ -73,7 +72,6 @@ type CaseResult struct {
 	FirstTestMS       *float64        `json:"first_test_ms,omitempty"`
 	InputTokens       int             `json:"input_tokens"`
 	OutputTokens      int             `json:"output_tokens"`
-	EstimatedCost     float64         `json:"estimated_cost"`
 	ToolCalls         int             `json:"tool_calls"`
 	ErrorType         string          `json:"error_type,omitempty"`
 	FinalPatchPath    string          `json:"final_patch_path,omitempty"`
@@ -107,10 +105,8 @@ type SuiteSummary struct {
 	FirstTestMillis         LatencySummary     `json:"first_test_ms"`
 	AverageInputTokens      float64            `json:"average_input_tokens"`
 	AverageOutputTokens     float64            `json:"average_output_tokens"`
-	AverageEstimatedCost    float64            `json:"average_estimated_cost"`
 	InputTokens             LatencySummary     `json:"input_tokens"`
 	OutputTokens            LatencySummary     `json:"output_tokens"`
-	EstimatedCost           LatencySummary     `json:"estimated_cost"`
 	FailureCategories       map[string]int     `json:"failure_categories,omitempty"`
 	TopFailingCases         []TopFailingCase   `json:"top_failing_cases,omitempty"`
 	AveragePatchApplyRate   float64            `json:"average_patch_apply_rate"`

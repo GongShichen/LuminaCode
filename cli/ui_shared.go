@@ -126,10 +126,6 @@ func NormalizePermissionAnswer(answer string) string {
 	}
 }
 
-func CalculateSessionCost(inputTokens, outputTokens int, inputPricePer1K, outputPricePer1K float64) float64 {
-	return ((float64(inputTokens) / 1000) * inputPricePer1K) + ((float64(outputTokens) / 1000) * outputPricePer1K)
-}
-
 func FormatCWDForDisplay(cwd string, maxWidth ...int) string {
 	width := 55
 	if len(maxWidth) > 0 && maxWidth[0] > 0 {
@@ -156,7 +152,7 @@ func FormatCWDForDisplay(cwd string, maxWidth ...int) string {
 	return string(runes[:headEnd]) + "..." + string(runes[tailStart:])
 }
 
-func BuildSessionToolbar(state ToolbarState, inputPricePer1K, outputPricePer1K float64, separator ...string) string {
+func BuildSessionToolbar(state ToolbarState, separator ...string) string {
 	if state == nil {
 		return ""
 	}
@@ -177,10 +173,6 @@ func BuildSessionToolbar(state ToolbarState, inputPricePer1K, outputPricePer1K f
 		} else {
 			parts = append(parts, fmt.Sprintf("%d tok", totalTokens))
 		}
-	}
-	totalCost := CalculateSessionCost(inputTokens, outputTokens, inputPricePer1K, outputPricePer1K)
-	if totalCost > 0.0001 {
-		parts = append(parts, fmt.Sprintf("$%.4f", totalCost))
 	}
 	if state.YoloEnabled() {
 		parts = append(parts, YoloLabel)

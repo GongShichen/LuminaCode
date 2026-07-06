@@ -55,9 +55,6 @@ func TestUISharedHelpersMatchPython(t *testing.T) {
 	if luminacli.TranslateBackendRiskLevel("normal") != "medium" || luminacli.TranslateBackendRiskLevel("weird") != "medium" {
 		t.Fatal("risk translation should mirror Python")
 	}
-	if cost := luminacli.CalculateSessionCost(1000, 2000, 0.003, 0.015); cost != 0.033 {
-		t.Fatalf("unexpected cost: %v", cost)
-	}
 	if got := luminacli.FormatCWDForDisplay("/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", 20); !strings.Contains(got, "...") || len(got) > 20 {
 		t.Fatalf("expected middle-truncated cwd, got %q", got)
 	}
@@ -67,11 +64,14 @@ func TestUISharedHelpersMatchPython(t *testing.T) {
 	if got := luminacli.FormatCWDForDisplay("abcdefghij", 4); got != "ab...bcdefghij" {
 		t.Fatalf("small-width cwd truncation should mirror Python slice semantics, got %q", got)
 	}
-	toolbar := luminacli.BuildSessionToolbar(toolbarTestState{turns: 3, input: 1200, output: 900, yolo: true}, 0.003, 0.015, " | ")
-	for _, want := range []string{"T3", "2K tok", "$0.0171", luminacli.YoloLabel} {
+	toolbar := luminacli.BuildSessionToolbar(toolbarTestState{turns: 3, input: 1200, output: 900, yolo: true}, " | ")
+	for _, want := range []string{"T3", "2K tok", luminacli.YoloLabel} {
 		if !strings.Contains(toolbar, want) {
 			t.Fatalf("toolbar missing %q: %q", want, toolbar)
 		}
+	}
+	if strings.Contains(toolbar, "$") {
+		t.Fatalf("toolbar should not include currency text: %q", toolbar)
 	}
 }
 
@@ -82,7 +82,6 @@ func TestUIRuntimeEventMappingAndFrameUpdates(t *testing.T) {
 	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("thinking", "hmm", nil)))
 	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("tool_call", "read_file", nil)))
 	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("tool_result", "first line\nsecond line", map[string]any{"result": "first line\nsecond line"})))
-	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("cost", "$0.0100", map[string]any{"cost": 0.01})))
 	rt.ApplyUIEvent(rt.ToUIEvent(agent.NewStreamEvent("error", "boom", nil)))
 
 	entries := rt.Frame.TranscriptEntries
@@ -96,9 +95,6 @@ func TestUIRuntimeEventMappingAndFrameUpdates(t *testing.T) {
 		rt.Frame.TaskActivityEntries[0]["summary"] != "[tool] read_file" ||
 		rt.Frame.TaskActivityEntries[1]["summary"] != "[tool result] first line" {
 		t.Fatalf("tool activity should stay out of transcript and land in task activity, got %#v", rt.Frame.TaskActivityEntries)
-	}
-	if rt.Frame.SessionCostText != "$0.0100" || rt.Frame.SessionCostValue != 0.01 {
-		t.Fatalf("cost event not applied: %#v", rt.Frame)
 	}
 	if len(rt.Frame.Errors) != 1 || rt.Frame.Errors[0] != "boom" {
 		t.Fatalf("fatal event should append errors, got %#v", rt.Frame.Errors)
@@ -622,10 +618,13 @@ func TestAgentStateImplementsToolbarState(t *testing.T) {
 	state.TotalOutputTokens = 500
 	state.PermissionState = security.DefaultPermissionState()
 	state.PermissionState.YoloMode = true
-	toolbar := luminacli.BuildSessionToolbar(&state, 0.003, 0.015, " | ")
-	for _, want := range []string{"T2", "1K tok", "$0.0093", luminacli.YoloLabel} {
+	toolbar := luminacli.BuildSessionToolbar(&state, " | ")
+	for _, want := range []string{"T2", "1K tok", luminacli.YoloLabel} {
 		if !strings.Contains(toolbar, want) {
 			t.Fatalf("agent state toolbar missing %q: %q", want, toolbar)
 		}
+	}
+	if strings.Contains(toolbar, "$") {
+		t.Fatalf("agent state toolbar should not include currency text: %q", toolbar)
 	}
 }

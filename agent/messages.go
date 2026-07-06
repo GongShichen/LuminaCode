@@ -42,6 +42,7 @@ func AddUsage(state *AgentState, usageOrInput any, outputTokens ...int) {
 func CommitAssistantTurn(state *AgentState, thinkingContent []map[string]any, fullText string, toolCalls []coretools.ToolCall, messageID string, inputTokens, outputTokens int) {
 	AddUsage(state, inputTokens, outputTokens)
 	AppendAssistantMessage(state, thinkingContent, fullText, toolCalls, messageID)
+	tagLastMessageWithSessionTurn(state)
 }
 
 func BuildAssistantMessage(thinkingContent []map[string]any, fullText string, toolCalls []coretools.ToolCall, messageID string) map[string]any {
@@ -138,6 +139,20 @@ func AppendToolResultsMessage(state *AgentState, toolResults []map[string]any) {
 		deduped = append(deduped, result)
 	}
 	state.Messages = append(state.Messages, map[string]any{"role": "user", "content": deduped})
+	tagLastMessageWithSessionTurn(state)
+}
+
+func tagLastMessageWithSessionTurn(state *AgentState) {
+	if state == nil || len(state.Messages) == 0 || state.UserTurnCount <= 0 {
+		return
+	}
+	msg := state.Messages[len(state.Messages)-1]
+	metadata, _ := msg["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["session_user_turn"] = state.UserTurnCount
+	msg["metadata"] = metadata
 }
 
 func RepairOrphanTools(messages []map[string]any) []map[string]any {

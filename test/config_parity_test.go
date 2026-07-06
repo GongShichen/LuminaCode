@@ -36,8 +36,14 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "mcp_enabled": false,
   "prompt_cache_ttl_seconds": 42.5,
   "session_dir": ".Lumina/sessions-local",
-  "api_input_price_per_1k": 0.12,
-  "api_output_price_per_1k": 0.34,
+  "session_memory_enabled": true,
+  "session_memory_turn_interval": 9,
+  "session_memory_summary_model": "summary-model",
+  "session_memory_summary_max_tokens": 777,
+  "session_history_get_message_limit": 13,
+  "session_memory_max_commits": 33,
+  "session_memory_max_messages": 444,
+  "session_memory_vacuum_after_eviction": true,
   "auto_memory_directory": ".Lumina/memory",
   "extraction_model": "extract-model",
   "skills_dir": ".Lumina/PROJECT_SKILLS",
@@ -59,6 +65,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")
 	t.Setenv("LUMINA_ANTHROPIC_CACHE_EDITS", "true")
 	t.Setenv("LUMINA_UI_BACKEND", "legacy_terminal")
+	t.Setenv("SESSION_MEM_TURN", "11")
 
 	cfg := config.NewConfig()
 	if cfg.APIMaxTokens != 1234 || cfg.MCPEnabled {
@@ -76,14 +83,21 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	if cfg.SessionDir != filepath.Join(dir, ".Lumina", "sessions-local") {
 		t.Fatalf("session dir was not resolved from defaults: %s", cfg.SessionDir)
 	}
+	if !cfg.SessionMemoryEnabled ||
+		cfg.SessionMemoryTurnInterval != 11 ||
+		cfg.SessionMemorySummaryModel != "summary-model" ||
+		cfg.SessionMemorySummaryMaxTokens != 777 ||
+		cfg.SessionHistoryGetMessageLimit != 13 ||
+		cfg.SessionMemoryMaxCommits != 33 ||
+		cfg.SessionMemoryMaxMessages != 444 ||
+		!cfg.SessionMemoryVacuumAfterEviction {
+		t.Fatalf("session memory defaults/env were not applied: %#v", cfg)
+	}
 	if cfg.AutoMemoryDirectory == nil || *cfg.AutoMemoryDirectory != filepath.Join(dir, ".Lumina", "memory") {
 		t.Fatalf("auto memory directory was not resolved from defaults: %#v", cfg.AutoMemoryDirectory)
 	}
 	if cfg.ExtractionModel == nil || *cfg.ExtractionModel != "extract-model" {
 		t.Fatalf("extraction model was not applied: %#v", cfg.ExtractionModel)
-	}
-	if cfg.APIInputPricePer1K == nil || *cfg.APIInputPricePer1K != 0.12 || cfg.APIOutputPricePer1K == nil || *cfg.APIOutputPricePer1K != 0.34 {
-		t.Fatalf("pricing defaults were not applied: input=%v output=%v", cfg.APIInputPricePer1K, cfg.APIOutputPricePer1K)
 	}
 	if cfg.BundledSkillsDir != filepath.Join(dir, ".Lumina", "SKILLS") {
 		t.Fatalf("bundled skill path was not resolved: %s", cfg.BundledSkillsDir)
@@ -236,9 +250,7 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
   "api_base_url": "https://one.example",
   "api_model": "model-one",
   "api_type": "anthropic",
-  "api_max_tokens": 1000,
-  "api_input_price_per_1k": 0.01,
-  "api_output_price_per_1k": 0.02
+  "api_max_tokens": 1000
 }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -257,9 +269,7 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
   "api_base_url": "https://two.example",
   "api_model": "model-two",
   "api_type": "openai_compatible",
-  "api_max_tokens": 2000,
-  "api_input_price_per_1k": 0.03,
-  "api_output_price_per_1k": 0.04
+  "api_max_tokens": 2000
 }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -269,9 +279,6 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 	}
 	if reloaded.CWD != current.CWD || !reloaded.Yolo || reloaded.AutoMemoryEnabled {
 		t.Fatalf("runtime fields should be preserved: %#v", reloaded)
-	}
-	if reloaded.APIInputPricePer1K == nil || *reloaded.APIInputPricePer1K != 0.03 || reloaded.APIOutputPricePer1K == nil || *reloaded.APIOutputPricePer1K != 0.04 {
-		t.Fatalf("pricing should reload: input=%v output=%v", reloaded.APIInputPricePer1K, reloaded.APIOutputPricePer1K)
 	}
 }
 

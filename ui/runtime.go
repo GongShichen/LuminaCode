@@ -41,8 +41,6 @@ type RenderFrame struct {
 	Warnings            []string                  `json:"warnings"`
 	Errors              []string                  `json:"errors"`
 	PermissionAudit     []map[string]any          `json:"permission_audit"`
-	SessionCostText     string                    `json:"session_cost_text"`
-	SessionCostValue    float64                   `json:"session_cost_value"`
 	ModelName           string                    `json:"model_name"`
 	ContextUsedTokens   int                       `json:"context_used_tokens"`
 	ContextLimitTokens  int                       `json:"context_limit_tokens"`
@@ -61,8 +59,6 @@ func NewRenderFrame() RenderFrame {
 		Warnings:            []string{},
 		Errors:              []string{},
 		PermissionAudit:     []map[string]any{},
-		SessionCostText:     "",
-		SessionCostValue:    0,
 	}
 }
 
@@ -307,7 +303,6 @@ func (r *UiRuntime) ToUIEvent(event agent.StreamEvent) UiEvent {
 		"tool_result":       "tool_call_finished",
 		"permission_needed": "permission_requested",
 		"error":             "ui_fatal",
-		"cost":              "session_cost_updated",
 	}
 	eventType := mapping[event.Type]
 	if eventType == "" {
@@ -334,10 +329,6 @@ func (r *UiRuntime) ApplyUIEvent(event UiEvent) {
 		r.recordInlineActivity("tool_call", FormatToolCallEntry(event))
 	case "tool_call_finished":
 		r.recordInlineActivity("tool_result", FormatToolResultEntry(event))
-	case "session_cost_updated":
-		r.Frame.SessionCostText = event.Content
-		r.Frame.SessionCostValue = floatFromAny(event.Metadata["cost"])
-		r.markDirty()
 	case "ui_warning":
 		if event.Content != "" {
 			r.Frame.Warnings = append(r.Frame.Warnings, event.Content)

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"LuminaCode/mcp"
 	"LuminaCode/memory"
 	"LuminaCode/security"
+	"LuminaCode/sessionmemory"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
 	bashpkg "LuminaCode/tools/bash"
@@ -89,6 +91,8 @@ type CoreExecutionEngine struct {
 	skillRecoveryReady map[string]bool
 	l3Regions          []agentContext.CollapsedRegion
 	cacheEditState     RuntimeCacheEditState
+	SessionID          string
+	sessionMemory      *sessionmemory.Manager
 }
 
 type permissionDecision struct {
@@ -102,9 +106,10 @@ func NewCoreExecutionEngine(cfg *config.Config) *CoreExecutionEngine {
 		cfg = &c
 	}
 	e := &CoreExecutionEngine{
-		Config:      *cfg,
-		Registry:    coretools.NewToolRegistry(),
-		TaskRuntime: NewAgentTaskRuntime(),
+		Config:        *cfg,
+		Registry:      coretools.NewToolRegistry(),
+		TaskRuntime:   NewAgentTaskRuntime(),
+		sessionMemory: sessionmemory.NewManager(),
 	}
 	e.RegisterDefaultTools()
 	e.extraction = NewExtractionController(e.Config, e.Registry)
@@ -139,6 +144,10 @@ func (e *CoreExecutionEngine) RegisterDefaultTools() {
 	e.Registry.Register(NewTaskWaitTool())
 	e.Registry.Register(NewTaskStopTool())
 	e.Registry.Register(NewSendMessageTool())
+	if e.Config.SessionMemoryEnabled {
+		e.Registry.Register(NewSessionHistoryListTool())
+		e.Registry.Register(NewSessionHistoryGetTool())
+	}
 	e.Registry.Register(coretools.NewToolSearchTool())
 	if e.Config.SkillsEnabled {
 		loader := skills.NewSkillLoader(e.Config)
@@ -506,6 +515,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		execCtx := coretools.ExecutionContext{
 			"cwd":                     e.Config.CWD,
 			"config":                  e.Config,
+			"_session_id":             e.SessionID,
 			"allowed_read_roots":      []string{e.Config.CWD},
 			"allowed_write_roots":     []string{e.Config.CWD},
 			"_registry":               activeRegistry,
@@ -640,6 +650,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		outputRecovery.ResetRetries()
 		CommitAssistantTurn(state, turn.ThinkingContent, turn.FullText, turn.ToolCalls, turn.MessageID, turn.InputTokens, turn.OutputTokens)
 		if len(turn.ToolCalls) == 0 {
+			e.RecordSessionMemory(ctx, state, false)
 			if e.extraction != nil &&
 				e.Config.AutoMemoryEnabled &&
 				e.Config.AutoMemoryDirectory != nil &&
@@ -654,9 +665,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 					}
 				}
 			}
-			cost := e.CalculateCost(state)
 			e.LastState = state
-			sendStream(ctx, out, NewStreamEvent("cost", fmt.Sprintf("$%.4f", cost), map[string]any{"cost": cost}))
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
 			return
 		}
@@ -690,6 +699,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 
 		e.executeAndCommitTools(ctx, state, executor, out)
+		e.RecordSessionMemory(ctx, state, false)
 		state.TurnCount++
 	}
 }
@@ -1213,6 +1223,7 @@ func (e *CoreExecutionEngine) maybeCompressContext(ctx context.Context, state *A
 	if currentAPITokens <= e.Config.CompressionTriggerTokens() {
 		return
 	}
+	e.RecordSessionMemory(ctx, state, false)
 	pipeline := agentContext.DefaultContextPipeline()
 	pipeline.Config = e.Config
 	compressed, stats := pipeline.Compress(
@@ -1236,6 +1247,15 @@ func (e *CoreExecutionEngine) maybeCompressContext(ctx context.Context, state *A
 		return
 	}
 	e.l3Regions = append([]agentContext.CollapsedRegion(nil), stats.CollapsedRegions...)
+}
+
+func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *AgentState, force bool) {
+	if e == nil || state == nil || e.sessionMemory == nil || e.SessionID == "" || !e.Config.SessionMemoryEnabled {
+		return
+	}
+	if err := e.sessionMemory.Observe(ctx, e.Config, e.SessionID, state.Messages, force); err != nil {
+		slog.Warn("session memory observe failed", "session_id", e.SessionID, "error", err)
+	}
 }
 
 func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *AgentState) {
@@ -1350,19 +1370,6 @@ func resolveInlineThinkingBudget(effort any) *int {
 		}
 	}
 	return nil
-}
-
-func (e *CoreExecutionEngine) CalculateCost(state *AgentState) float64 {
-	pricing := api.GetPricing(e.Config.APIModel)
-	inputPricePer1K := pricing.Input / 1000
-	outputPricePer1K := pricing.Output / 1000
-	if e.Config.APIInputPricePer1K != nil {
-		inputPricePer1K = *e.Config.APIInputPricePer1K
-	}
-	if e.Config.APIOutputPricePer1K != nil {
-		outputPricePer1K = *e.Config.APIOutputPricePer1K
-	}
-	return (float64(state.TotalInputTokens) / 1000 * inputPricePer1K) + (float64(state.TotalOutputTokens) / 1000 * outputPricePer1K)
 }
 
 func (e *CoreExecutionEngine) CheckPermissionChain(tc coretools.ToolCall, tool coretools.Tool, state *AgentState) bool {

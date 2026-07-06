@@ -184,7 +184,7 @@ func TestMainREPLStartsWithoutActiveStateLikePython(t *testing.T) {
 	cmd := exec.CommandContext(ctx, "go", "run", ".", "--api-key", "test-key", "--base-url", "http://127.0.0.1", "--api-type", "openai_compatible", "--model", "custom-model", "--bare")
 	cmd.Dir = repoRoot
 	cmd.Env = mainCLITestEnv(t, home)
-	cmd.Stdin = strings.NewReader("/cost\n/save\n/yolo\n/compact\n/exit\n")
+	cmd.Stdin = strings.NewReader("/tokens\n/save\n/yolo\n/compact\n/exit\n")
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("go run timed out; output:\n%s", output)
@@ -201,7 +201,7 @@ func TestMainREPLStartsWithoutActiveStateLikePython(t *testing.T) {
 			t.Fatalf("fresh REPL slash commands should see no active state before first user turn, missing %q output:\n%s", want, output)
 		}
 	}
-	if strings.Contains(text, "Session Cost") || strings.Contains(text, "YOLO mode:") || strings.Contains(text, "No compression needed.") {
+	if strings.Contains(text, "YOLO mode:") || strings.Contains(text, "No compression needed.") {
 		t.Fatalf("fresh REPL should not create an empty active state for slash commands, output:\n%s", output)
 	}
 	if !strings.Contains(text, "Goodbye.") {

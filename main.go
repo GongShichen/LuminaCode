@@ -418,8 +418,8 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 		}
 		fmt.Fprintf(out, "Saved %s (%d msgs, %d turns)\n", *sessionID, len(state.Messages), state.TurnCount)
 		return true, nil
-	case cmd == "cost" || cmd == "tokens":
-		printCost(out, state)
+	case cmd == "tokens":
+		printTokens(out, state)
 		return true, nil
 	case cmdName == "yolo":
 		if state == nil {
@@ -615,24 +615,18 @@ func mcpToolKind(name string) string {
 	return "resource"
 }
 
-func printCost(out io.Writer, state *agent.AgentState) {
+func printTokens(out io.Writer, state *agent.AgentState) {
 	if state == nil {
 		fmt.Fprintln(out, "No active session.")
 		return
 	}
 	inputTokens := state.TotalInputTokens
 	outputTokens := state.TotalOutputTokens
-	inputCost := (float64(inputTokens) / 1000) * 0.003
-	outputCost := (float64(outputTokens) / 1000) * 0.015
-	total := inputCost + outputCost
-	fmt.Fprintln(out, "Session Cost")
+	fmt.Fprintln(out, "Session Tokens")
 	fmt.Fprintf(out, "  Input tokens   %d\n", inputTokens)
 	fmt.Fprintf(out, "  Output tokens  %d\n", outputTokens)
 	fmt.Fprintf(out, "  Total tokens   %d\n", inputTokens+outputTokens)
 	fmt.Fprintf(out, "  Turns          %d\n", state.TurnCount)
-	fmt.Fprintf(out, "  Input cost     $%.4f\n", inputCost)
-	fmt.Fprintf(out, "  Output cost    $%.4f\n", outputCost)
-	fmt.Fprintf(out, "  Total cost     $%.4f\n", total)
 }
 
 func printSessions(store *session.Store) {

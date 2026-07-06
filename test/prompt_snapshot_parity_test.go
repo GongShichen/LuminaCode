@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"LuminaCode/agentContext"
+	"LuminaCode/config"
 )
 
 const fakePromptCWD = "/fake/project"
@@ -86,7 +87,9 @@ func mustBuildMainPrompt(t *testing.T, cwd, gitContext, memorySection string) st
 	})
 	defer restore()
 
-	prompt, err := agentContext.BuildSystemPrompt(cwd, memorySection)
+	cfg := config.NewConfigForCWD(cwd)
+	cfg.SessionMemoryEnabled = false
+	prompt, err := agentContext.BuildSystemPromptWithConfig(cfg, memorySection)
 	if err != nil {
 		t.Fatal(err)
 	}

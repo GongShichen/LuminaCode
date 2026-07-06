@@ -518,7 +518,6 @@ func TestQueryEngineShutdownTearsDownRuntimeLikePython(t *testing.T) {
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1"
 	engine := agent.NewQueryEngine(&cfg)
-	engine.SessionCost = 12.34
 	oldRuntime := engine.CoreEngine.TaskRuntime
 	record := oldRuntime.RegisterForegroundTask("task-1", "", "main", "worker", "desc", "general-purpose")
 	if record == nil {
@@ -533,8 +532,5 @@ func TestQueryEngineShutdownTearsDownRuntimeLikePython(t *testing.T) {
 	}
 	if engine.CoreEngine.TaskRuntime == nil || engine.CoreEngine.TaskRuntime == oldRuntime {
 		t.Fatalf("shutdown should replace task runtime like Python, old=%p new=%p", oldRuntime, engine.CoreEngine.TaskRuntime)
-	}
-	if engine.SessionCost != 0 {
-		t.Fatalf("shutdown should reset session cost, got %v", engine.SessionCost)
 	}
 }

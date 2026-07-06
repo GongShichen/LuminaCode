@@ -172,6 +172,21 @@ func TestInitialContextCanBeRebuiltFromConfig(t *testing.T) {
 	}
 }
 
+func TestInitialContextIncludesSessionHistoryRecallWhenEnabled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.NewConfigForCWD(dir)
+	cfg.SessionMemoryEnabled = true
+	prompt, err := agentContext.BuildSystemPromptWithConfig(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "## Session History Recall") ||
+		!strings.Contains(prompt, "session_history_list") ||
+		!strings.Contains(prompt, "session_history_get") {
+		t.Fatalf("session history recall instructions missing from prompt: %q", prompt)
+	}
+}
+
 func TestBuildMemorySectionMatchesPythonTemplateWithLuminaRename(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.NewConfig()

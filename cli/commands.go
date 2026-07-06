@@ -35,7 +35,7 @@ var BuiltinCommandSpecs = []SlashCommandSpec{
 	{Primary: "/help", Description: "Show this help"},
 	{Primary: "/clear", Description: "Start a fresh session"},
 	{Primary: "/save", Description: "Save session to disk", Aliases: []string{"/s"}},
-	{Primary: "/cost", Description: "Show token usage and API cost breakdown", Aliases: []string{"/tokens"}},
+	{Primary: "/tokens", Description: "Show token usage"},
 	{Primary: "/compact", Description: "Manually compress conversation context", Aliases: []string{"/compress"}},
 	{Primary: "/yolo", Description: "Toggle YOLO mode (skip all permission prompts)"},
 	{Primary: "/skill", Description: "Show visible skills for current directory"},
@@ -126,7 +126,7 @@ func ClassifyREPLSlashCommand(input string, registry *skills.SkillRegistry, cwd 
 		return SlashDispatch{Kind: SlashDispatchExit, Command: cmd, Name: cmdName}
 	}
 	switch cmd {
-	case "help", "clear", "save", "s", "cost", "tokens", "compact", "compress", "skill", "mcp":
+	case "help", "clear", "save", "s", "tokens", "compact", "compress", "skill", "mcp":
 		return SlashDispatch{Kind: SlashDispatchBuiltin, Command: cmd, Name: cmdName}
 	}
 	if cmdName == "yolo" || cmdName == "resume" {

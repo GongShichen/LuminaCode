@@ -41,8 +41,14 @@ type Config struct {
 
 	SessionDir string
 
-	APIInputPricePer1K  *float64
-	APIOutputPricePer1K *float64
+	SessionMemoryEnabled             bool
+	SessionMemoryTurnInterval        int
+	SessionMemorySummaryModel        string
+	SessionMemorySummaryMaxTokens    int
+	SessionHistoryGetMessageLimit    int
+	SessionMemoryMaxCommits          int
+	SessionMemoryMaxMessages         int
+	SessionMemoryVacuumAfterEviction bool
 
 	AutoMemoryEnabled                  bool
 	AutoMemoryDirectory                *string
@@ -112,8 +118,14 @@ func NewConfigForCWD(cwd string) Config {
 
 		SessionDir: filepath.Join(homeDir, ".Lumina", "sessions"),
 
-		APIInputPricePer1K:  nil,
-		APIOutputPricePer1K: nil,
+		SessionMemoryEnabled:             true,
+		SessionMemoryTurnInterval:        5,
+		SessionMemorySummaryModel:        "",
+		SessionMemorySummaryMaxTokens:    800,
+		SessionHistoryGetMessageLimit:    20,
+		SessionMemoryMaxCommits:          200,
+		SessionMemoryMaxMessages:         4000,
+		SessionMemoryVacuumAfterEviction: false,
 
 		AutoMemoryEnabled:                  true,
 		AutoMemoryDirectory:                nil,
@@ -171,8 +183,14 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.PromptCacheTTLSeconds = fresh.PromptCacheTTLSeconds
 	updated.AnthropicCacheEditsEnabled = fresh.AnthropicCacheEditsEnabled
 	updated.MaxParentTurns = fresh.MaxParentTurns
-	updated.APIInputPricePer1K = fresh.APIInputPricePer1K
-	updated.APIOutputPricePer1K = fresh.APIOutputPricePer1K
+	updated.SessionMemoryEnabled = fresh.SessionMemoryEnabled
+	updated.SessionMemoryTurnInterval = fresh.SessionMemoryTurnInterval
+	updated.SessionMemorySummaryModel = fresh.SessionMemorySummaryModel
+	updated.SessionMemorySummaryMaxTokens = fresh.SessionMemorySummaryMaxTokens
+	updated.SessionHistoryGetMessageLimit = fresh.SessionHistoryGetMessageLimit
+	updated.SessionMemoryMaxCommits = fresh.SessionMemoryMaxCommits
+	updated.SessionMemoryMaxMessages = fresh.SessionMemoryMaxMessages
+	updated.SessionMemoryVacuumAfterEviction = fresh.SessionMemoryVacuumAfterEviction
 	updated.ExtractionModel = fresh.ExtractionModel
 	updated.MemoryRecallPrefetchTimeoutSeconds = fresh.MemoryRecallPrefetchTimeoutSeconds
 	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
@@ -292,8 +310,14 @@ type luminaDefaults struct {
 	AnthropicCacheEditsEnabled         *bool    `json:"anthropic_cache_edits_enabled"`
 	MaxParentTurns                     *int     `json:"max_parent_turns"`
 	SessionDir                         *string  `json:"session_dir"`
-	APIInputPricePer1K                 *float64 `json:"api_input_price_per_1k"`
-	APIOutputPricePer1K                *float64 `json:"api_output_price_per_1k"`
+	SessionMemoryEnabled               *bool    `json:"session_memory_enabled"`
+	SessionMemoryTurnInterval          *int     `json:"session_memory_turn_interval"`
+	SessionMemorySummaryModel          *string  `json:"session_memory_summary_model"`
+	SessionMemorySummaryMaxTokens      *int     `json:"session_memory_summary_max_tokens"`
+	SessionHistoryGetMessageLimit      *int     `json:"session_history_get_message_limit"`
+	SessionMemoryMaxCommits            *int     `json:"session_memory_max_commits"`
+	SessionMemoryMaxMessages           *int     `json:"session_memory_max_messages"`
+	SessionMemoryVacuumAfterEviction   *bool    `json:"session_memory_vacuum_after_eviction"`
 	AutoMemoryEnabled                  *bool    `json:"auto_memory_enabled"`
 	AutoMemoryDirectory                *string  `json:"auto_memory_directory"`
 	ExtractionModel                    *string  `json:"extraction_model"`
@@ -379,11 +403,29 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.SessionDir != nil {
 		cfg.SessionDir = resolveProjectPath(cwd, *defaults.SessionDir)
 	}
-	if defaults.APIInputPricePer1K != nil {
-		cfg.APIInputPricePer1K = defaults.APIInputPricePer1K
+	if defaults.SessionMemoryEnabled != nil {
+		cfg.SessionMemoryEnabled = *defaults.SessionMemoryEnabled
 	}
-	if defaults.APIOutputPricePer1K != nil {
-		cfg.APIOutputPricePer1K = defaults.APIOutputPricePer1K
+	if defaults.SessionMemoryTurnInterval != nil && *defaults.SessionMemoryTurnInterval > 0 {
+		cfg.SessionMemoryTurnInterval = *defaults.SessionMemoryTurnInterval
+	}
+	if defaults.SessionMemorySummaryModel != nil {
+		cfg.SessionMemorySummaryModel = strings.TrimSpace(*defaults.SessionMemorySummaryModel)
+	}
+	if defaults.SessionMemorySummaryMaxTokens != nil && *defaults.SessionMemorySummaryMaxTokens > 0 {
+		cfg.SessionMemorySummaryMaxTokens = *defaults.SessionMemorySummaryMaxTokens
+	}
+	if defaults.SessionHistoryGetMessageLimit != nil && *defaults.SessionHistoryGetMessageLimit > 0 {
+		cfg.SessionHistoryGetMessageLimit = *defaults.SessionHistoryGetMessageLimit
+	}
+	if defaults.SessionMemoryMaxCommits != nil && *defaults.SessionMemoryMaxCommits > 0 {
+		cfg.SessionMemoryMaxCommits = *defaults.SessionMemoryMaxCommits
+	}
+	if defaults.SessionMemoryMaxMessages != nil && *defaults.SessionMemoryMaxMessages > 0 {
+		cfg.SessionMemoryMaxMessages = *defaults.SessionMemoryMaxMessages
+	}
+	if defaults.SessionMemoryVacuumAfterEviction != nil {
+		cfg.SessionMemoryVacuumAfterEviction = *defaults.SessionMemoryVacuumAfterEviction
 	}
 	if defaults.AutoMemoryEnabled != nil {
 		cfg.AutoMemoryEnabled = *defaults.AutoMemoryEnabled
@@ -615,14 +657,16 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.PromptCacheTTLSeconds = envFloat("LUMINA_PROMPT_CACHE_TTL_SECONDS", cfg.PromptCacheTTLSeconds)
 	cfg.AnthropicCacheEditsEnabled = envBool("LUMINA_ANTHROPIC_CACHE_EDITS", cfg.AnthropicCacheEditsEnabled)
 	cfg.MaxParentTurns = envInt("LUMINA_MAX_PARENT_TURNS", cfg.MaxParentTurns)
+	cfg.SessionMemoryTurnInterval = positiveIntOrDefault(envInt("SESSION_MEM_TURN", cfg.SessionMemoryTurnInterval), cfg.SessionMemoryTurnInterval)
 	cfg.HarnessMode = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_HARNESS_MODE")), cfg.HarnessMode)
-	if inputPrice := envOptionalFloat("LUMINA_INPUT_PRICE_PER_1K"); inputPrice != nil {
-		cfg.APIInputPricePer1K = inputPrice
-	}
-	if outputPrice := envOptionalFloat("LUMINA_OUTPUT_PRICE_PER_1K"); outputPrice != nil {
-		cfg.APIOutputPricePer1K = outputPrice
-	}
 	cfg.UIBackend = "prompt_toolkit_fullscreen"
+}
+
+func positiveIntOrDefault(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
 }
 
 func firstNonEmpty(values ...string) string {
@@ -716,20 +760,6 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
-}
-
-func envOptionalFloat(key string) *float64 {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return nil
-	}
-
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return nil
-	}
-
-	return &parsed
 }
 
 var (

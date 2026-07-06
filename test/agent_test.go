@@ -1367,27 +1367,6 @@ func TestRuntimeCacheEditLifecycleMatchesPython(t *testing.T) {
 	}
 }
 
-func TestCoreExecutionEngineCalculateCostMatchesPythonUnits(t *testing.T) {
-	cfg := config.NewConfig()
-	cfg.APIModel = "claude-sonnet-4-6"
-	engine := agent.NewCoreExecutionEngine(&cfg)
-	state := agent.NewAgentState()
-	state.TotalInputTokens = 1000
-	state.TotalOutputTokens = 2000
-	if got := engine.CalculateCost(&state); got != 0.033 {
-		t.Fatalf("default pricing should use Python per-1M table converted to per-1K, got %.8f", got)
-	}
-
-	inputPrice := 0.12
-	outputPrice := 0.34
-	cfg.APIInputPricePer1K = &inputPrice
-	cfg.APIOutputPricePer1K = &outputPrice
-	engine = agent.NewCoreExecutionEngine(&cfg)
-	if got := engine.CalculateCost(&state); got != 0.8 {
-		t.Fatalf("override pricing should be interpreted as per-1K, got %.8f", got)
-	}
-}
-
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

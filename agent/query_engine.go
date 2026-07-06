@@ -16,9 +16,8 @@ import (
 )
 
 type QueryEngine struct {
-	Config      config.Config
-	CoreEngine  *CoreExecutionEngine
-	SessionCost float64
+	Config     config.Config
+	CoreEngine *CoreExecutionEngine
 
 	skillPermissionMu sync.Mutex
 	skillPermissionCh chan bool
@@ -43,7 +42,6 @@ func (q *QueryEngine) Abort() { q.CoreEngine.Abort() }
 
 func (q *QueryEngine) Reset() {
 	q.CoreEngine.Reset()
-	q.SessionCost = 0
 }
 
 func (q *QueryEngine) RefreshRuntimeConfig() {
@@ -62,7 +60,6 @@ func (q *QueryEngine) Shutdown() {
 	if q.CoreEngine != nil {
 		q.CoreEngine.Shutdown()
 	}
-	q.SessionCost = 0
 }
 
 func (q *QueryEngine) ClearMCP() {
@@ -139,7 +136,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 		if strings.HasPrefix(userPrompt, "/") {
 			cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(userPrompt, "/")))
 			switch cmd {
-			case "help", "cost", "tokens", "skill", "mcp", "compact", "compress":
+			case "help", "tokens", "skill", "mcp", "compact", "compress":
 				sendStream(ctx, out, NewStreamEvent("text", fmt.Sprintf("[system] The '%s' command is handled by the REPL.\n", userPrompt), nil))
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
@@ -151,6 +148,13 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 			if q.Config.Yolo && state.PermissionState != nil {
 				state.PermissionState.YoloMode = true
 			}
+		}
+		sid := ""
+		if len(sessionID) > 0 {
+			sid = sessionID[0]
+		}
+		if q.CoreEngine != nil {
+			q.CoreEngine.SessionID = sid
 		}
 		state.Messages = StripTransientContextMessages(state.Messages)
 		q.buildOrRefreshSystemPrompt(state)
@@ -177,12 +181,13 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				AddUsage(state, execution.InputTokens, execution.OutputTokens)
 				q.commitUserTurn(state, normalizedPrompt)
 				AppendAssistantMessage(state, nil, resultText, nil, "")
+				if q.CoreEngine != nil {
+					tagLastMessageWithSessionTurn(state)
+					q.CoreEngine.RecordSessionMemory(ctx, state, false)
+				}
 				state.TurnCount++
-				cost := q.CoreEngine.CalculateCost(state)
-				q.SessionCost = cost
 				q.CoreEngine.LastState = state
 				sendStream(ctx, out, NewStreamEvent("text", resultText, nil))
-				sendStream(ctx, out, NewStreamEvent("cost", fmt.Sprintf("$%.4f", cost), map[string]any{"cost": cost}))
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
@@ -194,11 +199,6 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 		q.commitUserTurn(state, normalizedPrompt)
 		for event := range q.CoreEngine.QueryLoop(ctx, state) {
 			sendStream(ctx, out, event)
-			if event.Type == "cost" {
-				if cost, ok := event.Metadata["cost"].(float64); ok {
-					q.SessionCost = cost
-				}
-			}
 		}
 	}()
 	return out
@@ -358,10 +358,14 @@ func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string)
 	state.LastQuery = normalizedPrompt
 	state.UserTurnCount++
 	state.MemoryWritesSinceExtraction = false
-	state.Messages = append(state.Messages, map[string]any{
+	msg := map[string]any{
 		"role":    "user",
 		"content": []map[string]any{{"type": "text", "text": normalizedPrompt}},
-	})
+		"metadata": map[string]any{
+			"session_user_turn": state.UserTurnCount,
+		},
+	}
+	state.Messages = append(state.Messages, msg)
 	if q.CoreEngine != nil {
 		q.CoreEngine.LastState = state
 	}

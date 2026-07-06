@@ -243,6 +243,7 @@ func (s *Store) Delete(sessionID string) {
 	_ = os.Remove(s.skillRecoveryPath(sessionID))
 	_ = os.Remove(s.skillRecoveryCommitPath(sessionID))
 	_ = os.Remove(s.taskRuntimePath(sessionID))
+	_ = os.Remove(filepath.Join(s.dir, sessionID+".sqlite"))
 }
 
 func (s *Store) upsertMeta(sessionID string, messageCount, turnCount int, provided *Meta) (*Meta, error) {

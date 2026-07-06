@@ -514,9 +514,6 @@ func (b *TerminalRendererBackend) RenderEvent(event agent.StreamEvent) {
 	case "error":
 		b.flushToolBuffer()
 		fmt.Fprintf(b.errOut, "\n%s\n", event.Content)
-	case "cost":
-		b.flushToolBuffer()
-		fmt.Fprintf(b.out, "\n[cost] %s\n", event.Content)
 	case "done":
 		b.flushToolBuffer()
 		if strings.TrimSpace(event.Content) != "" {

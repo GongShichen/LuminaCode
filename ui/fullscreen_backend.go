@@ -314,9 +314,6 @@ func (b *FullscreenRendererBackend) RenderEvent(event agent.StreamEvent) {
 	case "error":
 		b.StatusText = strings.TrimSpace(event.Content)
 		b.refreshControls()
-	case "cost":
-		b.StatusText = event.Content
-		b.refreshControls()
 	}
 }
 
@@ -899,7 +896,7 @@ func (b *FullscreenRendererBackend) formatIdleStatus(state any) string {
 		}
 	}
 	if toolbarState, ok := state.(luminacli.ToolbarState); ok {
-		if toolbar := luminacli.BuildSessionToolbar(toolbarState, 0.003, 0.015, luminacli.ToolbarSeparator); toolbar != "" {
+		if toolbar := luminacli.BuildSessionToolbar(toolbarState, luminacli.ToolbarSeparator); toolbar != "" {
 			parts = append(parts, toolbar)
 		}
 	}

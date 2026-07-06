@@ -106,14 +106,12 @@ func RenderMarkdown(report Report) string {
 	fmt.Fprintf(&b, "| Avg input/output tokens | %.0f / %.0f |\n", report.Summary.AverageInputTokens, report.Summary.AverageOutputTokens)
 	fmt.Fprintf(&b, "| Token p90/p95 input | %s / %s |\n", fmtFloat(report.Summary.InputTokens.P90), fmtFloat(report.Summary.InputTokens.P95))
 	fmt.Fprintf(&b, "| Token p90/p95 output | %s / %s |\n", fmtFloat(report.Summary.OutputTokens.P90), fmtFloat(report.Summary.OutputTokens.P95))
-	fmt.Fprintf(&b, "| Avg cost | %.6f |\n", report.Summary.AverageEstimatedCost)
-	fmt.Fprintf(&b, "| Cost p90 / p95 | %s / %s |\n", fmtFloat(report.Summary.EstimatedCost.P90), fmtFloat(report.Summary.EstimatedCost.P95))
 	fmt.Fprintf(&b, "| Tool calls | %d |\n", report.Summary.TotalToolCalls)
 	fmt.Fprintf(&b, "\n## Cases\n\n")
-	fmt.Fprintf(&b, "| Case | Resolved | Duration | TTFT | First tool | First test | Tokens | Cost | Error |\n")
-	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
+	fmt.Fprintf(&b, "| Case | Resolved | Duration | TTFT | First tool | First test | Tokens | Error |\n")
+	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
 	for _, result := range report.Results {
-		fmt.Fprintf(&b, "| `%s` | %t | %.2fs | %s | %s | %s | %d/%d | %.6f | %s |\n",
+		fmt.Fprintf(&b, "| `%s` | %t | %.2fs | %s | %s | %s | %d/%d | %s |\n",
 			result.Case.ID,
 			result.Resolved,
 			result.DurationSeconds,
@@ -122,7 +120,6 @@ func RenderMarkdown(report Report) string {
 			fmtFloat(result.FirstTestMS),
 			result.InputTokens,
 			result.OutputTokens,
-			result.EstimatedCost,
 			emptyDash(result.ErrorType),
 		)
 	}
