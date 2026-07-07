@@ -81,7 +81,7 @@ func NewConfig() Config {
 }
 
 func NewConfigForCWD(cwd string) Config {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := userHomeDir()
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -507,7 +507,7 @@ func luminaRootCandidates(start string) []string {
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		candidates = append(candidates, filepath.Dir(exe))
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	if home := userHomeDir(); home != "" {
 		candidates = append(candidates, filepath.Join(home, ".lumina"))
 	}
 	if _, file, _, ok := runtime.Caller(0); ok {
@@ -591,7 +591,7 @@ func LuminaResourcePath(root string, elems ...string) string {
 
 func UserDefaultsPath(homeDir string) string {
 	if homeDir == "" {
-		homeDir, _ = os.UserHomeDir()
+		homeDir = userHomeDir()
 	}
 	return filepath.Join(homeDir, ".lumina", "CONFIG", "defaults.json")
 }
@@ -710,14 +710,20 @@ func resolveResourcePath(resourceDir, path string) string {
 
 func expandHome(path string) string {
 	if path == "~" {
-		home, _ := os.UserHomeDir()
-		return home
+		return userHomeDir()
 	}
 	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, path[2:])
+		return filepath.Join(userHomeDir(), path[2:])
 	}
 	return path
+}
+
+func userHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 func envBool(key string, fallback bool) bool {

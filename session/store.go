@@ -237,6 +237,7 @@ func (s *Store) ListSessions() []Meta {
 		}
 		if meta := s.loadSQLiteMeta(id); meta != nil {
 			metas = append(metas, *meta)
+			seen[id] = struct{}{}
 		}
 	}
 	sort.Slice(metas, func(i, j int) bool {
@@ -485,9 +486,22 @@ func (s *Store) migrateLegacySession(sessionID string) {
 			continue
 		}
 		if err := os.Rename(mapping.old, mapping.new); err != nil {
-			continue
+			if copyErr := copyFile(mapping.old, mapping.new); copyErr == nil {
+				_ = os.Remove(mapping.old)
+			}
 		}
 	}
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 func (s *Store) legacySessionPaths(sessionID string) []string {

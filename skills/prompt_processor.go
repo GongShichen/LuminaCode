@@ -3,16 +3,15 @@ package skills
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"LuminaCode/config"
+	bashpkg "LuminaCode/tools/bash"
 
 	shellquote "github.com/kballard/go-shellquote"
 )
@@ -231,28 +230,7 @@ func (p *PromptProcessor) runInlineShell(command, cwd, executable string) (strin
 }
 
 func shellArgv(command, executable string) []string {
-	if executable != "" {
-		name := strings.ToLower(filepath.Base(executable))
-		if name == "cmd" || name == "cmd.exe" {
-			return []string{executable, "/C", command}
-		}
-		if strings.HasPrefix(name, "powershell") || name == "pwsh" {
-			return []string{executable, "-NoProfile", "-Command", command}
-		}
-		return []string{executable, "-c", command}
-	}
-	if runtime.GOOS == "windows" {
-		comspec := os.Getenv("COMSPEC")
-		if comspec == "" {
-			comspec = "cmd.exe"
-		}
-		return []string{comspec, "/C", command}
-	}
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	return []string{shell, "-c", command}
+	return bashpkg.ShellArgv(command, executable)
 }
 
 func pythonFloatString(value float64) string {

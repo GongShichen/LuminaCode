@@ -1529,7 +1529,7 @@ func (t *BashTool) executeBackground(command, description, cwd string, timeout t
 }
 
 func runShellCommand(ctx context.Context, command, cwd string, timeout time.Duration) (int, string) {
-	return runArgvCommand(ctx, []string{"sh", "-c", command}, cwd, timeout, command)
+	return runArgvCommand(ctx, bashpkg.ShellArgv(command, ""), cwd, timeout, command)
 }
 
 func runArgvCommand(ctx context.Context, argv []string, cwd string, timeout time.Duration, originalCommand string) (int, string) {
