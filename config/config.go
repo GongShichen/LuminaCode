@@ -649,10 +649,10 @@ func exactPathExists(root, rel string) bool {
 }
 
 func applyEnvOverrides(cfg *Config) {
-	cfg.APIKey = firstNonEmpty(os.Getenv("LUMINA_API_KEY"), os.Getenv("ANTHROPIC_API_KEY"), cfg.APIKey)
-	cfg.APIBaseURL = firstNonEmpty(os.Getenv("LUMINA_API_BASE_URL"), os.Getenv("ANTHROPIC_BASE_URL"), cfg.APIBaseURL)
-	cfg.APIModel = firstNonEmpty(os.Getenv("LUMINA_API_MODEL"), os.Getenv("ANTHROPIC_MODEL"), cfg.APIModel)
-	cfg.APIType = firstNonEmpty(os.Getenv("LUMINA_API_TYPE"), cfg.APIType)
+	cfg.APIKey = firstNonEmpty(os.Getenv("LUMINA_API_KEY"), os.Getenv("LLM_API_KEY"), os.Getenv("ANTHROPIC_API_KEY"), cfg.APIKey)
+	cfg.APIBaseURL = firstNonEmpty(os.Getenv("LUMINA_API_BASE_URL"), os.Getenv("LLM_BASE_URL"), os.Getenv("ANTHROPIC_BASE_URL"), cfg.APIBaseURL)
+	cfg.APIModel = firstNonEmpty(os.Getenv("LUMINA_API_MODEL"), os.Getenv("LLM_DEFAULT_MODEL"), os.Getenv("ANTHROPIC_MODEL"), cfg.APIModel)
+	cfg.APIType = firstNonEmpty(os.Getenv("LUMINA_API_TYPE"), os.Getenv("LLM_API_TYPE"), cfg.APIType)
 	cfg.Yolo = envBool("YOLO_MODE", cfg.Yolo)
 	cfg.PromptCacheTTLSeconds = envFloat("LUMINA_PROMPT_CACHE_TTL_SECONDS", cfg.PromptCacheTTLSeconds)
 	cfg.AnthropicCacheEditsEnabled = envBool("LUMINA_ANTHROPIC_CACHE_EDITS", cfg.AnthropicCacheEditsEnabled)
