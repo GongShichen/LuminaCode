@@ -44,12 +44,12 @@ func SanitizePathForPath(path string) string {
 
 func expandMemoryHome(path string) string {
 	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home := memoryHomeDir(); home != "" {
 			return home
 		}
 	}
 	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home := memoryHomeDir(); home != "" {
 			return filepath.Join(home, path[2:])
 		}
 	}
@@ -62,8 +62,11 @@ func ResolveMemoryDirectory(configCWD string, autoMemoryDirectory *string) strin
 	}
 	if autoMemoryDirectory != nil && *autoMemoryDirectory != "" {
 		path := *autoMemoryDirectory
-		if !filepath.IsAbs(path) {
+		if !isMemoryAbsolutePath(path) {
 			path = filepath.Join(configCWD, path)
+		}
+		if isRootedMemoryPathWithoutDrive(path) {
+			return filepath.Clean(path)
 		}
 		resolved, err := filepath.Abs(path)
 		if err != nil {
@@ -78,8 +81,30 @@ func ResolveMemoryDirectory(configCWD string, autoMemoryDirectory *string) strin
 	} else {
 		projectKey = SanitizeGitRootForPath(gitRoot)
 	}
-	home, _ := os.UserHomeDir()
+	home := memoryHomeDir()
 	return filepath.Join(home, ".Lumina", "projects", projectKey, "memory")
+}
+
+func memoryHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+func isMemoryAbsolutePath(path string) bool {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
+		return true
+	}
+	return regexp.MustCompile(`^[A-Za-z]:(?:[\\/]|$)`).MatchString(path)
+}
+
+func isRootedMemoryPathWithoutDrive(path string) bool {
+	if path == "" || regexp.MustCompile(`^[A-Za-z]:(?:[\\/]|$)`).MatchString(path) {
+		return false
+	}
+	return strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`)
 }
 
 func EnsureMemoryDirectory(path string) string {

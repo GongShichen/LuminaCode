@@ -83,7 +83,7 @@ func CompleteVisiblePaths(textBeforeCursor string, cwd string) []Completion {
 		}
 		display := name
 		if entry.IsDir() {
-			display += string(filepath.Separator)
+			display += "/"
 		}
 		completions = append(completions, Completion{
 			Text:          strings.TrimPrefix(name, prefix),
@@ -126,7 +126,7 @@ func splitPathFragment(fragment string) (string, string) {
 		return "", ""
 	}
 	cleaned := filepath.Clean(fragment)
-	if strings.HasSuffix(fragment, string(filepath.Separator)) {
+	if strings.HasSuffix(fragment, "/") || strings.HasSuffix(fragment, `\`) {
 		return cleaned, ""
 	}
 	dir := filepath.Dir(fragment)

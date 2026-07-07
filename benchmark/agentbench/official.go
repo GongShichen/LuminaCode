@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"LuminaCode/config"
+	bashpkg "LuminaCode/tools/bash"
 )
 
 func IsOfficialSuite(suite string) bool {
@@ -132,7 +133,8 @@ type officialHarnessResult struct {
 func runOfficialHarness(ctx context.Context, options RunnerOptions, now time.Time) officialHarnessResult {
 	outputPath := filepath.Join(options.OutputDir, suiteReportBaseName(options.Suite, now)+"-harness-output.txt")
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "sh", "-c", options.HarnessCmd)
+	argv := bashpkg.ShellArgv(options.HarnessCmd, "")
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = options.BenchmarkDir
 	cmd.Env = officialHarnessEnv(os.Environ(), options)
 	var stdout, stderr bytes.Buffer

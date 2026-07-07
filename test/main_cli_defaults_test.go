@@ -104,7 +104,7 @@ func TestMainCLIRunsFromArbitraryDirectoryWithBundledDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootDir := filepath.Dir(testDir)
-	bin := filepath.Join(t.TempDir(), "lumina-test")
+	bin := testBinaryPath(filepath.Join(t.TempDir(), "lumina-test"))
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer buildCancel()
 	build := exec.CommandContext(buildCtx, "go", "build", "-o", bin, ".")
