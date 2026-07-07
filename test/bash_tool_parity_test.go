@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"LuminaCode/config"
 	coretools "LuminaCode/tools"
 	bashpkg "LuminaCode/tools/bash"
 )
@@ -64,6 +65,24 @@ func TestRunShellAliasesMatchPythonBackwardCompatibility(t *testing.T) {
 	var tool *coretools.RunShellTool = coretools.NewBashTool()
 	if tool.Name() != "run_shell" {
 		t.Fatalf("RunShellTool should alias BashTool, got %q", tool.Name())
+	}
+}
+
+func TestBashToolRegistryTimeoutFollowsInput(t *testing.T) {
+	tool := coretools.NewBashTool()
+	timeoutMillis := 60_000
+	if got := tool.TimeoutForInput(coretools.BashInput{Command: "sleep 1", Timeout: &timeoutMillis}); got < 60*time.Second || got > 61*time.Second+100*time.Millisecond {
+		t.Fatalf("timeout int should set registry hard timeout around 61s, got %s", got)
+	}
+	decoded, err := tool.DecodeInput(map[string]any{"command": "sleep 1", "timeout": "60"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tool.TimeoutForInput(decoded); got < 60*time.Second || got > 61*time.Second+100*time.Millisecond {
+		t.Fatalf("timeout string should set registry hard timeout around 61s, got %s", got)
+	}
+	if got := tool.TimeoutForInput(coretools.BashInput{Command: "sleep 1", TimeoutSeconds: "45"}); got < 45*time.Second || got > 46*time.Second+100*time.Millisecond {
+		t.Fatalf("timeout_seconds should set registry hard timeout around 46s, got %s", got)
 	}
 }
 
@@ -241,6 +260,13 @@ func TestBashBackgroundTaskRunsAfterLaunch(t *testing.T) {
 	outputPath := extractBackgroundOutputPath(result.Content)
 	if outputPath == "" {
 		t.Fatalf("could not parse output path from %q", result.Content)
+	}
+	wantPrefix := filepath.Join(config.ProjectRuntimeDir(dir), "background", "tool-results") + string(os.PathSeparator)
+	if !strings.HasPrefix(outputPath, wantPrefix) {
+		t.Fatalf("background output should stay under project runtime tool-results, got %q want prefix %q", outputPath, wantPrefix)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".lumina")); !os.IsNotExist(err) {
+		t.Fatalf("background output should not create workspace .lumina, stat err=%v", err)
 	}
 	var data []byte
 	var err error

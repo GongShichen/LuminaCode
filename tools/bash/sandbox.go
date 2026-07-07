@@ -33,8 +33,11 @@ func NewSandboxManager() *SandboxManager {
 func (m *SandboxManager) detectSandbox() bool {
 	switch m.platform {
 	case "darwin":
-		_, err := exec.LookPath("sandbox-exec")
-		return err == nil
+		// macOS sandbox-exec with a deny-default profile is brittle for shell
+		// commands because even simple sh -c invocations may require system
+		// service permissions beyond file/process rules. Keep Lumina's own
+		// permission model in charge on macOS instead of silently killing tools.
+		return false
 	case "linux":
 		_, err := exec.LookPath("bwrap")
 		return err == nil

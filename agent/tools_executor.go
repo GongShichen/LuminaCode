@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 
 	"LuminaCode/config"
@@ -377,6 +378,14 @@ func (e *StreamingToolExecutor) launch(tcID string) {
 
 func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isSafe bool) {
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			e.finishResult(
+				tcID,
+				fmt.Sprintf("<tool_use_error>\nTool execution panic: %v\n</tool_use_error>", recovered),
+				fmt.Sprintf("<tool_use_error>\nTool execution panic: %v\n%s\n</tool_use_error>", recovered, string(debug.Stack())),
+				true,
+			)
+		}
 		e.mu.Lock()
 		slot := e.slots[tcID]
 		if slot != nil {
@@ -425,8 +434,8 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 			e.finishCancelled(tcID, "Execution cancelled before tool start.")
 			return
 		}
+		defer e.safeSemaphore.Release(1)
 		result = e.Registry.Execute(ctx, tc, execCtx)
-		e.safeSemaphore.Release(1)
 	} else {
 		result = e.Registry.Execute(ctx, tc, execCtx)
 	}
@@ -441,7 +450,7 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 
 	truncated := result.Content
 	if tool := e.Registry.Get(tc.Name); tool != nil && !result.IsError {
-		if formatted, err := tool.FormatLargeResult(ctx, result.Content, tool.MaxOutputChars(), tcID, e.Config.SessionDir); err == nil {
+		if formatted, err := tool.FormatLargeResult(ctx, result.Content, tool.MaxOutputChars(), tcID, e.Config.ProjectRuntimeDir); err == nil {
 			truncated = formatted
 		}
 	}

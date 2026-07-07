@@ -11,6 +11,8 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	"LuminaCode/config"
+
 	orderedmap "github.com/pb33f/ordered-map/v2"
 )
 
@@ -69,7 +71,7 @@ func LoadProjectMCPConfig(projectRoot string) []McpServerConfig {
 }
 
 func TrustedMCPPath(projectRoot string) string {
-	return filepath.Join(projectRoot, ".Lumina", "CONFIG", "trusted_mcp.json")
+	return filepath.Join(config.ProjectRuntimeDir(projectRoot), "CONFIG", "trusted_mcp.json")
 }
 
 func LoadTrustedMCP(projectRoot string) map[string]string {

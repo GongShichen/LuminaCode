@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -552,12 +553,29 @@ func TestOpenAICompatibleStreamErrorPreservesRawStatusAndBody(t *testing.T) {
 		t.Fatalf("expected one error event, got %#v", events)
 	}
 	message, _ := events[0]["message"].(string)
-	if !strings.Contains(message, "DeepSeek API error 400 400 Bad Request") ||
+	if !strings.Contains(message, "custom-model API error 400 400 Bad Request") ||
 		!strings.Contains(message, strings.Repeat("错", 501)) {
 		t.Fatalf("error should preserve status and full raw body, got %q", message)
 	}
 	if events[0]["status_code"] != http.StatusBadRequest || events[0]["raw_error"] != errorBody+"\n" {
 		t.Fatalf("error event should expose status_code and raw_error metadata, got %#v", events[0])
+	}
+}
+
+func TestAPIErrorMetadataExposesTransportErrors(t *testing.T) {
+	err := &url.Error{Op: "Post", URL: "https://example.invalid/v1/messages", Err: errors.New("EOF")}
+	metadata := api.ErrorMetadata(err)
+	if metadata["error_type"] != "transport_error" {
+		t.Fatalf("expected transport_error, got %#v", metadata)
+	}
+	if metadata["operation"] != "Post" || metadata["request_url"] != "https://example.invalid/v1/messages" {
+		t.Fatalf("transport metadata should preserve operation and URL, got %#v", metadata)
+	}
+	if metadata["raw_error"] != "EOF" {
+		t.Fatalf("transport metadata should preserve raw error, got %#v", metadata)
+	}
+	if _, ok := metadata["status_code"]; ok {
+		t.Fatalf("transport error should not invent an HTTP status_code, got %#v", metadata)
 	}
 }
 
@@ -584,7 +602,7 @@ func TestOpenAICompatibleCompleteErrorPreservesStatusCodeAndRawBody(t *testing.T
 	if statusErr.StatusCode != http.StatusBadRequest || statusErr.Body != errorBody {
 		t.Fatalf("status error should preserve code/body, got %#v", statusErr)
 	}
-	if !strings.Contains(err.Error(), "API error 400 400 Bad Request") || !strings.Contains(err.Error(), errorBody) {
+	if !strings.Contains(err.Error(), "custom-model API error 400 400 Bad Request") || !strings.Contains(err.Error(), errorBody) {
 		t.Fatalf("wrapped error should include status and raw body, got %q", err.Error())
 	}
 }

@@ -1,0 +1,29 @@
+name: product-development
+display_name: Product Development Team
+description: Full-stack product development team for research, design, implementation, QA, review, and release work.
+entry_agent: team-leader
+loop:
+  max_iterations: 0
+  max_parallel_agents: 4
+  completion_policy: leader_with_reviewer_and_qa
+  require_final_artifact: true
+  stop_policy: user_interrupt_or_task_complete_only
+gates:
+  require_contract: true
+  qa_agent: qa
+  reviewer_agent: reviewer
+  nonblocking_findings: require_followup_or_deferral
+  deferral_requires_reason: true
+transcript:
+  show_member_dialogue: true
+  show_tool_details: false
+  show_thinking: false
+agents:
+  - team-leader
+  - research
+  - frontend
+  - backend
+  - qa
+  - reviewer
+  - devops
+  - ux-design

@@ -16,32 +16,40 @@ import (
 	"time"
 
 	"LuminaCode/config"
+	luminateam "LuminaCode/team"
 
 	"github.com/gorilla/websocket"
 )
 
 type DaemonOptions struct {
-	Host         string
-	Port         int
-	Config       config.Config
-	EndpointPath string
+	Host              string
+	Port              int
+	Config            config.Config
+	EndpointPath      string
+	IdleCheckInterval time.Duration
+	IdleEmptyChecks   int
 }
 
 type DaemonServer struct {
-	opts     DaemonOptions
-	token    string
-	manager  *SessionManager
-	httpSrv  *http.Server
-	upgrader websocket.Upgrader
+	opts        DaemonOptions
+	token       string
+	manager     *SessionManager
+	teamManager *luminateam.Manager
+	httpSrv     *http.Server
+	upgrader    websocket.Upgrader
 
 	mu      sync.Mutex
 	clients map[*wsClient]struct{}
+
+	activeConnections int
+	emptyIdleChecks   int
 }
 
 type wsClient struct {
-	conn      *websocket.Conn
-	mu        sync.Mutex
-	sessionID string
+	conn          *websocket.Conn
+	mu            sync.Mutex
+	sessionID     string
+	exitRequested bool
 }
 
 func RunDaemonCLI(args []string) error {
@@ -67,6 +75,12 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 	if opts.EndpointPath == "" {
 		opts.EndpointPath = DefaultEndpointPath()
 	}
+	if opts.IdleCheckInterval <= 0 {
+		opts.IdleCheckInterval = 10 * time.Minute
+	}
+	if opts.IdleEmptyChecks <= 0 {
+		opts.IdleEmptyChecks = 2
+	}
 	token, err := randomToken()
 	if err != nil {
 		return err
@@ -85,8 +99,20 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 		}},
 	}
 	server.manager = NewSessionManager(opts.Config, server.broadcast)
+	server.teamManager = luminateam.NewManager(opts.Config, func(parentSessionID, eventType string, payload any) {
+		server.broadcast(PushEvent{
+			Type:      "event",
+			SessionID: parentSessionID,
+			Seq:       time.Now().UnixNano(),
+			Event: map[string]any{
+				"type":    eventType,
+				"payload": payload,
+			},
+		})
+	}, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/ws", server.handleWS)
+	mux.HandleFunc("/v1/a2a/ws", server.handleA2AWS)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -107,6 +133,7 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 		<-ctx.Done()
 		_ = server.httpSrv.Shutdown(context.Background())
 	}()
+	go server.startIdleHeartbeat(ctx)
 	fmt.Fprintf(os.Stderr, "lumina-backend daemon listening on %s:%d\n", opts.Host, actualPort)
 	err = server.httpSrv.Serve(listener)
 	if err == http.ErrServerClosed {
@@ -148,15 +175,27 @@ func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	unregister := s.registerConnection()
+	defer unregister()
 	client := &wsClient{conn: conn}
 	s.mu.Lock()
 	s.clients[client] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
+		exitRequested := client.exitWasRequested()
 		s.mu.Lock()
 		delete(s.clients, client)
+		remainingClients := len(s.clients)
 		s.mu.Unlock()
 		_ = conn.Close()
+		if exitRequested && remainingClients == 0 {
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				if s.clientCountExcluding(nil) == 0 {
+					_ = s.httpSrv.Shutdown(context.Background())
+				}
+			}()
+		}
 	}()
 	for {
 		var req RPCRequest
@@ -168,10 +207,54 @@ func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *DaemonServer) handleA2AWS(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("token") != s.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	teamSessionID := r.URL.Query().Get("team_session_id")
+	agentID := r.URL.Query().Get("agent_id")
+	if strings.TrimSpace(teamSessionID) == "" || strings.TrimSpace(agentID) == "" {
+		http.Error(w, "team_session_id and agent_id are required", http.StatusBadRequest)
+		return
+	}
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	unregister := s.registerConnection()
+	defer unregister()
+	defer conn.Close()
+	for {
+		var req RPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		result, err := s.teamManager.HandleA2A(r.Context(), teamSessionID, agentID, req.Method, req.Params)
+		if err != nil {
+			_ = conn.WriteJSON(RPCResponse{ID: req.ID, OK: false, Error: &RPCError{Code: "a2a_error", Message: err.Error()}})
+			continue
+		}
+		_ = conn.WriteJSON(RPCResponse{ID: req.ID, OK: true, Result: result})
+	}
+}
+
 func (c *wsClient) setSessionID(sessionID string) {
 	c.mu.Lock()
 	c.sessionID = sessionID
 	c.mu.Unlock()
+}
+
+func (c *wsClient) requestExit() {
+	c.mu.Lock()
+	c.exitRequested = true
+	c.mu.Unlock()
+}
+
+func (c *wsClient) exitWasRequested() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exitRequested
 }
 
 func (s *DaemonServer) clientCountExcluding(excluded *wsClient) int {
@@ -187,6 +270,58 @@ func (s *DaemonServer) clientCountExcluding(excluded *wsClient) int {
 	return count
 }
 
+func (s *DaemonServer) registerConnection() func() {
+	s.mu.Lock()
+	s.activeConnections++
+	s.emptyIdleChecks = 0
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.activeConnections > 0 {
+				s.activeConnections--
+			}
+			s.mu.Unlock()
+		})
+	}
+}
+
+func (s *DaemonServer) activeConnectionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeConnections
+}
+
+func (s *DaemonServer) startIdleHeartbeat(ctx context.Context) {
+	ticker := time.NewTicker(s.opts.IdleCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			count := s.activeConnectionCount()
+			if count > 0 {
+				s.mu.Lock()
+				s.emptyIdleChecks = 0
+				s.mu.Unlock()
+				continue
+			}
+			s.mu.Lock()
+			s.emptyIdleChecks++
+			emptyChecks := s.emptyIdleChecks
+			limit := s.opts.IdleEmptyChecks
+			s.mu.Unlock()
+			if emptyChecks >= limit {
+				fmt.Fprintf(os.Stderr, "lumina-backend idle heartbeat: no websocket connections for %d consecutive checks; shutting down\n", emptyChecks)
+				_ = s.httpSrv.Shutdown(context.Background())
+				return
+			}
+		}
+	}
+}
+
 func (s *DaemonServer) dispatch(ctx context.Context, client *wsClient, req RPCRequest) RPCResponse {
 	result, rpcErr := s.dispatchResult(ctx, client, req)
 	if rpcErr != nil {
@@ -199,11 +334,15 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 	switch req.Method {
 	case "backend.status":
 		return map[string]any{
-			"pid":      os.Getpid(),
-			"model":    s.opts.Config.APIModel,
-			"cwd":      s.opts.Config.CWD,
-			"sessions": s.manager.Count(),
-			"started":  true,
+			"pid":                 os.Getpid(),
+			"model":               s.opts.Config.APIModel,
+			"cwd":                 s.opts.Config.CWD,
+			"sessions":            s.manager.Count(),
+			"websocket_clients":   s.clientCountExcluding(nil),
+			"active_connections":  s.activeConnectionCount(),
+			"idle_check_interval": s.opts.IdleCheckInterval.String(),
+			"idle_empty_checks":   s.opts.IdleEmptyChecks,
+			"started":             true,
 		}, nil
 	case "backend.shutdown":
 		go func() {
@@ -233,7 +372,9 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			return nil, toRPCError("session_resume_failed", err)
 		}
 		client.setSessionID(controller.ID())
-		return controller.Snapshot(), nil
+		snapshot := controller.Snapshot()
+		snapshot.Teams = s.teamManager.RestorePersistedForParent(controller.ID(), p.CWD)
+		return snapshot, nil
 	case "session.list":
 		return s.manager.List(), nil
 	case "session.snapshot":
@@ -268,20 +409,14 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		decodeParams(req.Params, &p)
 		client.setSessionID("")
+		client.requestExit()
 		otherClients := s.clientCountExcluding(client)
-		if otherClients == 0 {
-			go func() {
-				time.Sleep(75 * time.Millisecond)
-				if s.clientCountExcluding(client) == 0 {
-					_ = s.httpSrv.Shutdown(context.Background())
-				}
-			}()
-		}
 		return map[string]any{
-			"exited":        true,
-			"session_id":    p.SessionID,
-			"other_clients": otherClients,
-			"shutting_down": otherClients == 0,
+			"exited":                    true,
+			"session_id":                p.SessionID,
+			"other_clients":             otherClients,
+			"shutting_down":             false,
+			"shutdown_after_disconnect": otherClients == 0,
 		}, nil
 	case "session.abort":
 		controller, rpcErr := s.controllerFromParams(req.Params)
@@ -323,7 +458,139 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
-		return controller.ToggleYolo(), nil
+		result := controller.ToggleYolo()
+		s.teamManager.ApplyParentRuntimeConfig(controller.ID(), controller.RuntimeConfig())
+		return result, nil
+	case "team.list":
+		return s.teamManager.List(), nil
+	case "team.create_template":
+		var p struct {
+			Name string `json:"name"`
+		}
+		decodeParams(req.Params, &p)
+		result, err := s.teamManager.CreateTemplate(p.Name)
+		if err != nil {
+			return nil, toRPCError("team_create_template_failed", err)
+		}
+		return result, nil
+	case "team.start":
+		var p struct {
+			SessionID string `json:"session_id"`
+			TeamName  string `json:"team_name"`
+			CWD       string `json:"cwd"`
+		}
+		decodeParams(req.Params, &p)
+		base := s.opts.Config
+		if parent, err := s.manager.Get(p.SessionID); err == nil {
+			base = parent.RuntimeConfig()
+		}
+		controller, err := s.teamManager.StartWithConfig(p.SessionID, p.TeamName, p.CWD, base)
+		if err != nil {
+			return nil, toRPCError("team_start_failed", err)
+		}
+		return controller.Snapshot(), nil
+	case "team.submit":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+			Input         string `json:"input"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		if err := controller.Submit(ctx, p.Input); err != nil {
+			code := "team_submit_failed"
+			if err.Error() == "team_session_busy" {
+				code = "team_session_busy"
+			}
+			return nil, toRPCError(code, err)
+		}
+		return map[string]any{"accepted": true}, nil
+	case "team.out":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+			Abort         bool   `json:"abort"`
+		}
+		decodeParams(req.Params, &p)
+		if p.Abort {
+			s.teamManager.Abort(p.TeamSessionID)
+		}
+		return map[string]any{"team_mode": false, "team_session_id": p.TeamSessionID}, nil
+	case "team.abort":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		ok := s.teamManager.Abort(p.TeamSessionID)
+		return map[string]any{"aborted": ok}, nil
+	case "team.snapshot", "team.status":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		return controller.Snapshot(), nil
+	case "team.artifacts":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		return controller.Artifacts(), nil
+	case "team.timeline":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		return controller.Timeline(), nil
+	case "team.dialogue":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		return controller.Dialogue(), nil
+	case "team.summary":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		return controller.Summary(), nil
+	case "team.detail":
+		var p struct {
+			TeamSessionID string `json:"team_session_id"`
+			Kind          string `json:"kind"`
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.teamManager.Get(p.TeamSessionID)
+		if err != nil {
+			return nil, toRPCError("team_session_not_found", err)
+		}
+		detail, err := controller.Detail(p.Kind, p.ID, p.Name)
+		if err != nil {
+			return nil, toRPCError("team_detail_not_found", err)
+		}
+		return detail, nil
 	case "slash.list":
 		controller, rpcErr := s.optionalController(req.Params)
 		if rpcErr != nil || controller == nil {
@@ -351,16 +618,24 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		return controller.MCPTools(), nil
 	case "permission.resolve":
 		var p struct {
-			SessionID string `json:"session_id"`
-			RequestID string `json:"request_id"`
-			Decision  string `json:"decision"`
+			SessionID     string `json:"session_id"`
+			TeamSessionID string `json:"team_session_id"`
+			RequestID     string `json:"request_id"`
+			Decision      string `json:"decision"`
 		}
 		decodeParams(req.Params, &p)
+		if strings.TrimSpace(p.TeamSessionID) != "" {
+			ok := s.teamManager.ResolvePermission(p.RequestID, p.Decision)
+			return map[string]any{"resolved": ok}, nil
+		}
 		controller, err := s.manager.Get(p.SessionID)
 		if err != nil {
 			return nil, toRPCError("session_not_found", err)
 		}
 		ok := controller.ResolvePermission(p.RequestID, p.Decision)
+		if !ok {
+			ok = s.teamManager.ResolvePermission(p.RequestID, p.Decision)
+		}
 		return map[string]any{"resolved": ok}, nil
 	default:
 		return nil, &RPCError{Code: "method_not_found", Message: "unknown method: " + req.Method}

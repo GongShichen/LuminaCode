@@ -1,0 +1,8 @@
+name: team-leader
+display_name: Team Leader
+description: Coordinates the team loop, task graph, routing, gates, recovery, and final synthesis.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true

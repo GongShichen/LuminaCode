@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"LuminaCode/config"
 	"LuminaCode/mcp"
 )
 
@@ -64,9 +65,13 @@ func TestMainSingleShotResolvesMCPTrustLikePythonRuntime(t *testing.T) {
 		}
 	}
 
-	data, err := os.ReadFile(filepath.Join(project, ".Lumina", "CONFIG", "trusted_mcp.json"))
+	trustedPath := filepath.Join(home, ".lumina", "project", config.ProjectRuntimeName(project), "CONFIG", "trusted_mcp.json")
+	data, err := os.ReadFile(trustedPath)
 	if err != nil {
 		t.Fatalf("expected trusted MCP file after CLI approval: %v\noutput:\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(project, ".Lumina", "CONFIG", "trusted_mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("trusted MCP runtime file should not be written under project root, stat err=%v", err)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(data, &payload); err != nil {

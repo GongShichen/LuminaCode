@@ -1,0 +1,8 @@
+name: frontend
+display_name: Frontend
+description: Owns TypeScript TUI, terminal UX, input behavior, rendering, websocket client, accessibility, and visual polish.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true

@@ -113,7 +113,7 @@ func InterpretCommandResult(commandLine string, exitCode int) ExitCodeInterpreta
 	}
 
 	if exitCode < 0 {
-		return ExitCodeInterpretation{true, fmt.Sprintf("Killed by signal %d", -exitCode)}
+		return ExitCodeInterpretation{true, "Process terminated by a signal or parent context cancellation"}
 	}
 	return ExitCodeInterpretation{true, fmt.Sprintf("Error (exit code %d)", exitCode)}
 }

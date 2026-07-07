@@ -135,7 +135,7 @@ Skill 是一个包含 `SKILL.md` 的可复用指令包。LuminaCode 会读取以
 
 - `{project_root}/skills/`
 - `{project_root}/.Lumina/PROJECT_SKILLS/`
-- `~/.Lumina/skills/`
+- `~/.lumina/skills/`
 - `~/.lumina/SKILLS/`
 
 Skill 可以让 Agent 获得更聚焦的能力，例如代码审查、项目分析、论文写作、实验执行或项目内约定流程。调用 skill 后，它的上下文会注入到本轮模型请求中，同时保持和可见对话记录分离。
@@ -157,7 +157,7 @@ LuminaCode 通过工具为模型提供本地执行能力。内置工具覆盖常
 项目 MCP 服务可以通过项目根目录下的 `.mcp.json` 配置。LuminaCode 会在首次使用项目 MCP 服务前请求信任确认，并将接受后的 fingerprint 写入：
 
 ```text
-{project_root}/.Lumina/CONFIG/trusted_mcp.json
+~/.lumina/project/{project_root_name}/CONFIG/trusted_mcp.json
 ```
 
 交互会话中可以使用：
@@ -186,19 +186,25 @@ LuminaCode 会保存足够的运行状态来恢复历史会话，包括消息、
 - `SKILLS/`
 - `frontend/`
 
-项目运行数据位于项目根目录：
+LuminaCode 自动生成的项目级运行数据位于：
 
 ```text
-{project_root}/.Lumina/
+~/.lumina/project/{project_root_name}/
 ```
 
 常见内容：
 
-- `.Lumina/worktrees/`
-- `.Lumina/CONFIG/trusted_mcp.json`
-- `.Lumina/PROJECT_SKILLS/`
+- `CONFIG/trusted_mcp.json`
+- `agent-memory/`
+- `agent-memory-local/`
+- `background/tool-results/`
 
-会话历史位于配置项 `session_dir` 指定的位置。安装后的默认配置会通过 `~/.lumina/CONFIG/defaults.json` 控制该路径。每个 session 会保存在以 session id 命名的独立子目录中：
+用户自己维护的项目资源仍然可以放在项目目录，例如：
+
+- `{project_root}/skills/`
+- `{project_root}/.Lumina/PROJECT_SKILLS/`
+
+会话历史位于配置项 `session_dir` 指定的位置。内置默认值是 `~/.lumina/sessions`；安装后的配置可以通过 `~/.lumina/CONFIG/defaults.json` 覆盖该路径。每个 session 会保存在以 session id 命名的独立子目录中：
 
 ```text
 {session_dir}/{session_id}/
@@ -215,7 +221,11 @@ LuminaCode 会保存足够的运行状态来恢复历史会话，包括消息、
 - `skill-recovery.commit.json`
 - `session.sqlite`
 
-大型后台工具输出会保存在 `session_dir` 下共享的 `tool-results/` 目录中。
+大型后台工具输出会保存在：
+
+```text
+~/.lumina/project/{project_root_name}/background/tool-results/
+```
 
 ## CLI 参数
 

@@ -551,8 +551,8 @@ func TestRecalledMemoryFilenamesMatchesPythonFiltering(t *testing.T) {
 			"isMeta": true,
 			"metadata": map[string]any{
 				memory.MemoryMetaKey: true,
-				"source":            memory.MemoryRecallSource,
-				"filenames":         []any{"alpha.md", "notes.txt", 123, "beta.md"},
+				"source":             memory.MemoryRecallSource,
+				"filenames":          []any{"alpha.md", "notes.txt", 123, "beta.md"},
 			},
 		},
 		{
@@ -560,8 +560,8 @@ func TestRecalledMemoryFilenamesMatchesPythonFiltering(t *testing.T) {
 			"isMeta": true,
 			"metadata": map[string]any{
 				memory.MemoryMetaKey: true,
-				"source":            "agent_memory_recall",
-				"filenames":         []string{"agent.md"},
+				"source":             "agent_memory_recall",
+				"filenames":          []string{"agent.md"},
 			},
 		},
 		{"role": "user", "metadata": map[string]any{"filenames": []string{"plain.md"}}},
@@ -665,7 +665,7 @@ func TestRunMemoryRecallIncludesMainAgentMemories(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	agentMemoryDir := filepath.Join(projectRoot, ".Lumina", "agent-memory", "main")
+	agentMemoryDir := filepath.Join(config.ProjectRuntimeDir(projectRoot), "agent-memory", "main")
 	agentStore := memory.NewMemoryStore(agentMemoryDir)
 	if _, err := agentStore.SaveEntry(&memory.MemoryEntry{
 		Name:        "Agent Note",
@@ -701,7 +701,7 @@ func TestRunMemoryRecallIncludesMainAgentMemories(t *testing.T) {
 
 func TestAgentMemoryScopesAndScopedRecall(t *testing.T) {
 	projectRoot := t.TempDir()
-	scopePath := filepath.Join(projectRoot, ".Lumina", "agent-memory", "explore")
+	scopePath := filepath.Join(config.ProjectRuntimeDir(projectRoot), "agent-memory", "explore")
 	store := memory.NewMemoryStore(scopePath)
 	entry := &memory.MemoryEntry{
 		Name:        "Repo Map",
@@ -761,8 +761,8 @@ func TestAgentMemoryDirectoriesPromptAndIndexReuseMatchPython(t *testing.T) {
 	}
 
 	scopes := memory.GetAgentMemoryDirectories("Plan:Agent", nested)
-	wantProject := filepath.Join(repo, ".Lumina", "agent-memory", "plan-agent")
-	wantLocal := filepath.Join(repo, ".Lumina", "agent-memory-local", "plan-agent")
+	wantProject := filepath.Join(config.ProjectRuntimeDir(repo), "agent-memory", "plan-agent")
+	wantLocal := filepath.Join(config.ProjectRuntimeDir(repo), "agent-memory-local", "plan-agent")
 	if len(scopes) != 3 ||
 		scopes[0].Name != "user" || scopes[0].Path != filepath.Join(home, ".Lumina", "agent-memory", "plan-agent") ||
 		scopes[1].Name != "project" || scopes[1].Path != wantProject ||
@@ -812,7 +812,7 @@ func TestAgentMemoryDirectoriesPromptAndIndexReuseMatchPython(t *testing.T) {
 
 func TestAgentMemoryRecallReplacesInvalidUTF8LikePython(t *testing.T) {
 	projectRoot := t.TempDir()
-	scopePath := filepath.Join(projectRoot, ".Lumina", "agent-memory", "explore")
+	scopePath := filepath.Join(config.ProjectRuntimeDir(projectRoot), "agent-memory", "explore")
 	if err := os.MkdirAll(scopePath, 0o755); err != nil {
 		t.Fatal(err)
 	}

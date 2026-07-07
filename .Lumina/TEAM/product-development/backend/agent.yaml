@@ -1,0 +1,8 @@
+name: backend
+display_name: Backend
+description: Owns Go runtime, QueryEngine, session isolation, tool execution, A2A transport, daemon IPC, persistence, and config.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true

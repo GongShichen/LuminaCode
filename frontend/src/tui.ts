@@ -1,106 +1,29 @@
-import blessed from "blessed";
-import { execFileSync } from "node:child_process";
-
+import { escInterruptWindowMs, spinnerFrames } from "./constants";
+import { escapeBlessedTags, formatPermissionPrompt, normalizeMenuItems } from "./formatters";
+import { isPrintableInput, setBracketedPaste } from "./input";
+import { RawInputDispatcher } from "./raw-input";
 import { RpcClient } from "./rpc";
+import { buildHeaderContent, buildStatusContent, buildTasksContent, buildTranscriptContent } from "./rendering";
+import { getPaneScroll, isPaneAtBottom } from "./scroll";
+import { createTheme } from "./theme";
 import type { LaunchOptions, PushEvent, TranscriptEntry } from "./types";
-import { formatTokens, indent, setBox } from "./utils";
+import { setBox } from "./utils";
+import { createTuiWidgets } from "./widgets";
+import type { TuiWidgets } from "./widgets";
 
-const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const escInterruptWindowMs = 800;
 const tuiTheme = createTheme();
+const renderFrameMs = 33;
+const paneScrollHoldMs = 1500;
 
 export class LuminaTui {
-  private screen = blessed.screen({
-    smartCSR: true,
-    fullUnicode: true,
-    terminal: process.env.TERM && process.env.TERM !== "dumb" ? process.env.TERM : "xterm-256color",
-    title: "LuminaCode",
-    useBCE: false,
-    style: { fg: tuiTheme.text, bg: tuiTheme.background },
-  });
-  private header = blessed.box({ top: 0, left: 0, width: "100%", height: 1, tags: true, content: `{${tuiTheme.brand}-fg}{bold}LuminaCode{/bold}{/${tuiTheme.brand}-fg}` });
-  private transcript = blessed.box({
-    label: " 对话记录 ",
-    tags: true,
-    top: 1,
-    left: 1,
-    width: "100%-2",
-    height: "54%",
-    border: "line",
-    mouse: true,
-    keys: false,
-    transparent: false,
-    scrollable: true,
-    alwaysScroll: true,
-    scrollbar: { ch: " ", track: { bg: "black" }, style: { bg: "cyan" } },
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, border: { fg: tuiTheme.panelBorder }, label: { fg: tuiTheme.panelLabel } },
-  });
-  private tasks = blessed.box({
-    label: " 任务概览 ",
-    top: "55%",
-    left: 1,
-    width: "100%-2",
-    height: "18%",
-    border: "line",
-    mouse: true,
-    keys: false,
-    transparent: false,
-    scrollable: true,
-    alwaysScroll: true,
-    scrollbar: { ch: " ", track: { bg: "black" }, style: { bg: "blue" } },
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, border: { fg: tuiTheme.panelBorder }, label: { fg: tuiTheme.panelLabel } },
-  });
-  private status = blessed.box({
-    label: " 状态 ",
-    bottom: 5,
-    left: 1,
-    width: "100%-2",
-    height: 3,
-    border: "line",
-    transparent: false,
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, border: { fg: tuiTheme.subtleBorder }, label: { fg: tuiTheme.muted } },
-  });
-  private input = blessed.box({
-    label: " ● 输入 ",
-    bottom: 0,
-    left: 1,
-    width: "100%-2",
-    height: 5,
-    border: "line",
-    mouse: true,
-    keys: false,
-    transparent: false,
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, border: { fg: tuiTheme.inputBorder }, label: { fg: tuiTheme.inputBorder } },
-  });
-  private menu = blessed.list({
-    hidden: true,
-    mouse: true,
-    keys: false,
-    top: "70%",
-    left: 6,
-    width: "70%",
-    height: 10,
-    border: "line",
-    transparent: false,
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, selected: { bg: tuiTheme.selectionBg, fg: tuiTheme.selectionFg }, border: { fg: tuiTheme.inputBorder } },
-  });
-  private modal = blessed.box({
-    hidden: true,
-    top: "center",
-    left: "center",
-    width: "70%",
-    height: 9,
-    border: "line",
-    tags: true,
-    transparent: false,
-    padding: { left: 1, right: 1 },
-    style: { fg: tuiTheme.text, bg: tuiTheme.panelBg, border: { fg: tuiTheme.warning } },
-  });
+  private screen: TuiWidgets["screen"];
+  private header: TuiWidgets["header"];
+  private transcript: TuiWidgets["transcript"];
+  private tasks: TuiWidgets["tasks"];
+  private status: TuiWidgets["status"];
+  private input: TuiWidgets["input"];
+  private menu: TuiWidgets["menu"];
+  private modal: TuiWidgets["modal"];
 
   private sessionID = "";
   private transcriptEntries: TranscriptEntry[] = [];
@@ -112,20 +35,65 @@ export class LuminaTui {
   private history: string[] = [];
   private historyIndex = -1;
   private historyDraft = "";
-  private menuMode: "slash" | "skill" | "resume" | null = null;
+  private menuMode: "slash" | "skill" | "resume" | "team" | null = null;
   private inputBuffer = "";
   private inputCursor = 0;
+  private inputScroll = 0;
   private inputEnabled = true;
   private inputPlaceholder = "请输入消息并回车。";
   private inputDataHandler?: (chunk: Buffer | string) => void;
+  private rawInput: RawInputDispatcher;
   private transcriptFollow = true;
   private tasksFollow = true;
   private suppressTranscriptScroll = false;
   private suppressTasksScroll = false;
+  private transcriptScrollHoldUntil = 0;
+  private tasksScrollHoldUntil = 0;
+  private transcriptRenderPending = false;
+  private tasksRenderPending = false;
+  private statusRenderPending = false;
+  private deferredRenderPending = false;
+  private paneHoldTimer?: NodeJS.Timeout;
+  private renderTimer?: NodeJS.Timeout;
+  private lastRenderAt = 0;
+  private localSubmitPending = false;
+  private transcriptContent = "";
+  private tasksContent = "";
+  private statusContent = "";
+  private headerContent = "";
   private lastEscapeAt = 0;
   private escapeResetTimer?: NodeJS.Timeout;
+  private modalKeyHandlers = new Map<string, () => void>();
+  private teamMode = false;
+  private teamSessionID = "";
+  private activeTeamName = "";
+  private teamLoopIteration = 0;
+  private teamDialogueEntries: any[] = [];
+  private teamActivityRows: any[] = [];
+  private teamArtifacts: any[] = [];
+  private teamGateStatus: any = {};
+  private teamContract: any = null;
+  private teamGateVerdicts: any = {};
+  private teamStreamingText = new Map<string, string>();
+  private pendingPrompt: "new-team-name" | null = null;
 
-  constructor(private rpc: RpcClient, private options: LaunchOptions) {}
+  constructor(private rpc: RpcClient, private options: LaunchOptions) {
+    const widgets = createTuiWidgets(tuiTheme);
+    this.screen = widgets.screen;
+    this.header = widgets.header;
+    this.transcript = widgets.transcript;
+    this.tasks = widgets.tasks;
+    this.status = widgets.status;
+    this.input = widgets.input;
+    this.menu = widgets.menu;
+    this.modal = widgets.modal;
+    this.rawInput = new RawInputDispatcher({
+      insertPastedText: (text) => this.insertPastedText(text),
+      handleWheel: (direction, data) => this.handleWheel(direction, data),
+      handleKey: (ch, key) => this.handleInputKey(ch, key),
+      exit: () => this.exit(),
+    });
+  }
 
   async start(): Promise<void> {
     this.screen.append(this.header);
@@ -139,6 +107,7 @@ export class LuminaTui {
     this.bindKeys();
     this.prepareTerminalInput();
     this.rpc.onEvent((event) => this.handlePush(event));
+    this.rpc.onDisconnect((reason) => this.handleBackendDisconnect(reason));
     const snapshot = this.options.resumeSessionID
       ? await this.rpc.call("session.resume", { session_id: this.options.resumeSessionID, cwd: this.options.cwd })
       : await this.rpc.call("session.create", { cwd: this.options.cwd });
@@ -151,38 +120,162 @@ export class LuminaTui {
       this.spinner = (this.spinner + 1) % 4;
       this.renderStatus();
       this.renderTasks();
-      this.screen.render();
+      this.requestRender();
     }, 140);
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private bindKeys(): void {
     this.screen.on("resize", () => {
       this.layout();
-      this.screen.render();
+      this.requestRender(true);
     });
-    this.transcript.on("wheelup", () => {
-      this.transcriptFollow = false;
-    });
-    this.transcript.on("wheeldown", () => {
-      this.transcriptFollow = isPaneAtBottom(this.transcript);
+    this.screen.on("mouse", () => {
+      // Registered intentionally so blessed enables terminal mouse reporting.
+      // Wheel routing is handled from the raw input stream to avoid duplicate pane renders.
     });
     this.transcript.on("scroll", () => {
       if (!this.suppressTranscriptScroll) {
         this.transcriptFollow = isPaneAtBottom(this.transcript);
+        if (!this.transcriptFollow) this.holdPaneAutoRefresh("transcript");
       }
-    });
-    this.tasks.on("wheelup", () => {
-      this.tasksFollow = false;
-    });
-    this.tasks.on("wheeldown", () => {
-      this.tasksFollow = isPaneAtBottom(this.tasks);
     });
     this.tasks.on("scroll", () => {
       if (!this.suppressTasksScroll) {
         this.tasksFollow = isPaneAtBottom(this.tasks);
+        if (!this.tasksFollow) this.holdPaneAutoRefresh("tasks");
       }
     });
+  }
+
+  private requestRender(immediate = false, allowDuringQuiet = false): void {
+    if (immediate) {
+      if (this.renderTimer) {
+        clearTimeout(this.renderTimer);
+        this.renderTimer = undefined;
+      }
+      this.lastRenderAt = Date.now();
+      this.screen.render();
+      return;
+    }
+    if (this.quietScrollActive() && !allowDuringQuiet) {
+      this.deferredRenderPending = true;
+      this.schedulePaneHoldFlush();
+      return;
+    }
+    if (this.renderTimer) return;
+    const wait = Math.max(0, renderFrameMs - (Date.now() - this.lastRenderAt));
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      this.lastRenderAt = Date.now();
+      this.screen.render();
+    }, wait);
+  }
+
+  private holdPaneAutoRefresh(pane: "transcript" | "tasks"): void {
+    const until = Date.now() + paneScrollHoldMs;
+    if (pane === "transcript") {
+      this.transcriptScrollHoldUntil = until;
+    } else {
+      this.tasksScrollHoldUntil = until;
+    }
+    this.schedulePaneHoldFlush();
+    this.requestRender(false, true);
+  }
+
+  private schedulePaneHoldFlush(): void {
+    const now = Date.now();
+    const nextUntil = Math.max(this.transcriptScrollHoldUntil, this.tasksScrollHoldUntil);
+    if (nextUntil <= now) return;
+    if (this.paneHoldTimer) clearTimeout(this.paneHoldTimer);
+    this.paneHoldTimer = setTimeout(() => {
+      this.paneHoldTimer = undefined;
+      this.flushHeldPaneRenders();
+    }, Math.max(1, nextUntil - now + 5));
+  }
+
+  private flushHeldPaneRenders(): void {
+    const now = Date.now();
+    if (this.transcriptRenderPending && now >= this.transcriptScrollHoldUntil) {
+      this.transcriptRenderPending = false;
+      this.renderTranscript(true);
+    }
+    if (this.tasksRenderPending && now >= this.tasksScrollHoldUntil) {
+      this.tasksRenderPending = false;
+      this.renderTasks(true);
+    }
+    if (this.statusRenderPending && !this.quietScrollActive()) {
+      this.statusRenderPending = false;
+      this.renderStatus(undefined, true);
+    }
+    if (this.transcriptRenderPending || this.tasksRenderPending || this.statusRenderPending) {
+      this.schedulePaneHoldFlush();
+    }
+    if (!this.quietScrollActive() && this.deferredRenderPending) {
+      this.deferredRenderPending = false;
+      this.requestRender(true);
+      return;
+    }
+    this.requestRender();
+  }
+
+  private quietScrollActive(): boolean {
+    const now = Date.now();
+    return now < this.transcriptScrollHoldUntil || now < this.tasksScrollHoldUntil;
+  }
+
+  private handleWheel(direction: "up" | "down", data: any): void {
+    const delta = direction === "up" ? -1 : 1;
+    if (!this.modal.hidden && this.pointInside(this.modal, data)) {
+      this.modal.scroll(delta * 2);
+      this.requestRender(false, true);
+      return;
+    }
+    if (this.pointInside(this.input, data)) {
+      if (this.inputCanScroll()) {
+        this.inputScroll = Math.max(0, this.inputScroll + delta);
+        this.input.scrollTo(this.inputScroll);
+        this.requestRender(false, true);
+      }
+      return;
+    }
+    if (this.pointInside(this.tasks, data)) {
+      this.tasks.scroll(delta * 2);
+      this.tasksFollow = isPaneAtBottom(this.tasks);
+      if (!this.tasksFollow) this.holdPaneAutoRefresh("tasks");
+      this.requestRender(false, true);
+      return;
+    }
+    if (this.pointInside(this.transcript, data)) {
+      this.scrollTranscriptBy(delta * 3);
+    }
+  }
+
+  private scrollTranscriptBy(delta: number): void {
+    this.transcript.scroll(delta);
+    this.transcriptFollow = isPaneAtBottom(this.transcript);
+    if (!this.transcriptFollow) this.holdPaneAutoRefresh("transcript");
+    this.requestRender(false, true);
+  }
+
+  private pointInside(pane: any, data: any): boolean {
+    const pos = pane?.lpos;
+    if (!pos || data == null) return false;
+    const x = Number(data.x);
+    const y = Number(data.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const xi = Number(pos.xi);
+    const xl = Number(pos.xl);
+    const yi = Number(pos.yi);
+    const yl = Number(pos.yl);
+    if (![xi, xl, yi, yl].every(Number.isFinite)) return false;
+    return x >= xi && x <= xl && y >= yi && y <= yl;
+  }
+
+  private inputCanScroll(): boolean {
+    if (!this.inputBuffer.includes("\n")) return false;
+    const visibleHeight = Math.max(1, Number(this.input.height || 0) - 2);
+    return this.inputBuffer.split("\n").length > visibleHeight;
   }
 
   private prepareTerminalInput(): void {
@@ -192,8 +285,10 @@ export class LuminaTui {
     if (input.isTTY && typeof input.setRawMode === "function") {
       input.setRawMode(true);
     }
+    setBracketedPaste(input, true);
+    this.setTerminalMouse(true);
     this.inputDataHandler = (chunk: Buffer | string) => {
-      void this.handleRawInput(String(chunk));
+      void this.rawInput.handle(String(chunk));
     };
     input.on?.("data", this.inputDataHandler);
     process.once("exit", () => {
@@ -203,6 +298,8 @@ export class LuminaTui {
       if (input.isTTY && typeof input.setRawMode === "function") {
         input.setRawMode(false);
       }
+      this.setTerminalMouse(false);
+      setBracketedPaste(input, false);
     });
   }
 
@@ -215,7 +312,24 @@ export class LuminaTui {
     if (input.isTTY && typeof input.setRawMode === "function") {
       input.setRawMode(false);
     }
+    this.setTerminalMouse(false);
+    setBracketedPaste(input, false);
     process.exit(0);
+  }
+
+  private setTerminalMouse(enabled: boolean): void {
+    const program = (this.screen as any).program;
+    try {
+      if (enabled) {
+        program?.disableMouse?.();
+        program?.setMouse?.({ vt200Mouse: true, sgrMouse: true, cellMotion: false, allMotion: false, utfMouse: false }, true);
+      } else {
+        program?.setMouse?.({ vt200Mouse: false, sgrMouse: false, cellMotion: false, allMotion: false, utfMouse: false }, false);
+        program?.disableMouse?.();
+      }
+    } catch {
+      // Mouse reporting is terminal-dependent; failure should not break keyboard input.
+    }
   }
 
   private async exitFromCommand(): Promise<void> {
@@ -227,104 +341,32 @@ export class LuminaTui {
     this.exit();
   }
 
-  private async handleRawInput(text: string): Promise<void> {
-    let i = 0;
-    while (i < text.length) {
-      const rest = text.slice(i);
-      const terminalEvent = parseTerminalControlSequence(rest);
-      if (terminalEvent) {
-        i += terminalEvent.length;
-        continue;
-      }
-      const cursor = parseCursorSequence(rest);
-      if (cursor) {
-        await this.handleInputKey(undefined, { name: cursor.name });
-        i += cursor.length;
-        continue;
-      }
-      if (rest.startsWith("\x1b[3~")) {
-        await this.handleInputKey(undefined, { name: "delete" });
-        i += 4;
-        continue;
-      }
-      if (rest.startsWith("\x1b[A")) {
-        await this.handleInputKey(undefined, { name: "up" });
-        i += 3;
-        continue;
-      }
-      if (rest.startsWith("\x1b[B")) {
-        await this.handleInputKey(undefined, { name: "down" });
-        i += 3;
-        continue;
-      }
-      if (rest.startsWith("\x1b[C")) {
-        await this.handleInputKey(undefined, { name: "right" });
-        i += 3;
-        continue;
-      }
-      if (rest.startsWith("\x1b[D")) {
-        await this.handleInputKey(undefined, { name: "left" });
-        i += 3;
-        continue;
-      }
-      if (rest.startsWith("\x1b[H") || rest.startsWith("\x1b[1~")) {
-        await this.handleInputKey(undefined, { name: "home" });
-        i += rest.startsWith("\x1b[1~") ? 4 : 3;
-        continue;
-      }
-      if (rest.startsWith("\x1b[F") || rest.startsWith("\x1b[4~")) {
-        await this.handleInputKey(undefined, { name: "end" });
-        i += rest.startsWith("\x1b[4~") ? 4 : 3;
-        continue;
-      }
-      const char = Array.from(rest)[0] || "";
-      i += char.length || 1;
-      switch (char) {
-        case "\x03":
-          this.exit();
-          return;
-        case "\r":
-        case "\n":
-          await this.handleInputKey(undefined, { name: "enter" });
-          break;
-        case "\t":
-          await this.handleInputKey(undefined, { name: "tab" });
-          break;
-        case "\x1b":
-          await this.handleInputKey(undefined, { name: "escape" });
-          break;
-        case "\x7f":
-        case "\b":
-          await this.handleInputKey(undefined, { name: "backspace" });
-          break;
-        case "\x01":
-          await this.handleInputKey(undefined, { name: "C-a" });
-          break;
-        case "\x05":
-          await this.handleInputKey(undefined, { name: "C-e" });
-          break;
-        case "\x15":
-          await this.handleInputKey(undefined, { name: "C-u" });
-          break;
-        default:
-          await this.handleInputKey(char, { name: "char" });
-          break;
-      }
-    }
-  }
-
   private async handleInputKey(ch: string | undefined, key: any): Promise<void> {
-    if (!this.modal.hidden) return;
     const name = key?.full || key?.name || "";
+    if (!this.modal.hidden) {
+      const handler = this.modalKeyHandlers.get(name) || this.modalKeyHandlers.get(name.toLowerCase());
+      if (handler) {
+        handler();
+      } else if (name === "up") {
+        this.modal.scroll(-1);
+        this.requestRender(true);
+      } else if (name === "down") {
+        this.modal.scroll(1);
+        this.requestRender(true);
+      } else if (name === "escape") {
+        this.closeModal();
+      }
+      return;
+    }
     if (!this.menu.hidden && this.menuMode) {
       switch (name) {
         case "up":
           this.menu.up(1);
-          this.screen.render();
+          this.requestRender(true);
           return;
         case "down":
           this.menu.down(1);
-          this.screen.render();
+          this.requestRender(true);
           return;
         case "enter":
         case "return":
@@ -358,9 +400,17 @@ export class LuminaTui {
         await this.handleEscape();
         return;
       case "up":
+        if (this.running) {
+          this.scrollTranscriptBy(-3);
+          return;
+        }
         this.historyUp();
         return;
       case "down":
+        if (this.running) {
+          this.scrollTranscriptBy(3);
+          return;
+        }
         this.historyDown();
         return;
       case "left":
@@ -373,13 +423,13 @@ export class LuminaTui {
       case "C-a":
         this.inputCursor = 0;
         this.renderInput();
-        this.screen.render();
+        this.requestRender(true);
         return;
       case "end":
       case "C-e":
         this.inputCursor = Array.from(this.inputBuffer).length;
         this.renderInput();
-        this.screen.render();
+        this.requestRender(true);
         return;
       case "backspace":
         this.deleteBeforeCursor();
@@ -400,7 +450,18 @@ export class LuminaTui {
   private async submitInput(): Promise<void> {
     const text = this.inputBuffer.trim();
     if (!text) return;
+    if (this.pendingPrompt === "new-team-name") {
+      await this.createNewTeamTemplate(text);
+      return;
+    }
     if (text === "/quit" || text === "/exit" || text === "/q") {
+      if (this.teamMode && this.running) {
+        try {
+          await this.rpc.call("team.abort", { team_session_id: this.teamSessionID });
+        } catch {
+          // Session exit continues even if team abort already completed.
+        }
+      }
       await this.exitFromCommand();
       return;
     }
@@ -436,11 +497,52 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
-    if (text === "/skill") {
+    const lower = text.toLowerCase();
+    if (lower === "/skill") {
       await this.showSkills();
       return;
     }
-    if (text === "/resume") {
+    if (lower === "/team") {
+      await this.showTeams();
+      return;
+    }
+    if (lower === "/newteam") {
+      this.startNewTeamPrompt();
+      return;
+    }
+    if (lower === "/teamsummary") {
+      if (!this.teamMode || !this.teamSessionID) {
+        this.taskLines.push("/TeamSummary: 仅在 Team 模式下可用。请先使用 /team 进入 Team 模式。");
+        this.renderTasks();
+        this.setInput("");
+        return;
+      }
+      try {
+        const summary = await this.rpc.call("team.summary", { team_session_id: this.teamSessionID });
+        const lines = [
+          `Team: ${summary.active_team_name || "unknown"}`,
+          `Loop Iteration: ${summary.loop_iteration ?? 0}`,
+          `Running: ${summary.running ? "yes" : "no"}`,
+          `Dialogue Count: ${summary.dialogue_count ?? 0}`,
+          `Artifact Count: ${summary.artifact_count ?? 0}`,
+          `Activity Count: ${summary.activity_count ?? 0}`,
+          `Gate QA: ${summary.gate_status?.qa || "pending"}`,
+          `Gate Reviewer: ${summary.gate_status?.reviewer || "pending"}`,
+        ];
+        this.taskLines.push(...lines.map((line) => `team.summary: ${line}`));
+        this.renderTasks();
+      } catch (err) {
+        this.taskLines.push(`team.summary: ${String(err)}`);
+        this.renderTasks();
+      }
+      this.setInput("");
+      return;
+    }
+    if (lower === "/teamout") {
+      await this.handleTeamOut();
+      return;
+    }
+    if (lower === "/resume") {
       await this.showSessions();
       return;
     }
@@ -451,15 +553,22 @@ export class LuminaTui {
     this.hideMenu();
     this.setInput("");
     this.running = true;
+    this.localSubmitPending = true;
     this.transcriptFollow = true;
     this.tasksFollow = true;
     this.inputEnabled = false;
+    this.inputPlaceholder = this.teamMode ? "Team is working..." : "Agent is responding...";
     this.renderStatus();
     this.renderInput();
     try {
-      await this.rpc.call("session.submit", { session_id: this.sessionID, input: text });
+      if (this.teamMode) {
+        await this.rpc.call("team.submit", { team_session_id: this.teamSessionID, input: text });
+      } else {
+        await this.rpc.call("session.submit", { session_id: this.sessionID, input: text });
+      }
     } catch (err) {
       this.taskLines.push(String(err));
+      this.localSubmitPending = false;
       this.running = false;
       this.inputEnabled = true;
       this.renderTasks();
@@ -470,6 +579,11 @@ export class LuminaTui {
 
   private async handleEscape(): Promise<void> {
     if (!this.running) {
+      if (this.pendingPrompt) {
+        this.pendingPrompt = null;
+        this.inputPlaceholder = this.teamMode ? "请输入 Team 消息并回车。" : "请输入消息并回车。";
+        this.setInput("");
+      }
       this.hideMenu();
       this.resetEscapeInterrupt();
       return;
@@ -483,9 +597,19 @@ export class LuminaTui {
       this.resetEscapeInterrupt();
       this.inputPlaceholder = "正在中断当前会话...";
       this.renderInput();
-      this.screen.render();
+      this.requestRender(true);
       try {
-        await this.rpc.call("session.abort", { session_id: this.sessionID });
+        if (this.teamMode && this.teamSessionID) {
+          await this.rpc.call("team.abort", { team_session_id: this.teamSessionID });
+        } else {
+          await this.rpc.call("session.abort", { session_id: this.sessionID });
+        }
+        this.localSubmitPending = false;
+        this.running = false;
+        this.inputEnabled = true;
+        this.inputPlaceholder = this.teamMode ? "请输入 Team 消息并回车。" : "请输入消息并回车。";
+        this.renderInput();
+        this.renderStatus();
       } catch (err) {
         this.taskLines.push(`abort: ${String(err)}`);
         this.renderTasks();
@@ -495,14 +619,14 @@ export class LuminaTui {
     this.lastEscapeAt = now;
     this.inputPlaceholder = "再按一次 Esc 中断当前会话。";
     this.renderInput();
-    this.screen.render();
+    this.requestRender(true);
     if (this.escapeResetTimer) clearTimeout(this.escapeResetTimer);
     this.escapeResetTimer = setTimeout(() => {
       this.lastEscapeAt = 0;
       if (this.running) {
         this.inputPlaceholder = "Agent is responding...";
         this.renderInput();
-        this.screen.render();
+        this.requestRender(true);
       }
     }, escInterruptWindowMs);
   }
@@ -521,12 +645,17 @@ export class LuminaTui {
   }
 
   private updateCompletion(): void {
+    if (this.pendingPrompt) {
+      this.hideMenu();
+      return;
+    }
     const value = this.inputBuffer;
     if (!value.startsWith("/") || value.includes(" ")) {
       this.hideMenu();
       return;
     }
-    const matches = this.slashItems.filter((item) => item.name.startsWith(value)).slice(0, 10);
+    const lower = value.toLowerCase();
+    const matches = this.slashItems.filter((item) => item.name.toLowerCase().startsWith(lower)).slice(0, 10);
     if (matches.length === 0) {
       this.hideMenu();
       return;
@@ -535,7 +664,7 @@ export class LuminaTui {
     this.menu.setItems(matches.map((item) => `${item.name.padEnd(18)} ${item.description || ""}`));
     this.menu.select(0);
     this.menu.show();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private async acceptMenuSelection(): Promise<void> {
@@ -557,13 +686,40 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
+    if (this.menuMode === "team") {
+      const teamName = this.menu.getItem(index)?.getText().trim().split(/\s+/)[0];
+      if (teamName) await this.enterTeam(teamName);
+      this.hideMenu();
+      this.setInput("");
+      return;
+    }
     const selected = this.menu.getItem(index)?.getText().trim().split(/\s+/)[0];
     if (!selected) return;
-    if (selected === "/skill") {
+    const lower = selected.toLowerCase();
+    if (lower === "/skill") {
       await this.showSkills();
       return;
     }
-    if (selected === "/resume") {
+    if (lower === "/team") {
+      await this.showTeams();
+      return;
+    }
+    if (lower === "/teamsummary") {
+      this.setInput("/TeamSummary");
+      this.hideMenu();
+      return;
+    }
+    if (lower === "/newteam") {
+      this.hideMenu();
+      this.startNewTeamPrompt();
+      return;
+    }
+    if (lower === "/teamout") {
+      this.setInput("/TeamOut");
+      this.hideMenu();
+      return;
+    }
+    if (lower === "/resume") {
       await this.showSessions();
       return;
     }
@@ -596,7 +752,7 @@ export class LuminaTui {
     this.menu.select(0);
     this.menu.show();
     this.menu.focus();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private async showSessions(): Promise<void> {
@@ -610,7 +766,95 @@ export class LuminaTui {
     this.menu.select(0);
     this.menu.show();
     this.menu.focus();
-    this.screen.render();
+    this.requestRender(true);
+  }
+
+  private async showTeams(): Promise<void> {
+    const teams = await this.rpc.call("team.list");
+    const items = (Array.isArray(teams) ? teams : []).flatMap((team: any) => {
+      const name = typeof team?.name === "string" ? team.name : "";
+      if (!name) return [];
+      const display = team.display_name || name;
+      const count = Number(team.agent_count || 0);
+      const description = team.description || "";
+      return [`${name}  ${display}  agents:${count}  ${escapeBlessedTags(description)}`];
+    });
+    this.menuMode = "team";
+    this.menu.setItems(items.length ? items : ["No teams available"]);
+    this.menu.select(0);
+    this.menu.show();
+    this.menu.focus();
+    this.requestRender(true);
+  }
+
+  private startNewTeamPrompt(): void {
+    this.pendingPrompt = "new-team-name";
+    this.hideMenu();
+    this.inputPlaceholder = "Team Name:";
+    this.setInput("");
+  }
+
+  private async createNewTeamTemplate(name: string): Promise<void> {
+    try {
+      const result = await this.rpc.call("team.create_template", { name });
+      const path = result?.path || "";
+      const teamName = result?.team_name || name;
+      const count = Number(result?.agent_count || 1);
+      this.taskLines.push(`NewTeam: created ${teamName} (${count} agent)`);
+      if (path) this.taskLines.push(`NewTeam: ${path}`);
+      this.pendingPrompt = null;
+      this.inputPlaceholder = this.teamMode ? "请输入 Team 消息并回车。" : "请输入消息并回车。";
+      this.setInput("");
+      this.renderTasks(true);
+      await this.loadSlashItems();
+    } catch (err) {
+      this.taskLines.push(`NewTeam: ${String(err)}`);
+      this.renderTasks(true);
+      this.setInput("");
+      this.inputPlaceholder = "Team Name:";
+      this.pendingPrompt = "new-team-name";
+    }
+  }
+
+  private async enterTeam(teamName: string): Promise<void> {
+    if (teamName === "No") return;
+    const snapshot = await this.rpc.call("team.start", { session_id: this.sessionID, team_name: teamName, cwd: this.options.cwd });
+    this.applyTeamSnapshot(snapshot);
+  }
+
+  private async handleTeamOut(): Promise<void> {
+    if (!this.teamMode || !this.teamSessionID) {
+      this.setInput("");
+      return;
+    }
+    const abort = this.running;
+    if (abort) {
+      const confirmed = await this.confirmModal("Team 正在执行", "退出 Team 模式会中断当前 Team Loop。\n确认中断并退出吗？");
+      if (!confirmed) {
+        this.setInput("");
+        return;
+      }
+      await this.rpc.call("team.abort", { team_session_id: this.teamSessionID });
+    }
+    await this.rpc.call("team.out", { team_session_id: this.teamSessionID, abort });
+    this.teamMode = false;
+    this.teamSessionID = "";
+    this.activeTeamName = "";
+    this.teamDialogueEntries = [];
+    this.teamActivityRows = [];
+    this.teamArtifacts = [];
+    this.teamGateStatus = {};
+    this.teamContract = null;
+    this.teamGateVerdicts = {};
+    this.teamStreamingText.clear();
+    this.teamLoopIteration = 0;
+    this.running = false;
+    this.inputEnabled = true;
+    this.inputPlaceholder = "请输入消息并回车。";
+    this.setInput("");
+    this.renderTranscript();
+    this.renderTasks();
+    this.renderStatus();
   }
 
   private handlePush(push: PushEvent): void {
@@ -624,6 +868,7 @@ export class LuminaTui {
       case "session.status":
         this.running = (event.payload as any)?.status === "running";
         if (!this.running) {
+          this.localSubmitPending = false;
           this.inputEnabled = true;
           this.inputPlaceholder = "请输入消息并回车。";
           this.resetEscapeInterrupt();
@@ -633,19 +878,57 @@ export class LuminaTui {
         this.renderInput();
         break;
       case "session.done":
+        this.localSubmitPending = false;
         this.running = false;
         this.applySnapshot(event.payload);
+        break;
+      case "team.started":
+      case "team.frame.snapshot":
+      case "team.loop.iteration":
+      case "team.loop.recovery":
+      case "team.agent.started":
+      case "team.agent.status":
+      case "team.artifact.created":
+      case "team.review.required":
+      case "team.waiting_for_user":
+        this.applyTeamSnapshot(event.payload);
+        break;
+      case "team.completed":
+      case "team.interrupted_by_user":
+        this.localSubmitPending = false;
+        this.applyTeamSnapshot(event.payload);
+        break;
+      case "team.dialogue.appended":
+        this.appendTeamDialogueEntry(event.payload);
+        break;
+      case "team.agent.message":
+        this.appendTeamAgentDelta(event.payload);
         break;
       case "permission_requested":
         void this.showPermission(event.payload);
         break;
     }
-    this.screen.render();
+    this.requestRender();
+  }
+
+  private handleBackendDisconnect(reason: string): void {
+    this.localSubmitPending = false;
+    this.running = false;
+    this.inputEnabled = true;
+    this.inputPlaceholder = this.teamMode ? "Backend 已断开，输入 /exit 退出或重启 lumina。" : "Backend 已断开，输入 /exit 退出或重启 lumina。";
+    this.taskLines.push(`backend: ${reason}`);
+    this.renderTasks(true);
+    this.renderStatus(undefined, true);
+    this.renderInput();
+    this.requestRender(true);
   }
 
   private applySnapshot(snapshot: any): void {
     this.sessionID = snapshot.session_id || this.sessionID;
     this.applyFrame(snapshot.frame);
+    if (Array.isArray(snapshot.teams) && snapshot.teams.length > 0) {
+      this.applyTeamSnapshot(snapshot.teams[snapshot.teams.length - 1]);
+    }
   }
 
   private applyFrame(frame: any): void {
@@ -653,6 +936,7 @@ export class LuminaTui {
     this.lastFrame = frame;
     this.inputEnabled = frame.input_enabled !== false;
     this.inputPlaceholder = frame.input_placeholder || "请输入消息并回车。";
+    this.applyLocalSubmitLock();
     this.transcriptEntries = (frame.transcript_entries || []).map((entry: any) => ({ kind: entry.kind, text: entry.text || "" }));
     this.taskLines = (frame.task_activity_entries || []).map((entry: any) => {
       const label = entry.worker_label || entry.task_id || "agent";
@@ -665,21 +949,72 @@ export class LuminaTui {
     this.renderInput();
   }
 
-  private renderTranscript(): void {
+  private applyTeamSnapshot(snapshot: any): void {
+    if (!snapshot) return;
+    const source = snapshot.team_session_id ? snapshot : snapshot.payload || snapshot;
+    if (!source.team_session_id && !source.team_mode) return;
+    this.teamMode = true;
+    this.teamSessionID = source.team_session_id || this.teamSessionID;
+    this.activeTeamName = source.active_team_name || source.active_team_id || this.activeTeamName;
+    this.teamLoopIteration = Number(source.team_loop_iteration || 0);
+    this.running = Boolean(source.running);
+    this.inputEnabled = source.input_enabled !== false;
+    this.inputPlaceholder = source.input_placeholder || "请输入 Team 消息并回车。";
+    this.applyLocalSubmitLock();
+    this.teamDialogueEntries = Array.isArray(source.team_dialogue_entries) ? source.team_dialogue_entries : this.teamDialogueEntries;
+    this.teamActivityRows = Array.isArray(source.team_activity_rows) ? source.team_activity_rows : this.teamActivityRows;
+    this.teamArtifacts = Array.isArray(source.team_artifacts) ? source.team_artifacts : this.teamArtifacts;
+    if (Object.prototype.hasOwnProperty.call(source, "team_gate_status")) {
+      this.teamGateStatus = source.team_gate_status || {};
+    }
+    if (Object.prototype.hasOwnProperty.call(source, "team_contract")) {
+      this.teamContract = source.team_contract || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(source, "team_gate_verdicts")) {
+      this.teamGateVerdicts = source.team_gate_verdicts || {};
+    }
+    if (!this.running) {
+      this.localSubmitPending = false;
+      this.inputEnabled = true;
+      this.resetEscapeInterrupt();
+      this.teamStreamingText.clear();
+    }
+    this.renderTranscript();
+    this.renderTasks();
+    this.renderStatus();
+    this.renderInput();
+  }
+
+  private applyLocalSubmitLock(): void {
+    if (!this.localSubmitPending) return;
+    this.running = true;
+    this.inputEnabled = false;
+    this.inputPlaceholder = this.teamMode ? "Team is working..." : "Agent is responding...";
+  }
+
+  private renderTranscript(force = false): void {
+    if (!force && this.quietScrollActive()) {
+      this.transcriptRenderPending = true;
+      this.deferredRenderPending = true;
+      this.schedulePaneHoldFlush();
+      return;
+    }
     const previousScroll = getPaneScroll(this.transcript);
     const shouldFollow = this.transcriptFollow || isPaneAtBottom(this.transcript);
-    const lines: string[] = [];
-    for (const entry of this.transcriptEntries) {
-      if (entry.kind === "user") {
-        lines.push(`{${tuiTheme.user}-fg}{bold}你{/bold}{/${tuiTheme.user}-fg}`);
-        lines.push(indent(escapeBlessedTags(entry.text)));
-      } else {
-        lines.push(`{${tuiTheme.assistant}-fg}{bold}Lumina{/bold}{/${tuiTheme.assistant}-fg}`);
-        lines.push(indent(escapeBlessedTags(entry.text)));
-      }
-      lines.push("");
+    const content = buildTranscriptContent({
+      teamMode: this.teamMode,
+      transcriptEntries: this.transcriptEntries,
+      teamDialogueEntries: this.teamDialogueEntries,
+      teamStreamingText: this.teamStreamingText,
+      theme: tuiTheme,
+    });
+    if (!force && content === this.transcriptContent && !shouldFollow) {
+      return;
     }
-    this.transcript.setContent(lines.join("\n"));
+    if (content !== this.transcriptContent) {
+      this.transcript.setContent(content);
+      this.transcriptContent = content;
+    }
     this.suppressTranscriptScroll = true;
     if (shouldFollow) {
       this.transcript.setScrollPerc(100);
@@ -688,14 +1023,62 @@ export class LuminaTui {
       this.transcript.scrollTo(previousScroll);
     }
     this.suppressTranscriptScroll = false;
+    this.requestRender();
   }
 
-  private renderTasks(): void {
+  private appendTeamDialogueEntry(entry: any): void {
+    if (!entry || typeof entry !== "object") return;
+    const id = String(entry.id || "");
+    if (id && this.teamDialogueEntries.some((existing) => existing.id === id)) {
+      return;
+    }
+    if (entry.from_agent) {
+      this.teamStreamingText.delete(String(entry.from_agent));
+    }
+    this.teamDialogueEntries.push(entry);
+    this.renderTranscript();
+    this.renderTasks();
+    this.renderStatus();
+    this.renderInput();
+  }
+
+  private appendTeamAgentDelta(payload: any): void {
+    if (!payload || typeof payload !== "object") return;
+    const agentID = String(payload.agent_id || "");
+    const delta = String(payload.delta || payload.content || "");
+    if (!agentID || !delta) return;
+    this.teamStreamingText.set(agentID, (this.teamStreamingText.get(agentID) || "") + delta);
+    this.renderTranscript();
+  }
+
+  private renderTasks(force = false): void {
+    if (!force && this.quietScrollActive()) {
+      this.tasksRenderPending = true;
+      this.deferredRenderPending = true;
+      this.schedulePaneHoldFlush();
+      return;
+    }
     const previousScroll = getPaneScroll(this.tasks);
     const shouldFollow = this.tasksFollow || isPaneAtBottom(this.tasks);
-    const prefix = this.running ? `${spinnerFrames[this.spinner % spinnerFrames.length]} 正在执行任务${".".repeat((this.spinner % 3) + 1)}` : "空闲";
-    const lines = this.taskLines.length ? this.taskLines : [prefix];
-    this.tasks.setContent(lines.join("\n"));
+    const content = buildTasksContent({
+      teamMode: this.teamMode,
+      running: this.running,
+      spinnerFrame: spinnerFrames[this.spinner % spinnerFrames.length],
+      spinnerDots: ".".repeat((this.spinner % 3) + 1),
+      teamLoopIteration: this.teamLoopIteration,
+      teamActivityRows: this.teamActivityRows,
+      teamArtifacts: this.teamArtifacts,
+      teamContract: this.teamContract,
+      teamGateVerdicts: this.teamGateVerdicts,
+      taskLines: this.taskLines,
+    });
+    if (!force && content === this.tasksContent && !shouldFollow) {
+      return;
+    }
+    if (content !== this.tasksContent) {
+      this.tasks.setContent(content);
+      this.tasksContent = content;
+    }
     this.suppressTasksScroll = true;
     if (shouldFollow) {
       this.tasks.setScrollPerc(100);
@@ -704,20 +1087,43 @@ export class LuminaTui {
       this.tasks.scrollTo(previousScroll);
     }
     this.suppressTasksScroll = false;
+    this.requestRender();
   }
 
-  private renderStatus(frame?: any): void {
+  private renderStatus(frame?: any, force = false): void {
+    if (!force && this.quietScrollActive()) {
+      this.statusRenderPending = true;
+      this.deferredRenderPending = true;
+      this.schedulePaneHoldFlush();
+      return;
+    }
     frame = frame || this.lastFrame;
-    const model = frame?.model_name || frame?.model || "unknown";
-    const used = Number(frame?.context_used_tokens || 0);
-    const limit = Number(frame?.context_limit_tokens || 0);
-    const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
-    const barWidth = 24;
-    const filled = Math.round(ratio * barWidth);
-    const bar = `${"=".repeat(filled)}${"-".repeat(barWidth - filled)}`;
-    const state = this.running ? `${spinnerFrames[this.spinner % spinnerFrames.length]} Agent is thinking` : "输入就绪";
-    this.header.setContent(`{${tuiTheme.brand}-fg}{bold}LuminaCode{/bold}{/${tuiTheme.brand}-fg}{|}{${tuiTheme.muted}-fg}${state}{/${tuiTheme.muted}-fg}`);
-    this.status.setContent(`Model: ${model} | Context [${bar}] ${Math.round(ratio * 100)}% ${formatTokens(used)}/${formatTokens(limit)}`);
+    const header = buildHeaderContent({
+      teamMode: this.teamMode,
+      activeTeamName: this.activeTeamName,
+      running: this.running,
+      spinnerFrame: spinnerFrames[this.spinner % spinnerFrames.length],
+      theme: tuiTheme,
+    });
+    const status = buildStatusContent({
+      teamMode: this.teamMode,
+      activeTeamName: this.activeTeamName,
+      teamLoopIteration: this.teamLoopIteration,
+      teamActivityRows: this.teamActivityRows,
+      teamGateStatus: this.teamGateStatus,
+      teamContract: this.teamContract,
+      teamGateVerdicts: this.teamGateVerdicts,
+      frame,
+    });
+    if (header !== this.headerContent) {
+      this.header.setContent(header);
+      this.headerContent = header;
+    }
+    if (status !== this.statusContent) {
+      this.status.setContent(status);
+      this.statusContent = status;
+    }
+    this.requestRender();
   }
 
   private layout(): void {
@@ -737,6 +1143,7 @@ export class LuminaTui {
   }
 
   private renderInput(): void {
+    this.input.setLabel(this.teamMode ? " ● Team 输入 " : " ● 输入 ");
     const runes = Array.from(this.inputBuffer);
     this.inputCursor = Math.max(0, Math.min(this.inputCursor, runes.length));
     const before = runes.slice(0, this.inputCursor).join("");
@@ -744,9 +1151,23 @@ export class LuminaTui {
     const prompt = this.inputEnabled && !this.running ? "❯" : "·";
     if (this.inputBuffer === "") {
       this.input.setContent(`${prompt} ▌ ${this.inputPlaceholder}`);
+      this.inputScroll = 0;
+      this.input.scrollTo(0);
       return;
     }
     this.input.setContent(`${prompt} ${before}▌${after}`);
+    this.scrollInputToCursor(before);
+  }
+
+  private scrollInputToCursor(beforeCursor: string): void {
+    const cursorLine = beforeCursor.split("\n").length - 1;
+    const visibleHeight = Math.max(1, Number(this.input.height || 0) - 2);
+    if (cursorLine < this.inputScroll) {
+      this.inputScroll = cursorLine;
+    } else if (cursorLine >= this.inputScroll + visibleHeight) {
+      this.inputScroll = Math.max(0, cursorLine - visibleHeight + 1);
+    }
+    this.input.scrollTo(this.inputScroll);
   }
 
   private insertInputText(text: string): void {
@@ -760,13 +1181,28 @@ export class LuminaTui {
     this.inputCursor += insert.length;
     this.renderInput();
     this.updateCompletion();
-    this.screen.render();
+    this.requestRender(true);
+  }
+
+  private insertPastedText(text: string): void {
+    if (!this.inputEnabled || this.running || !text) return;
+    this.resetHistoryBrowse();
+    this.hideMenu();
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const insert = Array.from(normalized).filter((char) => char === "\n" || char === "\t" || isPrintableInput(char));
+    if (insert.length === 0) return;
+    const runes = Array.from(this.inputBuffer);
+    runes.splice(this.inputCursor, 0, ...insert);
+    this.inputBuffer = runes.join("");
+    this.inputCursor += insert.length;
+    this.renderInput();
+    this.requestRender(true);
   }
 
   private moveInputCursor(delta: number): void {
     this.inputCursor = Math.max(0, Math.min(Array.from(this.inputBuffer).length, this.inputCursor + delta));
     this.renderInput();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private deleteBeforeCursor(): void {
@@ -778,7 +1214,7 @@ export class LuminaTui {
     this.inputCursor -= 1;
     this.renderInput();
     this.updateCompletion();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private deleteAtCursor(): void {
@@ -790,24 +1226,94 @@ export class LuminaTui {
     this.inputBuffer = runes.join("");
     this.renderInput();
     this.updateCompletion();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private async showPermission(payload: any): Promise<void> {
-    this.modal.setContent(`{${tuiTheme.warning}-fg}需要权限确认{/${tuiTheme.warning}-fg}\n\n${escapeBlessedTags(formatPermissionPrompt(payload))}\n\n[o] 允许一次   [a] 总是允许   [d/esc] 拒绝`);
+    const source = payload?.agent_display ? `${payload.agent_display} 请求执行` : "需要权限确认";
+    const details = formatPermissionPrompt(payload);
+    const choices = [
+      { label: "允许一次", decision: "once" },
+      { label: "总是允许", decision: "always" },
+      { label: "拒绝", decision: "deny" },
+    ];
+    let selected = 0;
+    const render = () => {
+      const choiceLine = choices
+        .map((choice, index) => {
+          const mark = index === selected ? "■" : "□";
+          const styleOpen = index === selected ? `{${tuiTheme.selectionBg}-bg}{${tuiTheme.selectionFg}-fg}` : "";
+          const styleClose = index === selected ? `{/${tuiTheme.selectionFg}-fg}{/${tuiTheme.selectionBg}-bg}` : "";
+          return `${styleOpen}${mark} ${escapeBlessedTags(choice.label)}${styleClose}`;
+        })
+        .join("   ");
+      this.modal.setContent(
+        `{${tuiTheme.warning}-fg}${escapeBlessedTags(source)}{/${tuiTheme.warning}-fg}\n` +
+          `${choiceLine}\n` +
+          `{${tuiTheme.muted}-fg}←/→ 选择，Enter 确认，Esc 拒绝；正文可上下滚动。{/${tuiTheme.muted}-fg}\n\n` +
+          escapeBlessedTags(details),
+      );
+      this.requestRender(true);
+    };
+    const resolve = async (decision: string) => {
+      this.closeModal();
+      await this.rpc.call("permission.resolve", { session_id: this.sessionID, team_session_id: payload.team_session_id, request_id: payload.request_id, decision });
+      this.requestRender(true);
+    };
+    render();
+    this.modal.scrollTo(0);
     this.modal.show();
     this.modal.focus();
-    this.screen.render();
-    const resolve = async (decision: string) => {
-      this.modal.hide();
-      this.input.focus();
-      await this.rpc.call("permission.resolve", { session_id: this.sessionID, request_id: payload.request_id, decision });
-      this.screen.render();
-    };
-    this.modal.onceKey("o", () => void resolve("once"));
-    this.modal.onceKey("a", () => void resolve("always"));
-    this.modal.onceKey("d", () => void resolve("deny"));
-    this.modal.onceKey("escape", () => void resolve("deny"));
+    this.requestRender(true);
+    this.setModalHandlers({
+      left: () => {
+        selected = (selected + choices.length - 1) % choices.length;
+        this.modal.scrollTo(0);
+        render();
+      },
+      right: () => {
+        selected = (selected + 1) % choices.length;
+        this.modal.scrollTo(0);
+        render();
+      },
+      enter: () => void resolve(choices[selected].decision),
+      return: () => void resolve(choices[selected].decision),
+      escape: () => void resolve("deny"),
+    });
+  }
+
+  private confirmModal(title: string, message: string): Promise<boolean> {
+    this.modal.setContent(`{${tuiTheme.warning}-fg}${escapeBlessedTags(title)}{/${tuiTheme.warning}-fg}\n\n${escapeBlessedTags(message)}\n\n[y] 确认   [n/esc] 取消`);
+    this.modal.scrollTo(0);
+    this.modal.show();
+    this.modal.focus();
+    this.requestRender(true);
+    return new Promise((resolve) => {
+      const done = (value: boolean) => {
+        this.closeModal();
+        resolve(value);
+      };
+      this.setModalHandlers({
+        y: () => done(true),
+        n: () => done(false),
+        escape: () => done(false),
+      });
+    });
+  }
+
+  private setModalHandlers(handlers: Record<string, () => void>): void {
+    this.modalKeyHandlers.clear();
+    for (const [key, handler] of Object.entries(handlers)) {
+      this.modalKeyHandlers.set(key, handler);
+      this.modalKeyHandlers.set(key.toLowerCase(), handler);
+    }
+  }
+
+  private closeModal(): void {
+    this.modalKeyHandlers.clear();
+    this.modal.hide();
+    this.input.focus();
+    this.requestRender(true);
   }
 
   private setInput(value: string): void {
@@ -815,14 +1321,14 @@ export class LuminaTui {
     this.inputCursor = Array.from(value).length;
     this.renderInput();
     this.input.focus();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private hideMenu(): void {
     this.menu.hide();
     this.menuMode = null;
     this.input.focus();
-    this.screen.render();
+    this.requestRender(true);
   }
 
   private historyUp(): void {
@@ -850,188 +1356,5 @@ export class LuminaTui {
       this.historyIndex = -1;
       this.historyDraft = "";
     }
-  }
-}
-
-function isPrintableInput(value: string | undefined): value is string {
-  if (!value) return false;
-  for (const char of Array.from(value)) {
-    if (/[\u0000-\u001f\u007f]/u.test(char)) return false;
-  }
-  return true;
-}
-
-function getPaneScroll(pane: any): number {
-  const scroll = Number(pane.getScroll?.());
-  if (Number.isFinite(scroll)) return Math.max(0, Math.floor(scroll));
-  const childBase = Number(pane.childBase || 0);
-  return Number.isFinite(childBase) ? Math.max(0, Math.floor(childBase)) : 0;
-}
-
-function isPaneAtBottom(pane: any): boolean {
-  const percent = Number(pane.getScrollPerc?.());
-  if (Number.isFinite(percent)) return percent >= 99;
-  const scroll = getPaneScroll(pane);
-  const contentHeight = Number(pane.getScrollHeight?.() || 0);
-  const visibleHeight = Math.max(1, Number(pane.height || 0) - 2);
-  if (!Number.isFinite(contentHeight) || contentHeight <= visibleHeight) return true;
-  return scroll + visibleHeight >= contentHeight - 1;
-}
-
-function formatPermissionPrompt(payload: any): string {
-  const prompt = payload?.prompt ?? payload?.skill_shell_request ?? payload;
-  if (typeof prompt === "string") return prompt;
-  if (prompt && typeof prompt === "object") {
-    const request = (prompt as any).skill_shell_request || prompt;
-    const parts: string[] = [];
-    const title = (request.skill || request.skill_name || request.name) ? `Skill: ${request.skill || request.skill_name || request.name}` : "";
-    if (title) parts.push(title);
-    if (request.command) parts.push(`Command: ${request.command}`);
-    if (request.cwd || request.workdir) parts.push(`CWD: ${request.cwd || request.workdir}`);
-    if (request.reason || request.description) parts.push(String(request.reason || request.description));
-    if (parts.length > 0) return parts.join("\n");
-    try {
-      return JSON.stringify(prompt, null, 2);
-    } catch {
-      return "tool permission";
-    }
-  }
-  return "tool permission";
-}
-
-function escapeBlessedTags(text: string): string {
-  return text.replace(/[{}]/g, (char) => (char === "{" ? "{open}" : "{close}"));
-}
-
-function normalizeMenuItems(items: unknown): Array<{ name: string; description: string }> {
-  if (!Array.isArray(items)) return [];
-  return items.flatMap((item: any) => {
-    const rawName = typeof item?.name === "string" ? item.name : typeof item?.Name === "string" ? item.Name : "";
-    const name = rawName.trim();
-    if (!name) return [];
-    const rawDescription = typeof item?.description === "string" ? item.description : typeof item?.Description === "string" ? item.Description : "";
-    const description = rawDescription.trim();
-    return [{ name, description: escapeBlessedTags(description) }];
-  });
-}
-
-function parseTerminalControlSequence(rest: string): { length: number } | null {
-  if (rest.startsWith("\x1b[M")) {
-    const chars = Array.from(rest);
-    if (chars.length >= 6) return { length: chars.slice(0, 6).join("").length };
-    return { length: rest.length };
-  }
-  if (rest.startsWith("[M")) {
-    const chars = Array.from(rest);
-    if (chars.length >= 5) return { length: chars.slice(0, 5).join("").length };
-    return { length: rest.length };
-  }
-  const sgrMouse = /^\x1b\[<\d+(?:;\d+){0,2}[mM]/.exec(rest);
-  if (sgrMouse) return { length: sgrMouse[0].length };
-  const straySGRMouse = /^\[<\d+(?:;\d+){0,2}[mM]/.exec(rest);
-  if (straySGRMouse) return { length: straySGRMouse[0].length };
-  const urxvtMouse = /^\x1b\[\d+(?:;\d+){2}M/.exec(rest);
-  if (urxvtMouse) return { length: urxvtMouse[0].length };
-  const strayUrxvtMouse = /^\[\d+(?:;\d+){2}M/.exec(rest);
-  if (strayUrxvtMouse) return { length: strayUrxvtMouse[0].length };
-  if (rest.startsWith("\x1b[I") || rest.startsWith("\x1b[O")) {
-    return { length: 3 };
-  }
-  if (rest.startsWith("[I") || rest.startsWith("[O")) {
-    return { length: 2 };
-  }
-  return null;
-}
-
-function parseCursorSequence(rest: string): { name: "up" | "down" | "right" | "left" | "home" | "end"; length: number } | null {
-  const applicationCursor: Record<string, "up" | "down" | "right" | "left" | "home" | "end"> = {
-    "\x1bOA": "up",
-    "\x1bOB": "down",
-    "\x1bOC": "right",
-    "\x1bOD": "left",
-    "\x1bOH": "home",
-    "\x1bOF": "end",
-  };
-  for (const [sequence, name] of Object.entries(applicationCursor)) {
-    if (rest.startsWith(sequence)) return { name, length: sequence.length };
-  }
-  const csi = /^\x1b\[[0-9;?]*([ABCDHF])/.exec(rest);
-  if (!csi) return null;
-  const key = csi[1];
-  const names: Record<string, "up" | "down" | "right" | "left" | "home" | "end"> = {
-    A: "up",
-    B: "down",
-    C: "right",
-    D: "left",
-    H: "home",
-    F: "end",
-  };
-  return { name: names[key], length: csi[0].length };
-}
-
-function createTheme(): {
-  brand: string;
-  user: string;
-  assistant: string;
-  background: string;
-  panelBg: string;
-  text: string;
-  muted: string;
-  panelBorder: string;
-  panelLabel: string;
-  subtleBorder: string;
-  inputBorder: string;
-  warning: string;
-  selectionBg: string;
-  selectionFg: string;
-} {
-  const forced = (process.env.LUMINA_TUI_THEME || "").toLowerCase();
-  const dark = forced === "dark" || (forced !== "light" && isMacOSDarkMode());
-  if (dark) {
-    return {
-      brand: "cyan",
-      user: "cyan",
-      assistant: "green",
-      background: "black",
-      panelBg: "black",
-      text: "white",
-      muted: "gray",
-      panelBorder: "gray",
-      panelLabel: "cyan",
-      subtleBorder: "gray",
-      inputBorder: "green",
-      warning: "yellow",
-      selectionBg: "cyan",
-      selectionFg: "black",
-    };
-  }
-  return {
-    brand: "blue",
-    user: "blue",
-    assistant: "green",
-    background: "white",
-    panelBg: "white",
-    text: "black",
-    muted: "gray",
-    panelBorder: "gray",
-    panelLabel: "blue",
-    subtleBorder: "gray",
-    inputBorder: "green",
-    warning: "yellow",
-    selectionBg: "blue",
-    selectionFg: "white",
-  };
-}
-
-function isMacOSDarkMode(): boolean {
-  if (process.platform !== "darwin") {
-    return true;
-  }
-  try {
-    return execFileSync("defaults", ["read", "-g", "AppleInterfaceStyle"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-      .trim()
-      .toLowerCase() === "dark";
-  } catch {
-    return false;
   }
 }

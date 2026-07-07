@@ -279,6 +279,7 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 	}
 	extraContext := coretools.ExecutionContext{
 		"_session_id":         sid,
+		"runtime_dir":         q.Config.ProjectRuntimeDir,
 		"_skill_persistence":  q.CoreEngine.skillPersistence,
 		"_skill_agent_scope":  "main",
 		"_turn_count":         state.TurnCount,

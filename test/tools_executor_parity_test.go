@@ -3,6 +3,8 @@ package test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +191,30 @@ func TestStreamingToolExecutorSkipsAggregateBudgetForSingleResultLikePython(t *t
 	}
 	if got := results[0]["content"]; got != longContent {
 		t.Fatalf("single result should not be aggregate-truncated like Python, got %#v", got)
+	}
+}
+
+func TestStreamingToolExecutorStoresLargeResultsInProjectRuntime(t *testing.T) {
+	longContent := strings.Repeat("x", 2000)
+	registry := coretools.NewToolRegistry(newLongSingleResultTool(longContent))
+	cfg := config.NewConfig()
+	cfg.SessionDir = filepath.Join(t.TempDir(), "sessions")
+	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
+	state := agent.NewAgentState()
+	executor := agent.NewStreamingToolExecutor(registry, cfg, &state, coretools.ExecutionContext{})
+
+	if !executor.AddTool(coretools.ToolCall{ID: "long-runtime-1", Name: "long_single", Input: map[string]any{}}) {
+		t.Fatal("expected safe tool to start immediately")
+	}
+	results := executor.GetRemainingResults(context.Background())
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %#v", results)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.ProjectRuntimeDir, "tool-results")); err != nil {
+		t.Fatalf("expected large tool result under project runtime: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.SessionDir, "tool-results")); !os.IsNotExist(err) {
+		t.Fatalf("session dir must not contain tool-results, stat err=%v", err)
 	}
 }
 

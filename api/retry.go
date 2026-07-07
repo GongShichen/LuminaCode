@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -134,6 +135,48 @@ func NewAPIStatusError(provider string, statusCode int, status string, body []by
 		Status:     status,
 		Body:       string(body),
 	}
+}
+
+func ErrorMetadata(err error) map[string]any {
+	metadata := map[string]any{}
+	if err == nil {
+		return metadata
+	}
+	var retryableStatus RetryableStatusError
+	if errors.As(err, &retryableStatus) {
+		addStatusErrorMetadata(metadata, retryableStatus.APIStatusError)
+		return metadata
+	}
+	var statusErr APIStatusError
+	if errors.As(err, &statusErr) {
+		addStatusErrorMetadata(metadata, statusErr)
+		return metadata
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		metadata["error_type"] = "transport_error"
+		metadata["operation"] = urlErr.Op
+		metadata["request_url"] = urlErr.URL
+		metadata["raw_error"] = urlErr.Err.Error()
+		return metadata
+	}
+	metadata["error_type"] = "transport_error"
+	metadata["raw_error"] = err.Error()
+	return metadata
+}
+
+func addStatusErrorMetadata(metadata map[string]any, err APIStatusError) {
+	metadata["error_type"] = "api_status_error"
+	if err.Provider != "" {
+		metadata["provider"] = err.Provider
+	}
+	metadata["status_code"] = err.StatusCode
+	if err.Status != "" {
+		metadata["status"] = err.Status
+	} else if err.StatusCode > 0 {
+		metadata["status"] = http.StatusText(err.StatusCode)
+	}
+	metadata["raw_error"] = err.Body
 }
 
 type RetryableStatusError struct {

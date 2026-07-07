@@ -14,6 +14,7 @@ func isolatedConfig(t *testing.T) config.Config {
 
 func isolatedConfigForCWD(t *testing.T, cwd string) config.Config {
 	t.Helper()
+	t.Setenv("HOME", filepath.Join(cwd, "home"))
 	cfg := config.NewConfigForCWD(cwd)
 	cfg.CWD = cwd
 	cfg.SessionDir = filepath.Join(cwd, "sessions")

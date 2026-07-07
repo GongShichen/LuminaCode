@@ -16,6 +16,7 @@ import (
 	"LuminaCode/backend"
 	"LuminaCode/config"
 	"LuminaCode/session"
+	luminateam "LuminaCode/team"
 
 	"github.com/gorilla/websocket"
 )
@@ -107,6 +108,39 @@ func TestBackendDaemonSessionsDoNotMixEventsOrTranscript(t *testing.T) {
 	}
 	if !strings.Contains(secondText, "/tokens") || strings.Contains(secondText, "/help") {
 		t.Fatalf("second session transcript mixed or missing content:\n%s", secondText)
+	}
+	cancel()
+	mustStopDaemon(t, errCh)
+}
+
+func TestBackendDaemonCreatesTeamTemplate(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.NewConfigForCWD(root)
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	cfg.TeamDir = filepath.Join(root, "TEAM")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endpointPath := filepath.Join(root, "run", "backend.json")
+	errCh := startTestDaemon(t, ctx, cfg, endpointPath)
+	conn := dialEndpoint(t, waitForEndpoint(t, endpointPath))
+	defer conn.Close()
+
+	writeRPC(t, conn, "new-team", "team.create_template", map[string]any{"name": "Data Analysis Team"})
+	response := waitForRPCOK(t, conn, "new-team")
+	var result luminateam.TeamTemplateResult
+	decodeResult(t, response.Result, &result)
+	if result.TeamName != "data-analysis-team" || result.AgentCount != 1 {
+		t.Fatalf("unexpected team template result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.Path, "team-leader", "skills")); err != nil {
+		t.Fatalf("expected team leader skills dir: %v", err)
+	}
+	writeRPC(t, conn, "team-list", "team.list", map[string]any{})
+	listResponse := waitForRPCOK(t, conn, "team-list")
+	var teams []luminateam.TeamListItem
+	decodeResult(t, listResponse.Result, &teams)
+	if len(teams) != 1 || teams[0].Name != "data-analysis-team" {
+		t.Fatalf("expected created team in list, got %#v", teams)
 	}
 	cancel()
 	mustStopDaemon(t, errCh)
@@ -263,9 +297,11 @@ func TestBackendDaemonSessionExitStopsWhenNoOtherWebSocketClients(t *testing.T) 
 	exitResp := waitForRPCOK(t, conn, "exit")
 	var exitPayload map[string]any
 	decodeResult(t, exitResp.Result, &exitPayload)
-	if exitPayload["shutting_down"] != true {
-		t.Fatalf("single client session.exit should shut down backend, got %#v", exitPayload)
+	if exitPayload["shutting_down"] == true || exitPayload["shutdown_after_disconnect"] != true {
+		t.Fatalf("single client session.exit should defer shutdown until websocket closes, got %#v", exitPayload)
 	}
+	writeRPC(t, conn, "status-after-exit", "backend.status", map[string]any{})
+	waitForRPCOK(t, conn, "status-after-exit")
 	_ = conn.Close()
 	mustStopDaemon(t, errCh)
 }
@@ -296,6 +332,59 @@ func TestBackendDaemonSessionExitKeepsBackendWhenOtherWebSocketClientsRemain(t *
 	writeRPC(t, secondConn, "status", "backend.status", map[string]any{})
 	waitForRPCOK(t, secondConn, "status")
 	cancel()
+	mustStopDaemon(t, errCh)
+}
+
+func TestBackendDaemonIdleHeartbeatStopsAfterConsecutiveEmptyChecks(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.NewConfigForCWD(root)
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endpointPath := filepath.Join(root, "run", "backend.json")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- backend.Serve(ctx, backend.DaemonOptions{
+			Host:              "127.0.0.1",
+			Port:              0,
+			Config:            cfg,
+			EndpointPath:      endpointPath,
+			IdleCheckInterval: 25 * time.Millisecond,
+			IdleEmptyChecks:   2,
+		})
+	}()
+	_ = waitForEndpoint(t, endpointPath)
+	mustStopDaemon(t, errCh)
+}
+
+func TestBackendDaemonIdleHeartbeatKeepsAliveWhileClientConnected(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.NewConfigForCWD(root)
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endpointPath := filepath.Join(root, "run", "backend.json")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- backend.Serve(ctx, backend.DaemonOptions{
+			Host:              "127.0.0.1",
+			Port:              0,
+			Config:            cfg,
+			EndpointPath:      endpointPath,
+			IdleCheckInterval: 25 * time.Millisecond,
+			IdleEmptyChecks:   2,
+		})
+	}()
+	conn := dialEndpoint(t, waitForEndpoint(t, endpointPath))
+	time.Sleep(80 * time.Millisecond)
+	writeRPC(t, conn, "status", "backend.status", map[string]any{})
+	status := waitForRPCOK(t, conn, "status")
+	var payload map[string]any
+	decodeResult(t, status.Result, &payload)
+	if payload["active_connections"] == float64(0) {
+		t.Fatalf("heartbeat should count live websocket connection, got %#v", payload)
+	}
+	_ = conn.Close()
 	mustStopDaemon(t, errCh)
 }
 

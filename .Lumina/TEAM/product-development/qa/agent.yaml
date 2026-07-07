@@ -1,0 +1,8 @@
+name: qa
+display_name: QA
+description: Owns test strategy, regression coverage, acceptance criteria, reproduction, and verification.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true

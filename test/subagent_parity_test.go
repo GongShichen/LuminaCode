@@ -288,10 +288,11 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 
 func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".Lumina", "agent-memory", "explore"), 0o755); err != nil {
+	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".Lumina", "agent-memory", "explore", "MEMORY.md"), []byte("# Index\n\n- useful memory\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(scopeDir, "MEMORY.md"), []byte("# Index\n\n- useful memory\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.NewConfig()
@@ -366,7 +367,7 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 
 func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testing.T) {
 	dir := t.TempDir()
-	scopeDir := filepath.Join(dir, ".Lumina", "agent-memory", "explore")
+	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
 	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +404,7 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 
 func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	dir := t.TempDir()
-	scopeDir := filepath.Join(dir, ".Lumina", "agent-memory", "explore")
+	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
 	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

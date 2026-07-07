@@ -777,6 +777,19 @@ func (t *BashTool) DecodeInput(raw map[string]any) (any, error) {
 	return t.BaseTool.DecodeInput(normalized)
 }
 
+func (t *BashTool) TimeoutForInput(input any) time.Duration {
+	in := deref[BashInput](input)
+	var timeoutValue any
+	if in.Timeout != nil {
+		timeoutValue = in.Timeout
+	}
+	seconds, errMsg := parseBashTimeoutSeconds(timeoutValue, in.TimeoutSeconds, config.GetConfig().ShellTimeoutSeconds)
+	if errMsg != "" || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds*float64(time.Second)) + time.Second
+}
+
 func (t *BashTool) IsReadOnly(input any) bool {
 	in := deref[BashInput](input)
 	return bashpkg.ClassifyCommand(in.Command).CommandClass == bashpkg.CommandClassSafe
@@ -833,7 +846,7 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 	}
 
 	if in.RunInBackground {
-		return t.executeBackground(in.Command, in.Description, cwd, timeout)
+		return t.executeBackground(execCtx, in.Command, in.Description, cwd, timeout)
 	}
 
 	var exitCode int
@@ -1494,13 +1507,13 @@ func editLineCount(content string) int {
 	return count
 }
 
-func (t *BashTool) executeBackground(command, description, cwd string, timeout time.Duration) (string, error) {
+func (t *BashTool) executeBackground(execCtx ExecutionContext, command, description, cwd string, timeout time.Duration) (string, error) {
 	if t.backgroundManager == nil {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = "."
+		if cwd == "" {
+			cwd = "."
 		}
-		manager, err := bashpkg.NewBackgroundManager(filepath.Join(home, ".Lumina", "sessions"))
+		runtimeDir := projectRuntimeDirFromContext(execCtx, cwd)
+		manager, err := bashpkg.NewBackgroundManager(filepath.Join(runtimeDir, "background"))
 		if err != nil {
 			return "Could not start background task: " + err.Error(), nil
 		}
@@ -1526,6 +1539,15 @@ func (t *BashTool) executeBackground(command, description, cwd string, timeout t
 		"Command launched in background.\nTask ID: %s\nDescription: %s\n\nOutput file: %s\nError file:  %s\n\nUse read_file to check the output file for results.",
 		task.TaskID, display, task.OutputPath, task.ErrorPath,
 	), nil
+}
+
+func projectRuntimeDirFromContext(execCtx ExecutionContext, cwd string) string {
+	if execCtx != nil {
+		if runtimeDir, ok := execCtx["runtime_dir"].(string); ok && strings.TrimSpace(runtimeDir) != "" {
+			return runtimeDir
+		}
+	}
+	return config.ProjectRuntimeDir(cwd)
 }
 
 func runShellCommand(ctx context.Context, command, cwd string, timeout time.Duration) (int, string) {

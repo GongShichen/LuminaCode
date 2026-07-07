@@ -1,0 +1,8 @@
+name: research
+display_name: Research
+description: Maps repositories and external context, producing evidence-based findings with file references.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	luminateam "LuminaCode/team"
 	luminaui "LuminaCode/ui"
 )
 
@@ -42,11 +43,12 @@ type PushEvent struct {
 }
 
 type SessionSnapshot struct {
-	SessionID string               `json:"session_id"`
-	Frame     luminaui.RenderFrame `json:"frame"`
-	Busy      bool                 `json:"busy"`
-	Model     string               `json:"model"`
-	CWD       string               `json:"cwd"`
+	SessionID string                `json:"session_id"`
+	Frame     luminaui.RenderFrame  `json:"frame"`
+	Busy      bool                  `json:"busy"`
+	Model     string                `json:"model"`
+	CWD       string                `json:"cwd"`
+	Teams     []luminateam.Snapshot `json:"teams,omitempty"`
 }
 
 func nowRFC3339() string {

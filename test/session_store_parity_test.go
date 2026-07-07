@@ -185,6 +185,26 @@ func TestSessionStoreLoadsSQLiteOnlySessionMemoryFallback(t *testing.T) {
 	}
 }
 
+func TestSessionStoreListFiltersLegacyTeamAgentRoleSessions(t *testing.T) {
+	dir := t.TempDir()
+	writeMeta := func(id string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data := []byte(`{"session_id":"` + id + `","created_at":1,"last_updated":2,"message_count":1,"turn_count":1}`)
+		if err := os.WriteFile(filepath.Join(dir, id, "meta.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMeta("normal-session")
+	writeMeta("team-737b9b9c-3933-4e0b-9713-40428e95ecce-backend")
+	list := session.NewStore(dir).ListSessions()
+	if len(list) != 1 || list[0].SessionID != "normal-session" {
+		t.Fatalf("expected only normal session in list, got %#v", list)
+	}
+}
+
 func TestSessionStoreSaveStatePreservesExistingRecoverySnapshots(t *testing.T) {
 	dir := t.TempDir()
 	store := session.NewStore(dir)

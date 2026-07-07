@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"LuminaCode/config"
@@ -121,9 +123,101 @@ func (t *BaseTool) DecodeInput(raw map[string]any) (any, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, target); err != nil {
-		return nil, err
+		normalized := normalizeNumericStringInputs(raw, targetType)
+		if normalized == nil {
+			return nil, err
+		}
+		b, marshalErr := json.Marshal(normalized)
+		if marshalErr != nil {
+			return nil, err
+		}
+		if retryErr := json.Unmarshal(b, target); retryErr != nil {
+			return nil, err
+		}
 	}
 	return target, nil
+}
+
+func normalizeNumericStringInputs(raw map[string]any, targetType reflect.Type) map[string]any {
+	if targetType.Kind() != reflect.Struct {
+		return nil
+	}
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		out[key] = value
+	}
+	changed := false
+	for i := 0; i < targetType.NumField(); i++ {
+		field := targetType.Field(i)
+		jsonName := jsonFieldName(field)
+		if jsonName == "" {
+			continue
+		}
+		value, exists := out[jsonName]
+		if !exists {
+			continue
+		}
+		normalized, ok := normalizeNumericStringValue(value, field.Type)
+		if ok {
+			out[jsonName] = normalized
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return out
+}
+
+func jsonFieldName(field reflect.StructField) string {
+	tag := field.Tag.Get("json")
+	if tag == "-" {
+		return ""
+	}
+	name := strings.Split(tag, ",")[0]
+	if name != "" {
+		return name
+	}
+	return field.Name
+}
+
+func normalizeNumericStringValue(value any, targetType reflect.Type) (any, bool) {
+	if targetType.Kind() == reflect.Pointer {
+		if value == nil {
+			return value, false
+		}
+		targetType = targetType.Elem()
+	}
+	text, ok := value.(string)
+	if !ok {
+		return value, false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return value, false
+	}
+	switch targetType.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		parsed, err := strconv.ParseInt(text, 10, targetType.Bits())
+		if err != nil {
+			return value, false
+		}
+		return parsed, true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		parsed, err := strconv.ParseUint(text, 10, targetType.Bits())
+		if err != nil {
+			return value, false
+		}
+		return parsed, true
+	case reflect.Float32, reflect.Float64:
+		parsed, err := strconv.ParseFloat(text, targetType.Bits())
+		if err != nil {
+			return value, false
+		}
+		return parsed, true
+	default:
+		return value, false
+	}
 }
 
 func (t *BaseTool) ValidateInput(_ ExecutionContext, _ any) (bool, string) { return true, "" }
@@ -180,15 +274,26 @@ func (t *BaseTool) FormatLargeResult(_ context.Context, content string, maxChars
 func (t *BaseTool) ToAPISchema() map[string]any {
 	schema := map[string]any{"type": "object", "properties": map[string]any{}}
 	if proto := t.InputPrototype(); proto != nil {
-		reflected := jsonschema.Reflect(proto)
-		b, err := json.Marshal(reflected)
-		if err == nil {
-			_ = json.Unmarshal(b, &schema)
-		}
-		schema = inlineTopLevelSchemaRef(schema)
-		delete(schema, "$schema")
-		delete(schema, "$id")
-		normalizeToolInputSchema(schema)
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					schema = map[string]any{
+						"type":        "object",
+						"properties":  map[string]any{},
+						"description": fmt.Sprintf("Schema generation failed for %s: %v", t.Name(), recovered),
+					}
+				}
+			}()
+			reflected := jsonschema.Reflect(proto)
+			b, err := json.Marshal(reflected)
+			if err == nil {
+				_ = json.Unmarshal(b, &schema)
+			}
+			schema = inlineTopLevelSchemaRef(schema)
+			delete(schema, "$schema")
+			delete(schema, "$id")
+			normalizeToolInputSchema(schema)
+		}()
 	}
 	return map[string]any{
 		"name":         t.Name(),

@@ -24,6 +24,9 @@ func (l *SkillLoader) LoadFrontmatterOnly() []SkillSpec {
 	l.seenPaths = map[string]struct{}{}
 	var skills []SkillSpec
 	skills = append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
+	if l.Config.IsolatedSkillsOnly {
+		return skills
+	}
 	for _, root := range l.ProjectSkillsDirs() {
 		skills = append(skills, l.loadDirectory(root, SkillSourceProject)...)
 	}

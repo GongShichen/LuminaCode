@@ -174,6 +174,17 @@ func (c *SessionController) ID() string {
 	return c.id
 }
 
+func (c *SessionController) RuntimeConfig() config.Config {
+	c.stateMu.Lock()
+	state := c.state
+	c.stateMu.Unlock()
+	cfg := c.cfg
+	if state != nil && state.YoloEnabled() {
+		cfg.Yolo = true
+	}
+	return cfg
+}
+
 func (c *SessionController) Mount() {
 	c.stateMu.Lock()
 	state := c.state
@@ -206,6 +217,9 @@ func (c *SessionController) Submit(ctx context.Context, input string) error {
 	c.submitMu.Unlock()
 	go func() {
 		defer func() {
+			if recovered := recover(); recovered != nil {
+				c.emitStatus("error", map[string]any{"error": fmt.Sprintf("session panic: %v", recovered)})
+			}
 			cancel()
 			c.submitMu.Lock()
 			c.submitCancel = nil

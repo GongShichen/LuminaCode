@@ -125,6 +125,7 @@ type LLMClientBase struct {
 	APIKey               string
 	BaseURL              string
 	Model                string
+	ProviderName         string
 	MaxTokens            int
 	ThinkingBudgetTokens *int
 	RetryConfig          RetryConfig
@@ -161,6 +162,7 @@ func NewLLMClientBase(
 		APIKey:               apiKey,
 		BaseURL:              strings.TrimRight(baseURL, "/"),
 		Model:                model,
+		ProviderName:         model,
 		MaxTokens:            maxTokens,
 		ThinkingBudgetTokens: thinkingBudgetTokens,
 		RetryConfig:          cfg,
@@ -224,7 +226,7 @@ func (c *LLMClientBase) RetryRequest(
 			return data, nil
 		}
 
-		statusErr := NewAPIStatusError("", resp.StatusCode, resp.Status, bodyBytes)
+		statusErr := NewAPIStatusError(c.ProviderName, resp.StatusCode, resp.Status, bodyBytes)
 		if isRetryableHTTPError(resp.StatusCode, statusErr.Body, cfg) && attempt < cfg.MaxRetries {
 			if !sleepBackoff(ctx, attempt, cfg) {
 				return nil, ctx.Err()
@@ -415,7 +417,7 @@ func (c *AnthropicClient) streamAnthropic(
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			statusErr := NewAPIStatusError("Anthropic", resp.StatusCode, resp.Status, bodyBytes)
+			statusErr := NewAPIStatusError(c.ProviderName, resp.StatusCode, resp.Status, bodyBytes)
 
 			if isRetryableAnthropicStreamError(resp.StatusCode, statusErr.Body) {
 				out <- EventResult{Err: RetryableStatusError{APIStatusError: statusErr}}
@@ -425,7 +427,10 @@ func (c *AnthropicClient) streamAnthropic(
 			out <- EventResult{Event: map[string]any{
 				"type":        "error",
 				"message":     statusErr.Error(),
+				"error_type":  "api_status_error",
+				"provider":    c.ProviderName,
 				"status_code": resp.StatusCode,
+				"status":      resp.Status,
 				"raw_error":   statusErr.Body,
 			}}
 			return
@@ -462,7 +467,14 @@ func (c *AnthropicClient) streamAnthropic(
 				if message == "" {
 					message = "Unknown API error"
 				}
-				out <- EventResult{Event: map[string]any{"type": "error", "message": message}}
+				rawError, _ := json.Marshal(errorObj)
+				out <- EventResult{Event: map[string]any{
+					"type":       "error",
+					"message":    message,
+					"error_type": "api_stream_error",
+					"provider":   c.ProviderName,
+					"raw_error":  string(rawError),
+				}}
 				return
 
 			case "message_start":
@@ -699,7 +711,8 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			statusErr := NewAPIStatusError("DeepSeek", resp.StatusCode, resp.Status, bodyBytes)
+			provider := c.providerName()
+			statusErr := NewAPIStatusError(provider, resp.StatusCode, resp.Status, bodyBytes)
 
 			if isRetryableOpenAICompatibleStreamError(resp.StatusCode, statusErr.Body) {
 				out <- EventResult{Err: RetryableStatusError{APIStatusError: statusErr}}
@@ -709,7 +722,10 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 			out <- EventResult{Event: map[string]any{
 				"type":        "error",
 				"message":     statusErr.Error(),
+				"error_type":  "api_status_error",
+				"provider":    provider,
 				"status_code": resp.StatusCode,
+				"status":      resp.Status,
 				"raw_error":   statusErr.Body,
 			}}
 			return
@@ -747,6 +763,22 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 				continue
 			}
 			lastData = data
+
+			if errorObj, ok := data["error"].(map[string]any); ok {
+				message := getString(errorObj, "message")
+				if message == "" {
+					message = "Unknown API error"
+				}
+				rawError, _ := json.Marshal(errorObj)
+				out <- EventResult{Event: map[string]any{
+					"type":       "error",
+					"message":    message,
+					"error_type": "api_stream_error",
+					"provider":   c.providerName(),
+					"raw_error":  string(rawError),
+				}}
+				return
+			}
 
 			choices, _ := data["choices"].([]any)
 			if len(choices) == 0 {
@@ -864,6 +896,16 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 	}()
 
 	return out
+}
+
+func (c *OpenAICompatibleClient) providerName() string {
+	if strings.TrimSpace(c.ProviderName) != "" {
+		return c.ProviderName
+	}
+	if strings.TrimSpace(c.Model) != "" {
+		return c.Model
+	}
+	return "OpenAI-compatible"
 }
 
 func CreateLLMClient(

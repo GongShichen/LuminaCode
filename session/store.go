@@ -219,6 +219,9 @@ func (s *Store) ListSessions() []Meta {
 	var metas []Meta
 	for _, path := range matches {
 		id := sessionIDFromMetaPath(s.dir, path)
+		if isTeamAgentSessionID(id) {
+			continue
+		}
 		if meta := s.LoadMeta(id); meta != nil {
 			metas = append(metas, *meta)
 		}
@@ -232,6 +235,9 @@ func (s *Store) ListSessions() []Meta {
 	sqliteMatches = append(sqliteMatches, legacySQLiteMatches...)
 	for _, path := range sqliteMatches {
 		id := sessionIDFromSQLitePath(s.dir, path)
+		if isTeamAgentSessionID(id) {
+			continue
+		}
 		if _, ok := seen[id]; ok {
 			continue
 		}
@@ -546,6 +552,14 @@ func safeSessionID(sessionID string) string {
 		return "session"
 	}
 	return clean
+}
+
+func isTeamAgentSessionID(sessionID string) bool {
+	if !strings.HasPrefix(sessionID, "team-") {
+		return false
+	}
+	parts := strings.Split(sessionID, "-")
+	return len(parts) >= 7
 }
 
 func atomicWriteJSON(path string, value any) error {

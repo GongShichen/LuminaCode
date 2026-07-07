@@ -211,6 +211,17 @@ func loadSystemPromptTemplateSectionsForCWD(cwd string) ([]PromptSection, error)
 	return loadSystemPromptTemplateSectionsFromPath(resolveTemplatePathForCWD(cwd))
 }
 
+func loadSystemPromptTemplateSectionsWithConfig(cwd string, cfg config.Config) ([]PromptSection, string, error) {
+	if cfg.IsolatedSkillsOnly && strings.TrimSpace(cfg.SystemPromptPath) != "" {
+		if sections, err := loadSystemPromptTemplateSectionsFromPath(cfg.SystemPromptPath); err == nil {
+			return sections, cfg.SystemPromptPath, nil
+		}
+	}
+	path := resolveTemplatePathForCWD(cwd)
+	sections, err := loadSystemPromptTemplateSectionsFromPath(path)
+	return sections, path, err
+}
+
 func loadSystemPromptTemplateSectionsFromPath(path string) ([]PromptSection, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -797,7 +808,7 @@ func BuildInitialContext(cfg config.Config, memorySection string) (InitialContex
 		cwd = newCwd
 		cfg.CWD = cwd
 	}
-	sections, err := loadSystemPromptTemplateSectionsForCWD(cwd)
+	sections, systemPromptPath, err := loadSystemPromptTemplateSectionsWithConfig(cwd, cfg)
 	if err != nil {
 		return InitialContext{}, err
 	}
@@ -825,7 +836,7 @@ func BuildInitialContext(cfg config.Config, memorySection string) (InitialContex
 		Sections:         sections,
 		ProjectDocs:      projectDocs,
 		MemorySection:    memorySection,
-		SystemPromptPath: resolveTemplatePathForCWD(cwd),
+		SystemPromptPath: systemPromptPath,
 	}, nil
 }
 

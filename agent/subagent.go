@@ -295,7 +295,7 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 			tool := activeRegistry.Get(tc.Name)
 			content := result.Content
 			if tool != nil && !result.IsError {
-				if formatted, err := tool.FormatLargeResult(ctx, content, s.Config.MaxToolOutputChars, tc.ID, s.Config.SessionDir); err == nil {
+				if formatted, err := tool.FormatLargeResult(ctx, content, s.Config.MaxToolOutputChars, tc.ID, s.Config.ProjectRuntimeDir); err == nil {
 					content = formatted
 				}
 			}
@@ -512,6 +512,7 @@ func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
 	execCtx := coretools.ExecutionContext{
 		"cwd":                     s.Config.CWD,
 		"config":                  s.Config,
+		"runtime_dir":             s.Config.ProjectRuntimeDir,
 		"allowed_read_roots":      []string{s.Config.CWD},
 		"parent_state":            s.ParentState,
 		"_registry":               s.Registry,

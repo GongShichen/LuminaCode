@@ -76,10 +76,20 @@ export async function ensureBackend(): Promise<WebSocket> {
     }
   }
   fs.mkdirSync(path.dirname(endpointPath()), { recursive: true });
+  const logPath = backendLogPath();
+  const logFd = fs.openSync(logPath, "a");
+  fs.writeSync(logFd, `\n--- lumina-backend start ${new Date().toISOString()} ---\n`);
   const before = Date.now();
   const child = spawn(backendBin(), ["daemon", "--host", "127.0.0.1", "--port", "0"], {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
+  });
+  child.on("error", (err) => {
+    try {
+      fs.writeSync(logFd, `spawn error: ${err instanceof Error ? err.stack || err.message : String(err)}\n`);
+    } catch {
+      // Best effort logging only.
+    }
   });
   child.unref();
   for (let i = 0; i < 80; i += 1) {
@@ -99,6 +109,10 @@ export async function ensureBackend(): Promise<WebSocket> {
 
 function endpointPath(): string {
   return path.join(os.homedir(), ".lumina", "run", "backend.json");
+}
+
+function backendLogPath(): string {
+  return path.join(os.homedir(), ".lumina", "run", "backend.log");
 }
 
 function readEndpoint(): any | null {

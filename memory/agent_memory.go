@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"LuminaCode/config"
 )
 
 type AgentMemoryScope struct {
@@ -41,11 +43,12 @@ func ResolveAgentMemoryProjectRoot(projectRoot string) string {
 func GetAgentMemoryDirectories(agentType, projectRoot string) []AgentMemoryScope {
 	safeType := SanitizeAgentTypeForPath(agentType)
 	root := ResolveAgentMemoryProjectRoot(projectRoot)
+	runtimeRoot := config.ProjectRuntimeDir(root)
 	home, _ := os.UserHomeDir()
 	return []AgentMemoryScope{
 		{Name: "user", Path: filepath.Join(home, ".Lumina", "agent-memory", safeType)},
-		{Name: "project", Path: filepath.Join(root, ".Lumina", "agent-memory", safeType)},
-		{Name: "local", Path: filepath.Join(root, ".Lumina", "agent-memory-local", safeType)},
+		{Name: "project", Path: filepath.Join(runtimeRoot, "agent-memory", safeType)},
+		{Name: "local", Path: filepath.Join(runtimeRoot, "agent-memory-local", safeType)},
 	}
 }
 

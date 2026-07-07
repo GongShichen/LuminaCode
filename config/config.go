@@ -39,7 +39,8 @@ type Config struct {
 	AnthropicCacheEditsEnabled bool
 	MaxParentTurns             int
 
-	SessionDir string
+	SessionDir        string
+	ProjectRuntimeDir string
 
 	SessionMemoryEnabled             bool
 	SessionMemoryTurnInterval        int
@@ -59,6 +60,8 @@ type Config struct {
 	SkillsDir                  string
 	UserSkillsDir              string
 	BundledSkillsDir           string
+	IsolatedSkillsOnly         bool
+	TeamDir                    string
 	SystemPromptPath           string
 	MemoryExtractionPromptPath string
 
@@ -116,7 +119,8 @@ func NewConfigForCWD(cwd string) Config {
 		AnthropicCacheEditsEnabled: false,
 		MaxParentTurns:             100,
 
-		SessionDir: filepath.Join(homeDir, ".Lumina", "sessions"),
+		SessionDir:        filepath.Join(homeDir, ".lumina", "sessions"),
+		ProjectRuntimeDir: filepath.Join(homeDir, ".lumina", "project", ProjectRuntimeName(cwd)),
 
 		SessionMemoryEnabled:             true,
 		SessionMemoryTurnInterval:        5,
@@ -134,8 +138,9 @@ func NewConfigForCWD(cwd string) Config {
 
 		SkillsEnabled:              true,
 		SkillsDir:                  ".Lumina/PROJECT_SKILLS",
-		UserSkillsDir:              filepath.Join(homeDir, ".Lumina", "skills"),
+		UserSkillsDir:              filepath.Join(homeDir, ".lumina", "skills"),
 		BundledSkillsDir:           filepath.Join(resourceDir, "SKILLS"),
+		TeamDir:                    filepath.Join(homeDir, ".lumina", "TEAM"),
 		SystemPromptPath:           filepath.Join(resourceDir, "SYSTEM", "system-prompt.md"),
 		MemoryExtractionPromptPath: filepath.Join(resourceDir, "SYSTEM", "extraction_system.md"),
 		ProjectRootMarkers:         []string{".git"},
@@ -159,6 +164,12 @@ func NewConfigForCWD(cwd string) Config {
 func ReloadDynamicConfig(current Config) Config {
 	fresh := NewConfigForCWD(current.CWD)
 	updated := current
+	teamDir := current.TeamDir
+	systemPromptPath := current.SystemPromptPath
+	skillsDir := current.SkillsDir
+	userSkillsDir := current.UserSkillsDir
+	bundledSkillsDir := current.BundledSkillsDir
+	isolatedSkillsOnly := current.IsolatedSkillsOnly
 	if !isPinned(current, "api_key") {
 		updated.APIKey = fresh.APIKey
 	}
@@ -196,11 +207,44 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
 	updated.ProjectDocFilenames = fresh.ProjectDocFilenames
 	updated.ProjectDocMaxBytes = fresh.ProjectDocMaxBytes
+	updated.ProjectRuntimeDir = fresh.ProjectRuntimeDir
 	if !isPinned(current, "harness_mode") {
 		updated.HarnessMode = fresh.HarnessMode
 	}
+	updated.TeamDir = teamDir
+	updated.SystemPromptPath = systemPromptPath
+	updated.SkillsDir = skillsDir
+	updated.UserSkillsDir = userSkillsDir
+	updated.BundledSkillsDir = bundledSkillsDir
+	updated.IsolatedSkillsOnly = isolatedSkillsOnly
 	ApplyHarnessDefaults(&updated)
 	return updated
+}
+
+func ProjectRuntimeName(projectRoot string) string {
+	name := filepath.Base(filepath.Clean(projectRoot))
+	name = strings.TrimSpace(name)
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		name = "default"
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	cleaned := strings.Trim(b.String(), ".-_")
+	if cleaned == "" {
+		return "default"
+	}
+	return cleaned
+}
+
+func ProjectRuntimeDir(projectRoot string) string {
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".lumina", "project", ProjectRuntimeName(projectRoot))
 }
 
 func PinFields(cfg *Config, fields ...string) {
@@ -326,6 +370,7 @@ type luminaDefaults struct {
 	SkillsDir                          *string  `json:"skills_dir"`
 	UserSkillsDir                      *string  `json:"user_skills_dir"`
 	BundledSkillsDir                   *string  `json:"bundled_skills_dir"`
+	TeamDir                            *string  `json:"team_dir"`
 	SystemPromptPath                   *string  `json:"system_prompt_path"`
 	MemoryExtractionPromptPath         *string  `json:"memory_extraction_prompt_path"`
 	ProjectRootMarkers                 []string `json:"project_root_markers"`
@@ -451,6 +496,9 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.BundledSkillsDir != nil {
 		cfg.BundledSkillsDir = resolveResourcePath(resourceDir, *defaults.BundledSkillsDir)
+	}
+	if defaults.TeamDir != nil {
+		cfg.TeamDir = expandHome(*defaults.TeamDir)
 	}
 	if defaults.SystemPromptPath != nil {
 		cfg.SystemPromptPath = resolveResourcePath(resourceDir, *defaults.SystemPromptPath)

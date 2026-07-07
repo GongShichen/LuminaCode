@@ -517,6 +517,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		execCtx := coretools.ExecutionContext{
 			"cwd":                     e.Config.CWD,
 			"config":                  e.Config,
+			"runtime_dir":             e.Config.ProjectRuntimeDir,
 			"_session_id":             e.SessionID,
 			"allowed_read_roots":      []string{e.Config.CWD},
 			"allowed_write_roots":     []string{e.Config.CWD},
@@ -573,7 +574,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 					e.restoreInFlightCacheEdits()
 					e.rememberAPIError(state, msg)
 					e.LastState = state
-					sendStream(ctx, out, NewStreamEvent("error", msg, nil))
+					sendStream(ctx, out, NewStreamEvent("error", msg, api.ErrorMetadata(result.Err)))
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
 					return
 				}
@@ -586,12 +587,12 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				e.rememberAPIError(state, msg)
 				if consecutiveAPIErrors >= MaxAPIErrorRetries {
 					e.restoreInFlightCacheEdits()
-					sendStream(ctx, out, e.apiErrorEvent(msg))
+					sendStream(ctx, out, e.apiErrorEvent(msg, api.ErrorMetadata(result.Err)))
 					e.LastState = state
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
 					return
 				}
-				sendStream(ctx, out, NewStreamEvent("error", "API error (recovered): "+msg, nil))
+				sendStream(ctx, out, NewStreamEvent("error", "API error (recovered): "+msg, api.ErrorMetadata(result.Err)))
 				turn.StreamHadError = true
 				break
 			}
@@ -810,11 +811,10 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 	case "error":
 		msg := stringFromAny(event["message"])
 		metadata := map[string]any{}
-		if statusCode, ok := event["status_code"]; ok {
-			metadata["status_code"] = statusCode
-		}
-		if rawError, ok := event["raw_error"]; ok {
-			metadata["raw_error"] = rawError
+		for _, key := range []string{"error_type", "provider", "status_code", "status", "raw_error", "request_url", "operation"} {
+			if value, ok := event[key]; ok {
+				metadata[key] = value
+			}
 		}
 		if IsFatalAPIError(msg) {
 			e.rememberAPIError(state, msg)
@@ -1434,8 +1434,8 @@ func (e *CoreExecutionEngine) rememberAPIError(state *AgentState, msg string) {
 	}
 }
 
-func (e *CoreExecutionEngine) apiErrorEvent(msg string) StreamEvent {
-	return NewStreamEvent("error", fmt.Sprintf("API error after %d retries: %s. The request may be malformed. Try /clear to start a fresh session.", MaxAPIErrorRetries, msg), nil)
+func (e *CoreExecutionEngine) apiErrorEvent(msg string, metadata map[string]any) StreamEvent {
+	return NewStreamEvent("error", fmt.Sprintf("API error after %d retries: %s. The request may be malformed. Try /clear to start a fresh session.", MaxAPIErrorRetries, msg), metadata)
 }
 
 func (e *CoreExecutionEngine) isAborted() bool {

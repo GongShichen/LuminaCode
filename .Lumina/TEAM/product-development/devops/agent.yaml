@@ -1,0 +1,8 @@
+name: devops
+display_name: DevOps
+description: Owns install, build, release, benchmark environments, Makefile, resources, daemon lifecycle, and cross-platform behavior.
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true
