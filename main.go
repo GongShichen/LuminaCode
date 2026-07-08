@@ -40,6 +40,9 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "daemon" {
 		return backend.RunDaemonCLI(args[1:])
 	}
+	if len(args) > 0 && args[0] == "shutdown" {
+		return backend.RunShutdownCLI(args[1:])
+	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 

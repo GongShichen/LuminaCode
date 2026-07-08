@@ -77,6 +77,25 @@ func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 	}
 }
 
+func TestBackendShutdownCLIStopsDaemon(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.NewConfigForCWD(root)
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	endpointPath := filepath.Join(root, "run", "backend.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := startTestDaemon(t, ctx, cfg, endpointPath)
+	_ = waitForEndpoint(t, endpointPath)
+
+	if err := backend.RunShutdownCLI([]string{"--endpoint", endpointPath, "--timeout", "3s"}); err != nil {
+		t.Fatalf("shutdown cli failed: %v", err)
+	}
+	if _, err := os.Stat(endpointPath); !os.IsNotExist(err) {
+		t.Fatalf("endpoint should be removed after shutdown, got %v", err)
+	}
+	mustStopDaemon(t, errCh)
+}
+
 func TestBackendDaemonSessionsDoNotMixEventsOrTranscript(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.NewConfigForCWD(root)

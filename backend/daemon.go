@@ -54,6 +54,9 @@ type wsClient struct {
 }
 
 func RunDaemonCLI(args []string) error {
+	if len(args) > 0 && args[0] == "shutdown" {
+		return RunShutdownCLI(args[1:])
+	}
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	host := flags.String("host", "127.0.0.1", "daemon host")
 	port := flags.Int("port", 0, "daemon port")
@@ -67,6 +70,79 @@ func RunDaemonCLI(args []string) error {
 		Config:       cfg,
 		EndpointPath: DefaultEndpointPath(),
 	})
+}
+
+func RunShutdownCLI(args []string) error {
+	flags := flag.NewFlagSet("shutdown", flag.ContinueOnError)
+	endpointPath := flags.String("endpoint", DefaultEndpointPath(), "daemon endpoint file")
+	timeout := flags.Duration("timeout", 10*time.Second, "shutdown wait timeout")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(*endpointPath)
+	if os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "lumina-backend is not running: %s not found\n", *endpointPath)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var endpoint EndpointInfo
+	if err := json.Unmarshal(data, &endpoint); err != nil {
+		return err
+	}
+	host := strings.TrimSpace(endpoint.Host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if endpoint.Port <= 0 || endpoint.AuthToken == "" {
+		return fmt.Errorf("invalid backend endpoint file: %s", *endpointPath)
+	}
+	url := fmt.Sprintf("ws://%s:%d/v1/ws?token=%s", host, endpoint.Port, endpoint.AuthToken)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetWriteDeadline(deadline)
+	}
+	req := RPCRequest{ID: "shutdown", Method: "backend.shutdown"}
+	if err := conn.WriteJSON(req); err != nil {
+		return err
+	}
+	for {
+		var resp RPCResponse
+		if err := conn.ReadJSON(&resp); err != nil {
+			return err
+		}
+		if resp.ID != req.ID {
+			continue
+		}
+		if !resp.OK {
+			if resp.Error != nil {
+				return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			}
+			return fmt.Errorf("backend shutdown failed")
+		}
+		break
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if _, err := os.Stat(*endpointPath); os.IsNotExist(err) {
+				fmt.Fprintln(os.Stderr, "lumina-backend stopped")
+				return nil
+			}
+		}
+	}
 }
 
 func Serve(ctx context.Context, opts DaemonOptions) error {

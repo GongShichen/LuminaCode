@@ -20,7 +20,7 @@ help:
 		'  make build      Build ./tmp/lumina and ./tmp/lumina-backend' \
 		'  make install    Install TS lumina frontend, Go lumina-backend, and resources into ~/.lumina' \
 		'  make doctor     Show detected OS, shell, rc file, and install path' \
-		'  make uninstall  Remove the installed lumina binary' \
+		'  make uninstall  Stop backend/SearxNG and remove installed Lumina files' \
 		'  make clean      Remove local build output' \
 		'' \
 		'Default install dir prefers writable /opt/homebrew/bin or /usr/local/bin, then ~/.local/bin.' \
@@ -263,6 +263,28 @@ doctor:
 	fi
 
 uninstall:
+	@if [ -x "$(BACKEND_INSTALL_PATH)" ]; then \
+		"$(BACKEND_INSTALL_PATH)" shutdown >/dev/null 2>&1 || true; \
+	elif command -v "$(BACKEND_NAME)" >/dev/null 2>&1; then \
+		"$(BACKEND_NAME)" shutdown >/dev/null 2>&1 || true; \
+	fi
+	@if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
+		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
+		exit 1; \
+	fi
+	@if [ -x "$(APP_ROOT)/setup-searxng.sh" ]; then \
+		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/setup-searxng.sh" uninstall; then \
+			echo "Removed managed SearxNG"; \
+		else \
+			echo "Warning: failed to uninstall managed SearxNG; remove it manually with setup-searxng.sh uninstall."; \
+		fi; \
+	elif [ -x "./setup-searxng.sh" ]; then \
+		if LUMINA_APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh uninstall; then \
+			echo "Removed managed SearxNG"; \
+		else \
+			echo "Warning: failed to uninstall managed SearxNG; remove it manually with setup-searxng.sh uninstall."; \
+		fi; \
+	fi
 	@rm -f "$(INSTALL_PATH)"
 	@rm -f "$(BACKEND_INSTALL_PATH)"
 	@if [ "$(INSTALL_PATH)" != "$(HOME)/.local/bin/$(APP_NAME)" ]; then \
@@ -270,10 +292,6 @@ uninstall:
 	fi
 	@if [ "$(BACKEND_INSTALL_PATH)" != "$(HOME)/.local/bin/$(BACKEND_NAME)" ]; then \
 		rm -f "$(HOME)/.local/bin/$(BACKEND_NAME)"; \
-	fi
-	@if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
-		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
-		exit 1; \
 	fi
 	@rm -rf "$(APP_ROOT)"
 	@rm -f "$(HOME)/.lumina/run/backend.json"
