@@ -244,6 +244,7 @@ func (c *McpClient) Request(ctx context.Context, method string, params map[strin
 			if timeoutCtx.Err() != nil {
 				msg := fmt.Sprintf("Request '%s' timed out after %.0fs", method, DefaultRequestTimeout.Seconds())
 				c.setError(msg)
+				c.disconnectTimedOutTransport()
 				return nil, McpError{Code: MCPServerNotInitialized, Message: msg}
 			}
 			c.setError("Receive failed: " + err.Error())
@@ -341,6 +342,7 @@ func (c *McpClient) initialize(ctx context.Context) bool {
 	if err != nil {
 		if timeoutCtx.Err() != nil {
 			c.setError("Initialize handshake timed out")
+			c.disconnectTimedOutTransport()
 		} else {
 			c.setError("Initialize handshake failed: " + err.Error())
 		}
@@ -366,6 +368,12 @@ func (c *McpClient) initialize(ctx context.Context) bool {
 	c.mu.Unlock()
 	_ = transport.Send(ctx, MakeNotification("notifications/initialized", nil))
 	return true
+}
+
+func (c *McpClient) disconnectTimedOutTransport() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c.Disconnect(ctx)
 }
 
 func (c *McpClient) nextID() int {

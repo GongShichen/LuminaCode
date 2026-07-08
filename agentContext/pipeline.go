@@ -307,8 +307,8 @@ func (p *ContextPipeline) autoCompact(
 
 	summaryPrompt := buildAutoCompactPrompt(messages)
 
-	compactSystem := "You are creating a handoff summary for a coding agent. " +
-		"Preserve the user's goals, constraints, decisions, files touched, tool findings, " +
+	compactSystem := "You are creating a handoff summary for a general-purpose local agent. " +
+		"Preserve the user's goals, constraints, decisions, artifacts touched, tool findings, " +
 		"errors, and the current next step. Do not invent facts. Keep it concise."
 
 	msgs := []map[string]any{

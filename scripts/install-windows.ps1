@@ -142,6 +142,17 @@ function Write-LuminaDefaults {
         api_model = $Model
         api_type = $ApiType
         api_max_tokens = $MaxTokens
+        api_stream_idle_timeout_seconds = 180.0
+        web_search_enabled = $true
+        web_search_provider = "searxng"
+        web_search_base_url = "http://127.0.0.1:8888"
+        web_search_max_results = 10
+        web_search_timeout_seconds = 20.0
+        web_fetch_enabled = $true
+        web_fetch_require_search_result = $true
+        web_fetch_max_chars = 80000
+        web_fetch_timeout_seconds = 20.0
+        web_fetch_user_agent = "LuminaCode/1.0"
         session_dir = "~/.Lumina/sessions"
         session_memory_enabled = $true
         auto_memory_enabled = $true
@@ -153,6 +164,35 @@ function Write-LuminaDefaults {
         worktree_dir = ".Lumina/worktrees"
     }
     $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Merge-WebDefaults {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    if (Test-Path $Path) {
+        $data = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    } else {
+        $data = @{}
+    }
+    $defaults = [ordered]@{
+        api_stream_idle_timeout_seconds = 180.0
+        web_search_enabled = $true
+        web_search_provider = "searxng"
+        web_search_base_url = "http://127.0.0.1:8888"
+        web_search_max_results = 10
+        web_search_timeout_seconds = 20.0
+        web_fetch_enabled = $true
+        web_fetch_require_search_result = $true
+        web_fetch_max_chars = 80000
+        web_fetch_timeout_seconds = 20.0
+        web_fetch_user_agent = "LuminaCode/1.0"
+    }
+    foreach ($key in $defaults.Keys) {
+        if (-not $data.ContainsKey($key)) {
+            $data[$key] = $defaults[$key]
+        }
+    }
+    $data | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
 function Write-LuminaLauncher {
@@ -230,6 +270,7 @@ try {
     }
 
     Copy-DirectoryContents -Source (Join-Path $repoRoot ".Lumina") -Destination $AppRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot "setup-searxng.sh") -Destination (Join-Path $AppRoot "setup-searxng.sh") -Force
     if ($preservedDefaults -and -not $WriteDefaults) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $defaultsPath) -Force | Out-Null
         Copy-Item -LiteralPath $preservedDefaults -Destination $defaultsPath -Force
@@ -249,6 +290,15 @@ try {
     if ($WriteDefaults) {
         Write-LuminaDefaults -Path $defaultsPath -ApiKey $ApiKey -BaseUrl $BaseUrl -Model $Model -ApiType $ApiType -MaxTokens $MaxTokens
         Write-Host "Wrote defaults: $defaultsPath"
+    } else {
+        Merge-WebDefaults -Path $defaultsPath
+        Write-Host "Ensured WebSearch defaults: $defaultsPath"
+    }
+
+    try {
+        & (Join-Path $repoRoot "scripts\setup-arxiv-mcp-windows.ps1") -AppRoot $AppRoot
+    } catch {
+        Write-Warning "arXiv MCP setup failed: $($_.Exception.Message). Run scripts\setup-arxiv-mcp-windows.ps1 manually."
     }
 
     $pathUpdated = $false

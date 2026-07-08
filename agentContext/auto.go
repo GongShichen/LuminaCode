@@ -252,7 +252,7 @@ func ShouldAutoCompact(ctx context.Context, currentTokens, snipTokensFreed, cont
 
 func ShouldAutoCompactAtThreshold(ctx context.Context, currentTokens, snipTokensFreed, triggerThreshold, consecutiveFailure int, l3Suppressed bool) bool {
 	if consecutiveFailure >= MaxConsecutiveFailure {
-		slog.Warn(fmt.Sprintf("AutoCompact 熔断器已触发（连续%d次），放弃压缩", consecutiveFailure))
+		slog.Warn(fmt.Sprintf("AutoCompact circuit breaker triggered after %d consecutive failures; skipping compression", consecutiveFailure))
 		return false
 	}
 	if l3Suppressed {

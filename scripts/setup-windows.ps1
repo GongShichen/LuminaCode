@@ -89,6 +89,7 @@ function Write-LuminaDefaults {
         api_model = $Model
         api_type = $ApiType
         api_max_tokens = $MaxTokens
+        api_stream_idle_timeout_seconds = 180.0
         session_dir = "~/.Lumina/sessions"
         session_memory_enabled = $true
         auto_memory_enabled = $true

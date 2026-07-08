@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -129,6 +130,8 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 		_ = listener.Close()
 		return err
 	}
+	server.startManagedServices()
+	defer server.shutdownManagedResources()
 	go func() {
 		<-ctx.Done()
 		_ = server.httpSrv.Shutdown(context.Background())
@@ -140,6 +143,67 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 		return nil
 	}
 	return err
+}
+
+func (s *DaemonServer) startManagedServices() {
+	if path := s.searxNGScriptPath(); path != "" {
+		if output, err := runManagedScript(path, "start", s.opts.Config); err != nil {
+			fmt.Fprintf(os.Stderr, "lumina-backend warning: failed to start managed SearxNG: %v\n%s\n", err, output)
+		}
+	}
+}
+
+func (s *DaemonServer) shutdownManagedResources() {
+	_ = os.Remove(s.opts.EndpointPath)
+	if s.manager != nil {
+		s.manager.Shutdown()
+	}
+	if s.teamManager != nil {
+		s.teamManager.Shutdown()
+	}
+	if path := s.searxNGScriptPath(); path != "" {
+		if output, err := runManagedScript(path, "stop", s.opts.Config); err != nil {
+			fmt.Fprintf(os.Stderr, "lumina-backend warning: failed to stop managed SearxNG: %v\n%s\n", err, output)
+		}
+	}
+}
+
+func (s *DaemonServer) searxNGScriptPath() string {
+	if strings.HasSuffix(os.Args[0], ".test") {
+		return ""
+	}
+	candidates := []string{}
+	if root := strings.TrimSpace(os.Getenv("LUMINA_RESOURCE_ROOT")); root != "" {
+		candidates = append(candidates, filepath.Join(root, "setup-searxng.sh"))
+	}
+	if s.opts.Config.TeamDir != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(s.opts.Config.TeamDir), "setup-searxng.sh"))
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func runManagedScript(path, action string, cfg config.Config) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, action)
+	appRoot := filepath.Dir(cfg.TeamDir)
+	if appRoot == "." || appRoot == "" {
+		appRoot = filepath.Join(os.Getenv("HOME"), ".lumina")
+	}
+	cmd.Env = append(os.Environ(),
+		"LUMINA_APP_ROOT="+appRoot,
+		"LUMINA_WEB_SEARCH_BASE_URL="+strings.TrimRight(cfg.WebSearchBaseURL, "/"),
+	)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(output), fmt.Errorf("%s timed out", filepath.Base(path))
+	}
+	return string(output), err
 }
 
 func DefaultEndpointPath() string {
@@ -352,12 +416,17 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		return map[string]any{"shutting_down": true}, nil
 	case "session.create":
 		var p struct {
-			CWD string `json:"cwd"`
+			CWD  string `json:"cwd"`
+			Yolo bool   `json:"yolo"`
 		}
 		decodeParams(req.Params, &p)
 		controller, err := s.manager.Create(p.CWD)
 		if err != nil {
 			return nil, toRPCError("session_create_failed", err)
+		}
+		if p.Yolo {
+			controller.SetYolo(true)
+			s.teamManager.ApplyParentRuntimeConfig(controller.ID(), controller.RuntimeConfig())
 		}
 		client.setSessionID(controller.ID())
 		return controller.Snapshot(), nil

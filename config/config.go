@@ -14,12 +14,13 @@ import (
 const CompressionTriggerRatio = 0.80
 
 type Config struct {
-	APIKey       string
-	APIBaseURL   string
-	APIModel     string
-	APIType      string
-	APIMaxTokens int
-	PinnedFields map[string]bool
+	APIKey                      string
+	APIBaseURL                  string
+	APIModel                    string
+	APIType                     string
+	APIMaxTokens                int
+	APIStreamIdleTimeoutSeconds float64
+	PinnedFields                map[string]bool
 
 	Yolo bool
 
@@ -33,6 +34,18 @@ type Config struct {
 	MCPPingInterval   float64
 	MCPConnectTimeout float64
 	MCPRequestTimeout float64
+
+	WebSearchEnabled        bool
+	WebSearchProvider       string
+	WebSearchBaseURL        string
+	WebSearchMaxResults     int
+	WebSearchTimeoutSeconds float64
+	WebFetchEnabled         bool
+	WebFetchRequireSearch   bool
+	WebFetchMaxChars        int
+	WebFetchTimeoutSeconds  float64
+	WebFetchUserAgent       string
+	WebSearchCacheScope     string
 
 	ContextCompressThreshold   float64
 	PromptCacheTTLSeconds      float64
@@ -97,11 +110,12 @@ func NewConfigForCWD(cwd string) Config {
 	resourceDir := LuminaResourceDir(luminaRoot)
 
 	cfg := Config{
-		APIKey:       "",
-		APIBaseURL:   "",
-		APIModel:     "",
-		APIType:      "openai_compatible",
-		APIMaxTokens: 16000,
+		APIKey:                      "",
+		APIBaseURL:                  "",
+		APIModel:                    "",
+		APIType:                     "openai_compatible",
+		APIMaxTokens:                16000,
+		APIStreamIdleTimeoutSeconds: 600.0,
 
 		Yolo: false,
 
@@ -115,6 +129,17 @@ func NewConfigForCWD(cwd string) Config {
 		MCPPingInterval:   30.0,
 		MCPConnectTimeout: 10.0,
 		MCPRequestTimeout: 30.0,
+
+		WebSearchEnabled:        true,
+		WebSearchProvider:       "searxng",
+		WebSearchBaseURL:        "http://127.0.0.1:8888",
+		WebSearchMaxResults:     10,
+		WebSearchTimeoutSeconds: 20.0,
+		WebFetchEnabled:         true,
+		WebFetchRequireSearch:   true,
+		WebFetchMaxChars:        80_000,
+		WebFetchTimeoutSeconds:  20.0,
+		WebFetchUserAgent:       "LuminaCode/1.0 (+https://github.com/bugcat9/LuminaCode)",
 
 		ContextCompressThreshold:   CompressionTriggerRatio,
 		PromptCacheTTLSeconds:      300,
@@ -187,6 +212,7 @@ func ReloadDynamicConfig(current Config) Config {
 	if !isPinned(current, "api_max_tokens") {
 		updated.APIMaxTokens = fresh.APIMaxTokens
 	}
+	updated.APIStreamIdleTimeoutSeconds = fresh.APIStreamIdleTimeoutSeconds
 	updated.MaxToolOutputChars = fresh.MaxToolOutputChars
 	updated.MaxToolResultCharsAbsolute = fresh.MaxToolResultCharsAbsolute
 	updated.MaxMessageToolResultsChars = fresh.MaxMessageToolResultsChars
@@ -206,10 +232,22 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.SessionMemoryVacuumAfterEviction = fresh.SessionMemoryVacuumAfterEviction
 	updated.ExtractionModel = fresh.ExtractionModel
 	updated.MemoryRecallPrefetchTimeoutSeconds = fresh.MemoryRecallPrefetchTimeoutSeconds
+	updated.WebSearchEnabled = fresh.WebSearchEnabled
+	updated.WebSearchProvider = fresh.WebSearchProvider
+	updated.WebSearchBaseURL = fresh.WebSearchBaseURL
+	updated.WebSearchMaxResults = fresh.WebSearchMaxResults
+	updated.WebSearchTimeoutSeconds = fresh.WebSearchTimeoutSeconds
+	updated.WebFetchEnabled = fresh.WebFetchEnabled
+	updated.WebFetchRequireSearch = fresh.WebFetchRequireSearch
+	updated.WebFetchMaxChars = fresh.WebFetchMaxChars
+	updated.WebFetchTimeoutSeconds = fresh.WebFetchTimeoutSeconds
+	updated.WebFetchUserAgent = fresh.WebFetchUserAgent
 	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
 	updated.ProjectDocFilenames = fresh.ProjectDocFilenames
 	updated.ProjectDocMaxBytes = fresh.ProjectDocMaxBytes
-	updated.ProjectRuntimeDir = fresh.ProjectRuntimeDir
+	if !isPinned(current, "project_runtime_dir") {
+		updated.ProjectRuntimeDir = fresh.ProjectRuntimeDir
+	}
 	if !isPinned(current, "harness_mode") {
 		updated.HarnessMode = fresh.HarnessMode
 	}
@@ -342,6 +380,7 @@ type luminaDefaults struct {
 	APIModel                           *string  `json:"api_model"`
 	APIType                            *string  `json:"api_type"`
 	APIMaxTokens                       *int     `json:"api_max_tokens"`
+	APIStreamIdleTimeoutSeconds        *float64 `json:"api_stream_idle_timeout_seconds"`
 	MaxToolOutputChars                 *int     `json:"max_tool_output_chars"`
 	MaxToolResultCharsAbsolute         *int     `json:"max_tool_result_chars_absolute"`
 	MaxMessageToolResultsChars         *int     `json:"max_message_tool_results_chars"`
@@ -351,6 +390,16 @@ type luminaDefaults struct {
 	MCPPingInterval                    *float64 `json:"mcp_ping_interval"`
 	MCPConnectTimeout                  *float64 `json:"mcp_connect_timeout"`
 	MCPRequestTimeout                  *float64 `json:"mcp_request_timeout"`
+	WebSearchEnabled                   *bool    `json:"web_search_enabled"`
+	WebSearchProvider                  *string  `json:"web_search_provider"`
+	WebSearchBaseURL                   *string  `json:"web_search_base_url"`
+	WebSearchMaxResults                *int     `json:"web_search_max_results"`
+	WebSearchTimeoutSeconds            *float64 `json:"web_search_timeout_seconds"`
+	WebFetchEnabled                    *bool    `json:"web_fetch_enabled"`
+	WebFetchRequireSearch              *bool    `json:"web_fetch_require_search_result"`
+	WebFetchMaxChars                   *int     `json:"web_fetch_max_chars"`
+	WebFetchTimeoutSeconds             *float64 `json:"web_fetch_timeout_seconds"`
+	WebFetchUserAgent                  *string  `json:"web_fetch_user_agent"`
 	ContextCompressThreshold           *float64 `json:"context_compress_threshold"`
 	PromptCacheTTLSeconds              *float64 `json:"prompt_cache_ttl_seconds"`
 	AnthropicCacheEditsEnabled         *bool    `json:"anthropic_cache_edits_enabled"`
@@ -408,6 +457,9 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.APIMaxTokens != nil {
 		cfg.APIMaxTokens = *defaults.APIMaxTokens
 	}
+	if defaults.APIStreamIdleTimeoutSeconds != nil && *defaults.APIStreamIdleTimeoutSeconds > 0 {
+		cfg.APIStreamIdleTimeoutSeconds = *defaults.APIStreamIdleTimeoutSeconds
+	}
 	if defaults.MaxToolOutputChars != nil {
 		cfg.MaxToolOutputChars = *defaults.MaxToolOutputChars
 	}
@@ -434,6 +486,36 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.MCPRequestTimeout != nil {
 		cfg.MCPRequestTimeout = *defaults.MCPRequestTimeout
+	}
+	if defaults.WebSearchEnabled != nil {
+		cfg.WebSearchEnabled = *defaults.WebSearchEnabled
+	}
+	if defaults.WebSearchProvider != nil {
+		cfg.WebSearchProvider = strings.TrimSpace(*defaults.WebSearchProvider)
+	}
+	if defaults.WebSearchBaseURL != nil {
+		cfg.WebSearchBaseURL = strings.TrimRight(strings.TrimSpace(*defaults.WebSearchBaseURL), "/")
+	}
+	if defaults.WebSearchMaxResults != nil && *defaults.WebSearchMaxResults > 0 {
+		cfg.WebSearchMaxResults = *defaults.WebSearchMaxResults
+	}
+	if defaults.WebSearchTimeoutSeconds != nil && *defaults.WebSearchTimeoutSeconds > 0 {
+		cfg.WebSearchTimeoutSeconds = *defaults.WebSearchTimeoutSeconds
+	}
+	if defaults.WebFetchEnabled != nil {
+		cfg.WebFetchEnabled = *defaults.WebFetchEnabled
+	}
+	if defaults.WebFetchRequireSearch != nil {
+		cfg.WebFetchRequireSearch = *defaults.WebFetchRequireSearch
+	}
+	if defaults.WebFetchMaxChars != nil && *defaults.WebFetchMaxChars > 0 {
+		cfg.WebFetchMaxChars = *defaults.WebFetchMaxChars
+	}
+	if defaults.WebFetchTimeoutSeconds != nil && *defaults.WebFetchTimeoutSeconds > 0 {
+		cfg.WebFetchTimeoutSeconds = *defaults.WebFetchTimeoutSeconds
+	}
+	if defaults.WebFetchUserAgent != nil {
+		cfg.WebFetchUserAgent = strings.TrimSpace(*defaults.WebFetchUserAgent)
 	}
 	if defaults.ContextCompressThreshold != nil {
 		cfg.ContextCompressThreshold = *defaults.ContextCompressThreshold
@@ -703,10 +785,21 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.APIBaseURL = firstNonEmpty(os.Getenv("LUMINA_API_BASE_URL"), os.Getenv("LLM_BASE_URL"), os.Getenv("ANTHROPIC_BASE_URL"), cfg.APIBaseURL)
 	cfg.APIModel = firstNonEmpty(os.Getenv("LUMINA_API_MODEL"), os.Getenv("LLM_DEFAULT_MODEL"), os.Getenv("ANTHROPIC_MODEL"), cfg.APIModel)
 	cfg.APIType = firstNonEmpty(os.Getenv("LUMINA_API_TYPE"), os.Getenv("LLM_API_TYPE"), cfg.APIType)
+	cfg.APIStreamIdleTimeoutSeconds = envFloat("LUMINA_API_STREAM_IDLE_TIMEOUT_SECONDS", cfg.APIStreamIdleTimeoutSeconds)
 	cfg.Yolo = envBool("YOLO_MODE", cfg.Yolo)
 	cfg.PromptCacheTTLSeconds = envFloat("LUMINA_PROMPT_CACHE_TTL_SECONDS", cfg.PromptCacheTTLSeconds)
 	cfg.AnthropicCacheEditsEnabled = envBool("LUMINA_ANTHROPIC_CACHE_EDITS", cfg.AnthropicCacheEditsEnabled)
 	cfg.MaxParentTurns = envInt("LUMINA_MAX_PARENT_TURNS", cfg.MaxParentTurns)
+	cfg.WebSearchEnabled = envBool("LUMINA_WEB_SEARCH_ENABLED", cfg.WebSearchEnabled)
+	cfg.WebSearchProvider = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WEB_SEARCH_PROVIDER")), cfg.WebSearchProvider)
+	cfg.WebSearchBaseURL = strings.TrimRight(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WEB_SEARCH_BASE_URL")), cfg.WebSearchBaseURL), "/")
+	cfg.WebSearchMaxResults = positiveIntOrDefault(envInt("LUMINA_WEB_SEARCH_MAX_RESULTS", cfg.WebSearchMaxResults), cfg.WebSearchMaxResults)
+	cfg.WebSearchTimeoutSeconds = envFloat("LUMINA_WEB_SEARCH_TIMEOUT_SECONDS", cfg.WebSearchTimeoutSeconds)
+	cfg.WebFetchEnabled = envBool("LUMINA_WEB_FETCH_ENABLED", cfg.WebFetchEnabled)
+	cfg.WebFetchRequireSearch = envBool("LUMINA_WEB_FETCH_REQUIRE_SEARCH_RESULT", cfg.WebFetchRequireSearch)
+	cfg.WebFetchMaxChars = positiveIntOrDefault(envInt("LUMINA_WEB_FETCH_MAX_CHARS", cfg.WebFetchMaxChars), cfg.WebFetchMaxChars)
+	cfg.WebFetchTimeoutSeconds = envFloat("LUMINA_WEB_FETCH_TIMEOUT_SECONDS", cfg.WebFetchTimeoutSeconds)
+	cfg.WebFetchUserAgent = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WEB_FETCH_USER_AGENT")), cfg.WebFetchUserAgent)
 	cfg.SessionMemoryTurnInterval = positiveIntOrDefault(envInt("SESSION_MEM_TURN", cfg.SessionMemoryTurnInterval), cfg.SessionMemoryTurnInterval)
 	cfg.HarnessMode = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_HARNESS_MODE")), cfg.HarnessMode)
 	cfg.UIBackend = "prompt_toolkit_fullscreen"

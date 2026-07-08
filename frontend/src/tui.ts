@@ -3,7 +3,7 @@ import { escapeBlessedTags, formatPermissionPrompt, normalizeMenuItems } from ".
 import { isPrintableInput, setBracketedPaste } from "./input";
 import { RawInputDispatcher } from "./raw-input";
 import { RpcClient } from "./rpc";
-import { buildHeaderContent, buildStatusContent, buildTasksContent, buildTranscriptContent } from "./rendering";
+import { buildHeaderContent, buildStatusContent, buildTasksContent, buildTranscriptContent, formatGateSummary } from "./rendering";
 import { getPaneScroll, isPaneAtBottom } from "./scroll";
 import { createTheme } from "./theme";
 import type { LaunchOptions, PushEvent, TranscriptEntry } from "./types";
@@ -526,8 +526,7 @@ export class LuminaTui {
           `Dialogue Count: ${summary.dialogue_count ?? 0}`,
           `Artifact Count: ${summary.artifact_count ?? 0}`,
           `Activity Count: ${summary.activity_count ?? 0}`,
-          `Gate QA: ${summary.gate_status?.qa || "pending"}`,
-          `Gate Reviewer: ${summary.gate_status?.reviewer || "pending"}`,
+          `Gates: ${formatGateSummary(summary.gate_verdicts, summary.gate_status)}`,
         ];
         this.taskLines.push(...lines.map((line) => `team.summary: ${line}`));
         this.renderTasks();

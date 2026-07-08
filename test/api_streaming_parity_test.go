@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"LuminaCode/api"
 )
@@ -634,5 +635,69 @@ func TestOpenAICompatibleCompleteConditionalRetryIsCaseSensitiveLikePython(t *te
 	}
 	if text != "ok" || calls.Load() != 2 {
 		t.Fatalf("expected case-sensitive conditional retry like Python, text=%q calls=%d", text, calls.Load())
+	}
+}
+
+func TestOpenAICompatibleStreamIdleTimeoutReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, ": keepalive\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := api.NewAPIClient("test-key", server.URL, "gpt-5", 256, nil, nil, "openai_compatible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := api.ContextWithStreamIdleTimeout(context.Background(), 20*time.Millisecond)
+	var gotMessage string
+	for item := range client.StreamChat(ctx, "sys", nil, nil, nil) {
+		if item.Err != nil {
+			gotMessage = item.Err.Error()
+			break
+		}
+		if item.Event["type"] == "error" {
+			gotMessage = fmt.Sprint(item.Event["message"])
+			break
+		}
+	}
+	if !strings.Contains(gotMessage, "API stream idle timeout") {
+		t.Fatalf("expected stream idle timeout error, got %q", gotMessage)
+	}
+}
+
+func TestAnthropicStreamIdleTimeoutReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, ": keepalive\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client, err := api.NewAPIClient("test-key", server.URL, "claude-sonnet-4", 256, nil, nil, "anthropic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := api.ContextWithStreamIdleTimeout(context.Background(), 20*time.Millisecond)
+	var gotMessage string
+	for item := range client.StreamChat(ctx, "sys", nil, nil, nil) {
+		if item.Err != nil {
+			gotMessage = item.Err.Error()
+			break
+		}
+		if item.Event["type"] == "error" {
+			gotMessage = fmt.Sprint(item.Event["message"])
+			break
+		}
+	}
+	if !strings.Contains(gotMessage, "API stream idle timeout") {
+		t.Fatalf("expected stream idle timeout error, got %q", gotMessage)
 	}
 }

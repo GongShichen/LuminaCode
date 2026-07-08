@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"LuminaCode/mcp"
@@ -33,6 +34,7 @@ func NewMCPDynamicTool(publicName, serverName, toolName, description string, raw
 			ReadOnly:        BoolPtr(false),
 			ConcurrencySafe: BoolPtr(true),
 			Destructive:     BoolPtr(true),
+			TimeoutSeconds:  mcp.DefaultRequestTimeout.Seconds() + 15,
 			MaxOutputChars:  100_000,
 		}},
 		ServerName: serverName,
@@ -43,6 +45,7 @@ func NewMCPDynamicTool(publicName, serverName, toolName, description string, raw
 
 func (t *MCPDynamicTool) DecodeInput(raw map[string]any) (any, error) {
 	schema := BuildMCPInputSchema(t.ToolName, t.RawSchema)
+	normalized := coerceMCPInputForSchema(raw, schema)
 	compiler := jsonschemavalidator.NewCompiler()
 	const schemaURL = "lumina://mcp-input.schema.json"
 	if err := compiler.AddResource(schemaURL, schema); err != nil {
@@ -52,10 +55,10 @@ func (t *MCPDynamicTool) DecodeInput(raw map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := compiled.Validate(raw); err != nil {
+	if err := compiled.Validate(normalized); err != nil {
 		return nil, err
 	}
-	return filterMCPInputForModelDump(raw, t.RawSchema), nil
+	return filterMCPInputForModelDump(normalized, t.RawSchema), nil
 }
 
 func (t *MCPDynamicTool) Execute(ctx context.Context, execCtx ExecutionContext, input any) (string, error) {
@@ -108,6 +111,7 @@ func NewListMCPResourcesTool() *ListMCPResourcesTool {
 		Destructive:     BoolPtr(false),
 		ShouldDefer:     true,
 		SearchHint:      "mcp list resources",
+		TimeoutSeconds:  mcp.DefaultRequestTimeout.Seconds() + 15,
 	}}}
 }
 
@@ -171,6 +175,7 @@ func NewReadMCPResourceTool() *ReadMCPResourceTool {
 		Destructive:     BoolPtr(false),
 		ShouldDefer:     true,
 		SearchHint:      "mcp resource read fetch uri",
+		TimeoutSeconds:  mcp.DefaultRequestTimeout.Seconds() + 15,
 	}}}
 }
 
@@ -366,6 +371,156 @@ func stringListFromAny(raw any) []string {
 		return out
 	default:
 		return nil
+	}
+}
+
+func coerceMCPInputForSchema(raw map[string]any, schema map[string]any) map[string]any {
+	coerced, ok := coerceMCPValueForSchema(raw, schema, schema).(map[string]any)
+	if !ok || coerced == nil {
+		return raw
+	}
+	return coerced
+}
+
+func coerceMCPValueForSchema(value any, schema map[string]any, root map[string]any) any {
+	if value == nil || len(schema) == 0 {
+		return value
+	}
+	if ref, _ := schema["$ref"].(string); ref != "" {
+		if resolved := resolveMCPRef(root, ref); len(resolved) > 0 {
+			return coerceMCPValueForSchema(value, resolved, root)
+		}
+		return value
+	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for _, variant := range variants {
+			variantSchema := mapFromAny(variant)
+			if len(variantSchema) == 0 {
+				continue
+			}
+			if typ, _ := variantSchema["type"].(string); typ == "null" {
+				continue
+			}
+			return coerceMCPValueForSchema(value, variantSchema, root)
+		}
+	}
+	jsonType, _ := mcpJSONType(schema["type"], inferMCPType(schema))
+	switch jsonType {
+	case "object":
+		valueMap, ok := value.(map[string]any)
+		if !ok {
+			return value
+		}
+		props := mapFromAny(schema["properties"])
+		if len(props) == 0 {
+			return value
+		}
+		out := make(map[string]any, len(valueMap))
+		for key, rawValue := range valueMap {
+			if propSchema := mapFromAny(props[key]); len(propSchema) > 0 {
+				out[key] = coerceMCPValueForSchema(rawValue, propSchema, root)
+			} else {
+				out[key] = rawValue
+			}
+		}
+		return out
+	case "array":
+		items := mapFromAny(schema["items"])
+		if len(items) == 0 {
+			return value
+		}
+		switch typed := value.(type) {
+		case []any:
+			out := make([]any, 0, len(typed))
+			for _, item := range typed {
+				out = append(out, coerceMCPValueForSchema(item, items, root))
+			}
+			return out
+		case []string:
+			out := make([]any, 0, len(typed))
+			for _, item := range typed {
+				out = append(out, coerceMCPValueForSchema(item, items, root))
+			}
+			return out
+		default:
+			return value
+		}
+	case "integer":
+		return coerceMCPInteger(value)
+	case "number":
+		return coerceMCPNumber(value)
+	case "boolean":
+		return coerceMCPBoolean(value)
+	default:
+		return value
+	}
+}
+
+func resolveMCPRef(root map[string]any, ref string) map[string]any {
+	const prefix = "#/$defs/"
+	if !strings.HasPrefix(ref, prefix) {
+		return nil
+	}
+	defs := mapFromAny(root["$defs"])
+	return mapFromAny(defs[strings.TrimPrefix(ref, prefix)])
+}
+
+func coerceMCPInteger(value any) any {
+	switch typed := value.(type) {
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return value
+		}
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return value
+		}
+		return parsed
+	case float64:
+		if typed == float64(int64(typed)) {
+			return int64(typed)
+		}
+		return value
+	case float32:
+		if typed == float32(int64(typed)) {
+			return int64(typed)
+		}
+		return value
+	default:
+		return value
+	}
+}
+
+func coerceMCPNumber(value any) any {
+	switch typed := value.(type) {
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return value
+		}
+		parsed, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return value
+		}
+		return parsed
+	default:
+		return value
+	}
+}
+
+func coerceMCPBoolean(value any) any {
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "true", "t", "yes", "y", "1":
+		return true
+	case "false", "f", "no", "n", "0":
+		return false
+	default:
+		return value
 	}
 }
 

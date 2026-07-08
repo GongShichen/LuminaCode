@@ -12,7 +12,7 @@ import (
 
 const MaxRecalledMemories = 5
 
-const SelectMemoriesSystemPrompt = `You are selecting memories that will be useful to an AI coding agent as it
+const SelectMemoriesSystemPrompt = `You are selecting memories that will be useful to a general-purpose local agent as it
 processes a user's query. Return a JSON array of filenames for memories that
 are clearly useful (up to 5).
 

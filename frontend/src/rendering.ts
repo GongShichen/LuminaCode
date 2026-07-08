@@ -61,10 +61,7 @@ export function buildTasksContent(args: {
     const lines = [active];
     const contractState = args.teamContract ? `recorded  ${args.teamContract.project_root || ""}`.trim() : "missing";
     lines.push(`Contract      ${contractState}`);
-    const qa = args.teamGateVerdicts?.qa?.status || "pending";
-    const reviewer = args.teamGateVerdicts?.reviewer?.status || "pending";
-    const blocking = countBlockingFindings(args.teamGateVerdicts);
-    lines.push(`Gates         QA ${qa} | Reviewer ${reviewer}${blocking > 0 ? ` | blocking ${blocking}` : ""}`);
+    lines.push(`Gates         ${formatGateSummary(args.teamGateVerdicts, undefined)}`);
     for (const row of args.teamActivityRows) {
       const name = row.display_name || row.agent_id || "agent";
       lines.push(`${name.padEnd(14)} ${String(row.status || "idle").padEnd(12)} ${row.summary || ""}`);
@@ -103,11 +100,8 @@ export function buildStatusContent(args: {
 }): string {
   if (args.teamMode) {
     const active = args.teamActivityRows.filter((row) => row.status === "running").map((row) => row.display_name || row.agent_id).join(", ") || "none";
-    const qa = args.teamGateVerdicts?.qa?.status || args.teamGateStatus?.qa || "pending";
-    const reviewer = args.teamGateVerdicts?.reviewer?.status || args.teamGateStatus?.reviewer || "pending";
     const contract = args.teamContract ? "contract recorded" : "contract missing";
-    const blocking = countBlockingFindings(args.teamGateVerdicts);
-    const gate = `QA ${qa} / Reviewer ${reviewer}${blocking > 0 ? ` / blocking ${blocking}` : ""}`;
+    const gate = formatGateSummary(args.teamGateVerdicts, args.teamGateStatus);
     return `Team: ${args.activeTeamName || "Team"} | Loop #${args.teamLoopIteration} | ${contract} | Active: ${active} | Gate: ${gate}`;
   }
 
@@ -129,4 +123,18 @@ function countBlockingFindings(verdicts: any): number {
     }
   }
   return count;
+}
+
+export function formatGateSummary(verdicts: any, status?: any): string {
+  const names = new Set<string>();
+  for (const key of Object.keys(status || {})) names.add(key);
+  for (const key of Object.keys(verdicts || {})) names.add(key);
+  if (names.size === 0) return "pending";
+  const parts = Array.from(names).sort().map((name) => {
+    const value = verdicts?.[name]?.status || status?.[name] || "pending";
+    return `${name} ${value}`;
+  });
+  const blocking = countBlockingFindings(verdicts);
+  if (blocking > 0) parts.push(`blocking ${blocking}`);
+  return parts.join(" | ");
 }

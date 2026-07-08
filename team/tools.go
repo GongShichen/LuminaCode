@@ -38,6 +38,8 @@ type TeamContextView struct {
 	TeamName        string                 `json:"team_name"`
 	CurrentAgent    string                 `json:"current_agent"`
 	CWD             string                 `json:"cwd"`
+	RuntimeDir      string                 `json:"runtime_dir"`
+	TeamRuntimeDir  string                 `json:"team_runtime_dir"`
 	Contract        *AcceptanceContract    `json:"contract,omitempty"`
 	Artifacts       []Artifact             `json:"artifacts"`
 	GateVerdicts    map[string]GateVerdict `json:"gate_verdicts,omitempty"`
@@ -103,6 +105,13 @@ func (t *RecordTeamContractTool) ValidateInput(_ coretools.ExecutionContext, inp
 	contract := derefContract(input)
 	if strings.TrimSpace(contract.ProjectRoot) == "" {
 		return false, "project_root must not be empty."
+	}
+	if t.Runtime != nil && t.Runtime.Spec.Loop.RequireContractProjectRootRuntimeDir {
+		root := strings.TrimSpace(contract.ProjectRoot)
+		expected := t.Runtime.teamRuntimeDir()
+		if root != expected {
+			return false, fmt.Sprintf("project_root must be team_runtime_dir from GetTeamContext: %s", expected)
+		}
 	}
 	if len(nonEmptyStrings(contract.UserRequirements)) == 0 {
 		return false, "user_requirements must include at least one requirement."
@@ -212,11 +221,10 @@ func (t *SendA2AMessageTool) ValidateInput(_ coretools.ExecutionContext, input a
 func (t *SendA2AMessageTool) TimeoutForInput(input any) time.Duration {
 	in := derefA2A(input)
 	wait := in.TimeoutSeconds
-	if wait <= 0 {
+	if t.Runtime != nil {
+		wait = t.Runtime.resolveA2AWaitSeconds(wait)
+	} else if wait <= 0 {
 		wait = 300
-		if t.Runtime != nil {
-			wait = t.Runtime.defaultA2ATimeoutSeconds()
-		}
 	}
 	return time.Duration(wait+30) * time.Second
 }

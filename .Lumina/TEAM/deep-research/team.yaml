@@ -1,0 +1,117 @@
+name: deep-research
+display_name: DeepResearch Team
+description: Evidence-first research team using SearxNG web search/fetch and arXiv MCP.
+entry_agent: team-leader
+shared_prompt: shared-prompt.md
+loop:
+  max_iterations: 0
+  max_parallel_agents: 4
+  a2a_default_timeout_seconds: 900
+  min_a2a_timeout_seconds: 900
+  require_contract_project_root_runtime_dir: true
+  wait_for_pending_a2a_before_next_iteration: true
+  completion_policy: leader_with_required_gates
+  require_final_artifact: true
+  stop_policy: user_interrupt_or_task_complete_only
+gates:
+  require_contract: true
+  checks:
+    - name: citation_qa
+      agent: qa
+      pass_statuses:
+        - pass
+        - not_applicable
+      allowed_statuses:
+        - pass
+        - not_applicable
+        - fail
+      evidence_required_statuses:
+        - pass
+    - name: methodology_review
+      agent: reviewer
+      pass_statuses:
+        - pass
+        - accepted_with_notes
+      allowed_statuses:
+        - pass
+        - accepted_with_notes
+        - reject
+      findings_required_statuses:
+        - accepted_with_notes
+        - reject
+      blocking_findings_fail: true
+  nonblocking_findings: require_followup_or_deferral
+  deferral_requires_reason: true
+output:
+  export_to_workdir: true
+  directory: "."
+  artifacts:
+    - final-report.md
+    - sources.jsonl
+    - evidence-matrix.jsonl
+    - paper-notes/
+task_policies:
+  - name: contract_before_research
+    description: Research, source reading, evidence analysis, report writing, and gates require a recorded research contract.
+    targets:
+      - "*"
+    task_types:
+      - search
+      - literature
+      - source-reading
+      - evidence
+      - synthesis
+      - report
+      - qa
+      - review
+    requires_contract: true
+  - name: leader_planning_only_before_contract
+    description: Team Leader may only scope and record the research contract before dispatching research work.
+    targets:
+      - team-leader
+      - scope-planner
+    task_types:
+      - team-loop
+      - planning
+      - scope
+    before_contract: true
+    audit_writes: true
+    allowed_write_globs:
+      - "*.md"
+      - "**/*.md"
+      - "*.jsonl"
+      - "**/*.jsonl"
+  - name: research_runtime_artifacts
+    description: Research artifacts should be written only under the Lumina team runtime directory unless the user explicitly requests a project file.
+    targets:
+      - "*"
+    task_types:
+      - search
+      - literature
+      - source-reading
+      - evidence
+      - synthesis
+      - report
+    audit_writes: true
+    allowed_write_globs:
+      - "*.md"
+      - "**/*.md"
+      - "*.jsonl"
+      - "**/*.jsonl"
+      - "paper-notes/"
+      - "paper-notes/**"
+      - "*.tmp"
+      - "**/*.tmp"
+transcript:
+  show_member_dialogue: true
+  show_tool_details: false
+  show_thinking: false
+agents:
+  - team-leader
+  - scope-planner
+  - search-strategist
+  - source-reader
+  - evidence-analyst
+  - report-writer
+  - qa
+  - reviewer

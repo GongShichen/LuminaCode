@@ -62,6 +62,7 @@ func LoadUserMCPConfig() []McpServerConfig {
 	home, _ := os.UserHomeDir()
 	merged := map[string]map[string]any{}
 	var order []string
+	loadMCPFile(filepath.Join(home, ".lumina", "CONFIG", "mcp.json"), merged, &order)
 	loadMCPFile(filepath.Join(home, ".Lumina", "CONFIG", "mcp.json"), merged, &order)
 	return buildConfigs(merged, order)
 }

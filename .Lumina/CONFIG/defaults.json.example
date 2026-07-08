@@ -4,6 +4,7 @@
   "api_model": "",
   "api_type": "openai_compatible",
   "api_max_tokens": 1000000,
+  "api_stream_idle_timeout_seconds": 600.0,
   "max_tool_output_chars": 50000,
   "max_tool_result_chars_absolute": 400000,
   "max_message_tool_results_chars": 200000,

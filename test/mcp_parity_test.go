@@ -59,6 +59,43 @@ func TestMCPProtocolParsesNumericStringsLikePython(t *testing.T) {
 	}
 }
 
+func TestMCPDynamicToolCoercesStringScalarsBeforeValidation(t *testing.T) {
+	tool := coretools.NewMCPDynamicTool(
+		"mcp__arxiv__search_arxiv",
+		"arxiv",
+		"search_arxiv",
+		"search arxiv",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query":           map[string]any{"type": "string"},
+				"limit":           map[string]any{"type": "integer"},
+				"include_content": map[string]any{"type": "boolean"},
+			},
+			"required": []any{"query"},
+		},
+		"",
+	)
+	decoded, err := tool.DecodeInput(map[string]any{
+		"query":           "medical multimodal model",
+		"limit":           "3",
+		"include_content": "False",
+	})
+	if err != nil {
+		t.Fatalf("DecodeInput should coerce string scalar values before validation: %v", err)
+	}
+	got, ok := decoded.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected decoded type: %#v", decoded)
+	}
+	if got["limit"] != int64(3) {
+		t.Fatalf("expected string integer to decode as int64(3), got %#v", got["limit"])
+	}
+	if got["include_content"] != false {
+		t.Fatalf("expected string bool to decode as false, got %#v", got["include_content"])
+	}
+}
+
 func TestMCPConfigMergesLocalOverProjectAndTrust(t *testing.T) {
 	dir := t.TempDir()
 	project := `{"mcpServers":{"demo":{"command":"node","args":["server.js"],"env":{"A":"1"}},"http":{"url":"https://example.com/mcp"}}}`
@@ -380,6 +417,38 @@ func TestMCPStdioCloseTerminatesLikePython(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != "TERM" {
 		t.Fatalf("stdio close should use terminate/SIGTERM like Python, got %q", data)
+	}
+}
+
+func TestMCPRequestTimeoutDisconnectsHungStdioServer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	script := `
+read init
+printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"hung","version":"0"}}}\n'
+read initialized
+read request
+sleep 60
+`
+	command := "/bin/sh"
+	args := []string{"-c", script}
+	cfg := mcp.McpServerConfig{Name: "hung"}
+	cfg.Command = &command
+	cfg.Args = args
+	client := mcp.NewMcpClient(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !client.Connect(ctx) {
+		t.Fatalf("client should connect before hung request: %s", client.LastError())
+	}
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer reqCancel()
+	if _, err := client.Request(reqCtx, "tools/list", map[string]any{}); err == nil {
+		t.Fatal("expected timeout from hung MCP request")
+	}
+	if client.State() != mcp.ConnectionDisconnected {
+		t.Fatalf("hung MCP timeout should disconnect transport, state=%s lastError=%q", client.State(), client.LastError())
 	}
 }
 

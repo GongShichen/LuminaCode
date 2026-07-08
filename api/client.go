@@ -14,6 +14,35 @@ import (
 )
 
 const defaultLLMHTTPTimeout = 5 * time.Minute
+const defaultLLMStreamIdleTimeout = 3 * time.Minute
+
+type streamIdleTimeoutContextKey struct{}
+
+func ContextWithStreamIdleTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	if timeout <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, streamIdleTimeoutContextKey{}, timeout)
+}
+
+func streamIdleTimeoutFromContext(ctx context.Context) time.Duration {
+	if timeout, ok := ctx.Value(streamIdleTimeoutContextKey{}).(time.Duration); ok && timeout > 0 {
+		return timeout
+	}
+	return defaultLLMStreamIdleTimeout
+}
+
+type StreamIdleTimeoutError struct {
+	Timeout time.Duration
+}
+
+func (e StreamIdleTimeoutError) Error() string {
+	seconds := int(e.Timeout.Round(time.Second) / time.Second)
+	if seconds <= 0 {
+		return "API stream idle timeout waiting for SSE data"
+	}
+	return fmt.Sprintf("API stream idle timeout after %ds waiting for SSE data", seconds)
+}
 
 type CacheEdit struct {
 	ToolUseID string `json:"tool_use_id"`
@@ -436,28 +465,15 @@ func (c *AnthropicClient) streamAnthropic(
 			return
 		}
 
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
 		currentToolID := ""
 		currentToolName := ""
 		currentToolInput := ""
 		savedInputTokens := 0
 
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-
-			dataStr := strings.TrimSpace(line[len("data:"):])
-			if dataStr == "" {
-				continue
-			}
-
+		err = scanSSEDataLines(ctx, resp.Body, streamIdleTimeoutFromContext(ctx), func(dataStr string) bool {
 			var data map[string]any
 			if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
-				continue
+				return true
 			}
 
 			switch getString(data, "type") {
@@ -475,7 +491,7 @@ func (c *AnthropicClient) streamAnthropic(
 					"provider":   c.ProviderName,
 					"raw_error":  string(rawError),
 				}}
-				return
+				return false
 
 			case "message_start":
 				message, _ := data["message"].(map[string]any)
@@ -522,7 +538,7 @@ func (c *AnthropicClient) streamAnthropic(
 
 			case "content_block_stop":
 				if currentToolID == "" {
-					continue
+					return true
 				}
 
 				parsedInput := map[string]any{}
@@ -535,7 +551,7 @@ func (c *AnthropicClient) streamAnthropic(
 						currentToolID = ""
 						currentToolName = ""
 						currentToolInput = ""
-						continue
+						return true
 					}
 				}
 
@@ -568,9 +584,9 @@ func (c *AnthropicClient) streamAnthropic(
 				}
 				out <- EventResult{Event: map[string]any{"type": "stop_reason", "stop_reason": stopReason}}
 			}
-		}
-
-		if err := scanner.Err(); err != nil {
+			return true
+		})
+		if err != nil {
 			out <- EventResult{Err: err}
 		}
 	}()
@@ -731,9 +747,6 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 			return
 		}
 
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
 		type toolCallBuffer struct {
 			ID        string
 			Name      string
@@ -744,23 +757,15 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 		finishReason := ""
 		lastData := map[string]any{}
 
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-
-			dataStr := strings.TrimSpace(line[len("data:"):])
+		stoppedByDone := false
+		err = scanSSEDataLines(ctx, resp.Body, streamIdleTimeoutFromContext(ctx), func(dataStr string) bool {
 			if dataStr == "[DONE]" {
-				break
+				stoppedByDone = true
+				return false
 			}
-			if dataStr == "" {
-				continue
-			}
-
 			var data map[string]any
 			if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
-				continue
+				return true
 			}
 			lastData = data
 
@@ -777,12 +782,12 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 					"provider":   c.providerName(),
 					"raw_error":  string(rawError),
 				}}
-				return
+				return false
 			}
 
 			choices, _ := data["choices"].([]any)
 			if len(choices) == 0 {
-				continue
+				return true
 			}
 
 			choice, _ := choices[0].(map[string]any)
@@ -824,12 +829,13 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 					buf.Arguments += args
 				}
 			}
-		}
-
-		if err := scanner.Err(); err != nil {
+			return true
+		})
+		if err != nil {
 			out <- EventResult{Err: err}
 			return
 		}
+		_ = stoppedByDone
 
 		if id := getString(lastData, "id"); id != "" {
 			out <- EventResult{Event: map[string]any{"type": "message_id", "id": id}}
@@ -1007,6 +1013,77 @@ func doRawJSONRequest(
 	}
 
 	return httpClient.Do(req)
+}
+
+type sseScanResult struct {
+	data string
+	err  error
+}
+
+func scanSSEDataLines(ctx context.Context, body io.ReadCloser, idleTimeout time.Duration, handle func(string) bool) error {
+	if idleTimeout <= 0 {
+		idleTimeout = defaultLLMStreamIdleTimeout
+	}
+	scanCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan sseScanResult)
+	go func() {
+		defer close(results)
+		scanner := bufio.NewScanner(body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			dataStr := strings.TrimSpace(line[len("data:"):])
+			if dataStr == "" {
+				continue
+			}
+			select {
+			case results <- sseScanResult{data: dataStr}:
+			case <-scanCtx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			select {
+			case results <- sseScanResult{err: err}:
+			case <-scanCtx.Done():
+			}
+		}
+	}()
+
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_ = body.Close()
+			return ctx.Err()
+		case item, ok := <-results:
+			if !ok {
+				return nil
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idleTimeout)
+			if item.err != nil {
+				return item.err
+			}
+			if !handle(item.data) {
+				return nil
+			}
+		case <-timer.C:
+			_ = body.Close()
+			return StreamIdleTimeoutError{Timeout: idleTimeout}
+		}
+	}
 }
 
 func singleErrorEvent(err error) <-chan EventResult {

@@ -837,7 +837,11 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 	}
 
 	if !bashpkg.IsAbsoluteDestroy(in.Command) {
-		if valid, invalid := bashpkg.ValidatePaths(in.Command, cwd); !valid {
+		valid, invalid := bashpkg.ValidatePaths(in.Command, cwd)
+		if !valid {
+			invalid = pathsOutsideAllowedRoots(invalid, execCtx)
+		}
+		if len(invalid) > 0 {
 			return "<tool_use_error>\nPath validation failed: the command references files outside the workspace.\n  Blocked paths: " +
 				strings.Join(limitStrings(invalid, 5), ", ") +
 				"\n  Workspace: " + cwd +
@@ -1169,6 +1173,28 @@ func checkAllowedReadRoots(path string, raw any) (bool, string) {
 
 func checkAllowedWriteRoots(path string, raw any) (bool, string) {
 	return checkAllowedRoots("write", path, raw)
+}
+
+func pathsOutsideAllowedRoots(paths []string, execCtx ExecutionContext) []string {
+	if len(paths) == 0 || execCtx == nil {
+		return paths
+	}
+	readRoots := execCtx["allowed_read_roots"]
+	writeRoots := execCtx["allowed_write_roots"]
+	if len(rootsFromAny(readRoots)) == 0 && len(rootsFromAny(writeRoots)) == 0 {
+		return paths
+	}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if ok, _ := checkAllowedReadRoots(path, readRoots); ok {
+			continue
+		}
+		if ok, _ := checkAllowedWriteRoots(path, writeRoots); ok {
+			continue
+		}
+		out = append(out, path)
+	}
+	return out
 }
 
 func checkAllowedRoots(action, path string, raw any) (bool, string) {

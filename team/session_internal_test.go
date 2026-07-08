@@ -90,7 +90,7 @@ func TestFinishA2ATaskNotifiesWaitersAndPreservesCompletedStatus(t *testing.T) {
 		agentActiveA2A: map[string]string{},
 		rootDir:        t.TempDir(),
 	}
-	task, started := session.beginA2ATask("a2a-test", "leader", "qa", "qa")
+	task, started := session.beginA2ATask("a2a-test", "leader", "qa", "qa", nil)
 	if !started {
 		t.Fatal("expected task to start")
 	}
@@ -132,7 +132,7 @@ func TestSubmitGateVerdictCompletesActiveGateA2ATask(t *testing.T) {
 		}}},
 	}
 	session := NewSession("parent-session", cfg, spec, nil, nil)
-	task, started := session.beginA2ATask("a2a-gate", "team-leader", "qa", "qa-verification")
+	task, started := session.beginA2ATask("a2a-gate", "team-leader", "qa", "qa-verification", nil)
 	if !started {
 		t.Fatal("expected gate task to start")
 	}
@@ -254,6 +254,28 @@ func TestSendA2AUsesConfiguredDefaultTimeout(t *testing.T) {
 	}
 }
 
+func TestSendA2ARespectsConfiguredMinimumTimeout(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
+	cfg.SessionDir = t.TempDir()
+	session, err := NewManager(cfg, nil, nil).Start("parent-session", "deep-research", workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.resolveA2AWaitSeconds(7); got != 900 {
+		t.Fatalf("minimum A2A wait should raise short model-provided timeouts, got %d", got)
+	}
+	tool := NewSendA2AMessageTool(session, "team-leader")
+	if got := tool.TimeoutForInput(A2AMessageInput{To: []string{"search-strategist"}, Message: "search", TimeoutSeconds: 7}); got != 930*time.Second {
+		t.Fatalf("tool hard timeout should include configured minimum wait plus grace period, got %s", got)
+	}
+}
+
 func TestTeamLoopWaitsForPendingA2ABeforeNextIteration(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -270,7 +292,7 @@ func TestTeamLoopWaitsForPendingA2ABeforeNextIteration(t *testing.T) {
 	if !session.shouldWaitForPendingA2ABeforeNextIteration() {
 		t.Fatal("product-development should wait for pending A2A tasks before the next leader iteration")
 	}
-	task, started := session.beginA2ATask("a2a-wait", "team-leader", "qa", "qa-testing")
+	task, started := session.beginA2ATask("a2a-wait", "team-leader", "qa", "qa-testing", nil)
 	if !started {
 		t.Fatal("expected pending qa task to start")
 	}
@@ -501,6 +523,60 @@ func TestGateCompletionAllowsResolvedNonblockingFindingWithoutDeferral(t *testin
 	}
 }
 
+func TestSubmitGateVerdictRequiresActiveExpectedArtifacts(t *testing.T) {
+	workdir := t.TempDir()
+	session := &Session{
+		Config: config.NewConfigForCWD(workdir),
+		Spec: TeamSpec{Gates: TeamGateSpec{Checks: []TeamGateCheckSpec{{
+			Name:                     "citation_qa",
+			Agent:                    "qa",
+			PassStatuses:             []string{"pass"},
+			AllowedStatuses:          []string{"pass", "fail"},
+			EvidenceRequiredStatuses: []string{"pass"},
+		}}}},
+		a2aTasks:       map[string]TeamTask{},
+		agentActiveA2A: map[string]string{},
+		rootDir:        t.TempDir(),
+	}
+	session.beginA2ATask("task-qa", "team-leader", "qa", "citation-qa", []string{"qa-report.md"})
+	verdict := GateVerdict{
+		Role:    "citation_qa",
+		Status:  "pass",
+		Summary: "QA pass",
+		Evidence: []GateEvidence{{
+			Name:          "required-artifacts-exist",
+			Passed:        true,
+			OutputSummary: "checked",
+		}},
+	}
+	got := session.SubmitGateVerdict("qa", verdict)
+	if !strings.Contains(got, "missing expected artifacts") {
+		t.Fatalf("expected missing artifact rejection, got %q", got)
+	}
+	writeTestFile(t, filepath.Join(workdir, "qa-report.md"), "# QA\n")
+	got = session.SubmitGateVerdict("qa", verdict)
+	if got != "Gate verdict recorded." {
+		t.Fatalf("expected verdict after artifact exists, got %q", got)
+	}
+}
+
+func TestRequestPermissionAutoAllowsInYoloMode(t *testing.T) {
+	state := agent.NewAgentState()
+	state.PermissionState.YoloMode = true
+	session := &Session{
+		agents: map[string]*AgentRuntime{
+			"qa": {State: &state},
+		},
+		emitFn: func(string, string, any) {
+			t.Fatal("yolo permission should not be emitted")
+		},
+	}
+	got := session.requestPermission("qa", agent.StreamEvent{Type: "permission_needed"})
+	if got != "always" {
+		t.Fatalf("expected yolo permission to auto-allow, got %q", got)
+	}
+}
+
 func TestGateCompletionRejectsUnrelatedDeferralReason(t *testing.T) {
 	session := &Session{
 		Spec: TeamSpec{Gates: TeamGateSpec{
@@ -532,6 +608,70 @@ func TestGateCompletionRejectsUnrelatedDeferralReason(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "without follow-up or deferral") {
 		t.Fatalf("unrelated deferral reason should not satisfy finding, got %v", err)
+	}
+}
+
+func TestGateCompletionAllowsPositiveNonblockingFindingWithoutDeferral(t *testing.T) {
+	session := &Session{
+		Spec: TeamSpec{Gates: TeamGateSpec{
+			NonblockingFindings:    "require_followup_or_deferral",
+			DeferralRequiresReason: true,
+			Checks: []TeamGateCheckSpec{{
+				Name:         "methodology_review",
+				Agent:        "reviewer",
+				PassStatuses: []string{"accepted_with_notes"},
+			}},
+		}},
+		gateVerdicts: map[string]GateVerdict{
+			"methodology_review": {
+				Status: "accepted_with_notes",
+				Findings: []GateFinding{{
+					Category: "evidence_strength",
+					Summary:  "Core technical conclusions are well-supported by retrieved sources",
+					Details:  "Regulatory conclusions are appropriately hedged. No overextension beyond evidence.",
+					Blocking: false,
+				}},
+			},
+		},
+	}
+	err := session.validateCompletion(CompleteTeamTaskInput{
+		GateStatuses: map[string]string{"methodology_review": "accepted_with_notes"},
+	})
+	if err != nil {
+		t.Fatalf("positive nonblocking finding should not require deferral: %v", err)
+	}
+}
+
+func TestGateCompletionAcceptsCategoryOnlyDeferralReason(t *testing.T) {
+	session := &Session{
+		Spec: TeamSpec{Gates: TeamGateSpec{
+			NonblockingFindings:    "require_followup_or_deferral",
+			DeferralRequiresReason: true,
+			Checks: []TeamGateCheckSpec{{
+				Name:         "citation_qa",
+				Agent:        "qa",
+				PassStatuses: []string{"pass"},
+			}},
+		}},
+		gateVerdicts: map[string]GateVerdict{
+			"citation_qa": {
+				Status: "pass",
+				Findings: []GateFinding{{
+					Category: "minor_numeric_discrepancies",
+					Summary:  "报告中少量统计数据与sources.jsonl实际计数存在±1偏差",
+					Blocking: false,
+				}},
+			},
+		},
+	}
+	err := session.validateCompletion(CompleteTeamTaskInput{
+		GateStatuses: map[string]string{"citation_qa": "pass"},
+		DeferralReasons: map[string]string{
+			"minor_numeric_discrepancies": "非阻塞计数偏差，报告主体结论不受影响。",
+		},
+	})
+	if err != nil {
+		t.Fatalf("category-only deferral reason should satisfy finding: %v", err)
 	}
 }
 
@@ -611,6 +751,164 @@ func TestMissingRequiredEvidenceDoesNotConfuseDifferentCommandArguments(t *testi
 	got := strings.Join(missing, ",")
 	if !strings.Contains(got, "错误路径-无效序号") || strings.Contains(got, "错误路径-序号不存在") {
 		t.Fatalf("done 99 evidence should not cover done abc, missing %#v", missing)
+	}
+}
+
+func TestMissingRequiredEvidenceTreatsConfiguredGateNamesAsVerdictChecks(t *testing.T) {
+	contract := &AcceptanceContract{
+		RequiredCommands: []ContractCheck{
+			{Name: "citation_qa", Required: true},
+			{Name: "methodology_review", Required: true},
+			{Name: "source count check", Required: true},
+		},
+	}
+	evidence := []GateEvidence{{
+		Name:          "source count check",
+		Passed:        true,
+		OutputSummary: "25 sources and 47 evidence rows verified",
+	}}
+	gates := gateNames([]TeamGateCheckSpec{
+		{Name: "citation_qa", Agent: "qa"},
+		{Name: "methodology_review", Agent: "reviewer"},
+	})
+	if missing := missingRequiredEvidence(contract, evidence, gates); len(missing) != 0 {
+		t.Fatalf("configured gate names should be covered by structured verdicts, missing %#v", missing)
+	}
+	if missing := missingRequiredEvidence(contract, evidence); !stringSliceContains(missing, "citation_qa") || !stringSliceContains(missing, "methodology_review") {
+		t.Fatalf("without configured gates the checks should still require evidence, missing %#v", missing)
+	}
+}
+
+func TestMissingRequiredEvidenceAcceptsResearchSemanticEvidence(t *testing.T) {
+	contract := &AcceptanceContract{
+		RequiredCommands: []ContractCheck{
+			{Name: "sources_count", Required: true},
+			{Name: "paper_count", Required: true},
+			{Name: "official_source_count", Required: true},
+			{Name: "evidence_matrix_exists", Required: true},
+			{Name: "source_id_consistency", Required: true},
+			{Name: "final_report_citations", Required: true},
+		},
+	}
+	evidence := []GateEvidence{
+		{
+			Name:          "sources.jsonl",
+			Passed:        true,
+			OutputSummary: "21 条记录（S01-S21），19 preprint + 2 official_doc，retrieval_status 全部为 retrieved 或 partially_retrieved，claim_support_allowed 全部为 true",
+		},
+		{
+			Name:          "evidence-matrix.jsonl",
+			Passed:        true,
+			OutputSummary: "29 条证据（E01-E29），全部含 confidence 和 limitations，source_ids 与 sources.jsonl 完全一致，覆盖影像-文本/病理-文本/VQA/报告生成/安全/监管六大领域",
+		},
+		{
+			Name:          "final-report.md citation coverage",
+			Passed:        true,
+			OutputSummary: "正文引用全部 29 条 E-IDs（E01-E29），覆盖率 100%，零孤儿引用、零孤儿证据，参考来源映射表和证据-来源对照表完整正确",
+		},
+	}
+	if missing := missingRequiredEvidence(contract, evidence); len(missing) != 0 {
+		t.Fatalf("semantic research evidence should cover abstract contract checks, missing %#v", missing)
+	}
+}
+
+func TestCompleteTaskExportsConfiguredArtifactsToWorkdir(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
+	session := &Session{
+		ID:              "team-export-test",
+		ParentSessionID: "parent",
+		Config:          cfg,
+		Spec: TeamSpec{
+			Name:       "generic-research",
+			EntryAgent: "team-leader",
+			Loop:       TeamLoopSpec{RequireFinalArtifact: true},
+			Output: TeamOutputSpec{
+				ExportToWorkdir: true,
+				Directory:       "Research-{team_session_id}",
+				Artifacts:       []string{"final-report.md", "sources.jsonl", "evidence-matrix.jsonl", "paper-notes/"},
+			},
+		},
+		rootDir:        filepath.Join(t.TempDir(), "session"),
+		activity:       map[string]ActivityRow{},
+		a2aTasks:       map[string]TeamTask{},
+		agentActiveA2A: map[string]string{},
+		agents:         map[string]*AgentRuntime{},
+		gate:           GateStatus{},
+		gateVerdicts:   map[string]GateVerdict{},
+	}
+	runtimeDir := session.teamRuntimeDir()
+	writeTestFile(t, filepath.Join(runtimeDir, "final-report.md"), "# Report\n\n## Evidence Index\n- E01 -> S01\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "sources.jsonl"), `{"source_id":"S01"}`+"\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "evidence-matrix.jsonl"), `{"evidence_id":"E01","source_ids":["S01"]}`+"\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "paper-notes", "S01.md"), "# S01\n")
+
+	result := session.CompleteTask("team-leader", CompleteTeamTaskInput{
+		FinalAnswer:       "done",
+		RequiredArtifacts: []string{"final-report.md"},
+	})
+	if !strings.Contains(result, "marked complete") {
+		t.Fatalf("expected completion, got %q", result)
+	}
+	outDir := filepath.Join(workdir, "Research-team-export-test")
+	for _, rel := range []string{"final-report.md", "sources.jsonl", "evidence-matrix.jsonl", filepath.Join("paper-notes", "S01.md")} {
+		if _, err := os.Stat(filepath.Join(outDir, rel)); err != nil {
+			t.Fatalf("missing exported artifact %s: %v", rel, err)
+		}
+	}
+	snapshot := session.Snapshot()
+	if !strings.Contains(snapshot.Dialogue[len(snapshot.Dialogue)-1].Content, "Research-team-export-test/final-report.md") {
+		t.Fatalf("final dialogue should mention exported working-dir package, got %q", snapshot.Dialogue[len(snapshot.Dialogue)-1].Content)
+	}
+}
+
+func TestCompleteTaskCanExportArtifactsFlatToWorkdir(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
+	session := &Session{
+		ID:              "team-export-flat",
+		ParentSessionID: "parent",
+		Config:          cfg,
+		Spec: TeamSpec{
+			Name:       "generic-research",
+			EntryAgent: "team-leader",
+			Loop:       TeamLoopSpec{RequireFinalArtifact: true},
+			Output: TeamOutputSpec{
+				ExportToWorkdir: true,
+				Directory:       ".",
+				Artifacts:       []string{"final-report.md", "sources.jsonl", "evidence-matrix.jsonl", "paper-notes/"},
+			},
+		},
+		rootDir:        filepath.Join(t.TempDir(), "session"),
+		activity:       map[string]ActivityRow{},
+		a2aTasks:       map[string]TeamTask{},
+		agentActiveA2A: map[string]string{},
+		agents:         map[string]*AgentRuntime{},
+		gate:           GateStatus{},
+		gateVerdicts:   map[string]GateVerdict{},
+	}
+	runtimeDir := session.teamRuntimeDir()
+	writeTestFile(t, filepath.Join(runtimeDir, "final-report.md"), "# Report\n\n## Evidence Index\n- E01 -> S01\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "sources.jsonl"), `{"source_id":"S01"}`+"\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "evidence-matrix.jsonl"), `{"evidence_id":"E01","source_ids":["S01"]}`+"\n")
+	writeTestFile(t, filepath.Join(runtimeDir, "paper-notes", "S01.md"), "# S01\n")
+
+	result := session.CompleteTask("team-leader", CompleteTeamTaskInput{
+		FinalAnswer:       "done",
+		RequiredArtifacts: []string{"final-report.md"},
+	})
+	if !strings.Contains(result, "marked complete") {
+		t.Fatalf("expected completion, got %q", result)
+	}
+	for _, rel := range []string{"final-report.md", "sources.jsonl", "evidence-matrix.jsonl", filepath.Join("paper-notes", "S01.md")} {
+		if _, err := os.Stat(filepath.Join(workdir, rel)); err != nil {
+			t.Fatalf("missing flat exported artifact %s: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "generic-research-team-export-flat")); !os.IsNotExist(err) {
+		t.Fatalf("flat export should not create a team id directory, err=%v", err)
 	}
 }
 
@@ -1276,6 +1574,38 @@ func TestWriteFileToolResultRegistersWorkspaceArtifact(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolResultRegistersTeamRuntimeArtifact(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
+	session := &Session{
+		ID:     "team-runtime-test",
+		Config: cfg,
+		Spec: TeamSpec{
+			Name: "deep-research",
+		},
+		rootDir: t.TempDir(),
+	}
+	reportPath := filepath.Join(session.teamRuntimeDir(), "qa-report.md")
+	writeTestFile(t, reportPath, "# QA\n")
+
+	session.recordWriteFileArtifactFromEvent("qa", agent.StreamEvent{
+		Metadata: map[string]any{
+			"tool_name": "write_file",
+			"result":    "File written successfully: " + reportPath + " (5 characters)",
+		},
+	})
+	if len(session.artifacts) != 1 {
+		t.Fatalf("expected runtime artifact to be registered, got %#v", session.artifacts)
+	}
+	if session.artifacts[0].Name != "qa-report.md" || session.artifacts[0].Path != reportPath {
+		t.Fatalf("unexpected runtime artifact: %#v", session.artifacts[0])
+	}
+	if missing := session.missingRequiredArtifactsLocked([]string{"qa-report.md"}); len(missing) > 0 {
+		t.Fatalf("expected runtime artifact to satisfy required artifact, missing=%v", missing)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1305,10 +1635,37 @@ func TestTeamAgentRuntimeSessionDirIsNestedUnderTeamSession(t *testing.T) {
 	if backend.Engine.Config.SessionDir != want {
 		t.Fatalf("team agent session dir = %s, want %s", backend.Engine.Config.SessionDir, want)
 	}
+	if backend.Engine.Config.ProjectRuntimeDir != session.teamRuntimeDir() {
+		t.Fatalf("team agent runtime dir = %s, want %s", backend.Engine.Config.ProjectRuntimeDir, session.teamRuntimeDir())
+	}
+	backend.Engine.RefreshRuntimeConfig()
+	if backend.Engine.Config.ProjectRuntimeDir != session.teamRuntimeDir() {
+		t.Fatalf("team agent runtime dir after refresh = %s, want %s", backend.Engine.Config.ProjectRuntimeDir, session.teamRuntimeDir())
+	}
+	if strings.HasPrefix(backend.Engine.Config.ProjectRuntimeDir, workdir) {
+		t.Fatalf("team agent runtime dir must not be under cwd: %s", backend.Engine.Config.ProjectRuntimeDir)
+	}
 	if backend.Engine.Config.SessionMemoryDir != sessionRoot {
 		t.Fatalf("team agent session memory dir = %s, want parent session root %s", backend.Engine.Config.SessionMemoryDir, sessionRoot)
 	}
 	if _, err := os.Stat(filepath.Join(sessionRoot, session.ID+"-backend")); !os.IsNotExist(err) {
 		t.Fatalf("team agent must not create top-level role session dir, stat err=%v", err)
+	}
+}
+
+func TestRequiredArtifactDirectoryExistsUnderTeamRuntime(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.SessionDir = t.TempDir()
+	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
+	session := NewSession("parent-session", cfg, TeamSpec{Name: "research"}, nil, nil)
+	if err := os.MkdirAll(filepath.Join(session.teamRuntimeDir(), "paper-notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	missing := session.missingRequiredArtifactsLocked([]string{"paper-notes/"})
+	session.mu.Unlock()
+	if len(missing) != 0 {
+		t.Fatalf("existing artifact directory should satisfy requirement, missing=%v", missing)
 	}
 }

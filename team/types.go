@@ -11,6 +11,7 @@ type TeamSpec struct {
 	EntryAgent       string               `json:"entry_agent" yaml:"entry_agent"`
 	Loop             TeamLoopSpec         `json:"loop" yaml:"loop"`
 	Gates            TeamGateSpec         `json:"gates" yaml:"gates"`
+	Output           TeamOutputSpec       `json:"output" yaml:"output"`
 	TaskPolicies     []TeamTaskPolicySpec `json:"task_policies" yaml:"task_policies"`
 	Transcript       TranscriptSpec       `json:"transcript" yaml:"transcript"`
 	Agents           []string             `json:"agents" yaml:"agents"`
@@ -27,6 +28,8 @@ type TeamLoopSpec struct {
 	MaxIterations                        int    `json:"max_iterations" yaml:"max_iterations"`
 	MaxParallelAgents                    int    `json:"max_parallel_agents" yaml:"max_parallel_agents"`
 	A2ADefaultTimeoutSeconds             int    `json:"a2a_default_timeout_seconds" yaml:"a2a_default_timeout_seconds"`
+	MinA2ATimeoutSeconds                 int    `json:"min_a2a_timeout_seconds" yaml:"min_a2a_timeout_seconds"`
+	RequireContractProjectRootRuntimeDir bool   `json:"require_contract_project_root_runtime_dir" yaml:"require_contract_project_root_runtime_dir"`
 	WaitForPendingA2ABeforeNextIteration *bool  `json:"wait_for_pending_a2a_before_next_iteration,omitempty" yaml:"wait_for_pending_a2a_before_next_iteration"`
 	CompletionPolicy                     string `json:"completion_policy" yaml:"completion_policy"`
 	RequireFinalArtifact                 bool   `json:"require_final_artifact" yaml:"require_final_artifact"`
@@ -48,6 +51,12 @@ type TeamGateCheckSpec struct {
 	EvidenceRequiredStatuses []string `json:"evidence_required_statuses" yaml:"evidence_required_statuses"`
 	FindingsRequiredStatuses []string `json:"findings_required_statuses" yaml:"findings_required_statuses"`
 	BlockingFindingsFail     bool     `json:"blocking_findings_fail" yaml:"blocking_findings_fail"`
+}
+
+type TeamOutputSpec struct {
+	ExportToWorkdir bool     `json:"export_to_workdir" yaml:"export_to_workdir"`
+	Directory       string   `json:"directory" yaml:"directory"`
+	Artifacts       []string `json:"artifacts" yaml:"artifacts"`
 }
 
 type TeamTaskPolicySpec struct {

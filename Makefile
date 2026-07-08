@@ -102,6 +102,8 @@ install: build
 	fi; \
 	rm -rf "$(APP_ROOT)/SYSTEM" "$(APP_ROOT)/TEAM" "$(APP_ROOT)/SKILLS" "$(APP_ROOT)/frontend"; \
 	cp -R ".Lumina/." "$(APP_ROOT)/"; \
+	cp "setup-searxng.sh" "$(APP_ROOT)/setup-searxng.sh"; \
+	chmod 0755 "$(APP_ROOT)/setup-searxng.sh"; \
 	rm -rf "$(APP_ROOT)/frontend"; \
 	mkdir -p "$(APP_ROOT)/frontend"; \
 	cp -R "frontend/dist" "frontend/node_modules" "frontend/package.json" "$(APP_ROOT)/frontend/"; \
@@ -109,6 +111,18 @@ install: build
 		mkdir -p "$(APP_ROOT)/CONFIG"; \
 		cp "$$preserved_config" "$(APP_ROOT)/CONFIG/defaults.json"; \
 		rm -f "$$preserved_config"; \
+	fi; \
+	if APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh configure; then \
+		searxng_status="configured"; \
+	else \
+		searxng_status="configure failed"; \
+		echo "Warning: SearxNG configuration failed. Run ./setup-searxng.sh configure manually."; \
+	fi; \
+	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-arxiv-mcp.sh install; then \
+		arxiv_status="configured"; \
+	else \
+		arxiv_status="configure failed"; \
+		echo "Warning: arXiv MCP setup failed. Run ./scripts/setup-arxiv-mcp.sh install manually."; \
 	fi; \
 	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then \
 		path_line='export PATH="$$HOME/.local/bin:$$PATH"'; \
@@ -142,6 +156,9 @@ install: build
 	echo "Installed $(APP_NAME) to $(INSTALL_PATH)"; \
 	echo "Installed $(BACKEND_NAME) to $(BACKEND_INSTALL_PATH)"; \
 	echo "Installed resources to $(APP_ROOT)"; \
+	echo "SearxNG WebSearch: $$searxng_status"; \
+	echo "arXiv MCP: $$arxiv_status"; \
+	echo "To start local SearxNG: ./setup-searxng.sh install"; \
 	if [ -n "$$preserved_config" ]; then \
 		echo "Preserved existing $(APP_ROOT)/CONFIG/defaults.json"; \
 	fi; \
@@ -213,6 +230,26 @@ doctor:
 		printf 'Resources:    installed\n'; \
 	else \
 		printf 'Resources:    not installed\n'; \
+	fi; \
+	if [ -f "$(APP_ROOT)/CONFIG/defaults.json" ]; then \
+		web_base="$$(python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); print(d.get("web_search_base_url",""))' "$(APP_ROOT)/CONFIG/defaults.json" 2>/dev/null || true)"; \
+		if [ -n "$$web_base" ]; then \
+			printf 'WebSearch:    %s\n' "$$web_base"; \
+			if command -v curl >/dev/null 2>&1 && curl -fsS "$$web_base/search?q=lumina&format=json" >/dev/null 2>&1; then \
+				printf 'SearxNG:      JSON API ready\n'; \
+			else \
+				printf 'SearxNG:      not reachable or JSON disabled\n'; \
+			fi; \
+		else \
+			printf 'WebSearch:    not configured\n'; \
+		fi; \
+	else \
+		printf 'WebSearch:    not configured\n'; \
+	fi; \
+	if [ -x "$(APP_ROOT)/mcp/arxiv-mcp/.venv/bin/python" ] || [ -x "$(APP_ROOT)/mcp/arxiv-mcp/.venv/Scripts/python.exe" ]; then \
+		printf 'arXiv MCP:    installed\n'; \
+	else \
+		printf 'arXiv MCP:    not installed\n'; \
 	fi; \
 	if command -v "$(APP_NAME)" >/dev/null 2>&1; then \
 		printf 'Command:      %s\n' "$$(command -v "$(APP_NAME)")"; \

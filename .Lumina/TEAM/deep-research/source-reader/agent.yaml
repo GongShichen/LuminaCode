@@ -1,0 +1,8 @@
+name: source-reader
+display_name: Source Reader
+description: Reads selected web pages and papers, extracting source-grounded notes.
+communicates_with: all
+model: inherit
+tools: read_file,write_file,grep_search,glob_match,WebSearch,WebFetch,run_shell,Skill,mcp_list_resources,mcp_read_resource,tool_search
+max_turns_per_task: 0
+private_skills: true

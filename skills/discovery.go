@@ -64,7 +64,7 @@ func (d *SkillDiscovery) FormatListing(skills []SkillSpec, budgetChars int, pres
 		}
 		return pi < pj
 	})
-	header := "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
+	header := "<system-reminder>\nThe following skills are available through the Skill tool. Invoke a skill only when the task clearly matches its description or when_to_use guidance; do not call skills just to demonstrate capability. Skill context is transient and serves only the current request unless it explicitly writes files or memory.\n\n"
 	footer := "\n</system-reminder>"
 	if budgetChars < runeLen(header)+runeLen(footer)+16 {
 		budgetChars = runeLen(header) + runeLen(footer) + 16

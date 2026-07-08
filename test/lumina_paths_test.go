@@ -58,7 +58,7 @@ Provided cwd system prompt.
 	}
 	prompt := agent.BuildSystemPrompt(nested)
 	if !strings.Contains(prompt, "Provided cwd system prompt.") ||
-		!strings.Contains(prompt, "## 环境信息") {
+		!strings.Contains(prompt, "## Environment") {
 		t.Fatalf("system prompt should be built from provided cwd Lumina assets, got %q", prompt)
 	}
 }

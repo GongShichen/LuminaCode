@@ -435,7 +435,7 @@ func TestSkillDiscoveryListingUsesPythonCharacterBudgets(t *testing.T) {
 
 	shortDesc := strings.Repeat("界", 10)
 	entry := "- unicode: " + shortDesc
-	header := "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n"
+	header := "<system-reminder>\nThe following skills are available through the Skill tool. Invoke a skill only when the task clearly matches its description or when_to_use guidance; do not call skills just to demonstrate capability. Skill context is transient and serves only the current request unless it explicitly writes files or memory.\n\n"
 	footer := "\n</system-reminder>"
 	exactCharBudget := len([]rune(header + entry + footer))
 	exactListing := discovery.FormatListing([]skills.SkillSpec{{

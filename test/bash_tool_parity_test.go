@@ -209,6 +209,30 @@ func TestBashPathValidationRejectsOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestBashPathValidationAllowsRuntimeRoot(t *testing.T) {
+	registry := coretools.NewToolRegistry(coretools.NewBashTool())
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	target := filepath.Join(runtimeDir, "nested")
+	result := registry.Execute(context.Background(), coretools.ToolCall{
+		ID: "bash-1", Name: "run_shell",
+		Input: map[string]any{
+			"command":                   "mkdir -p " + shellPath(target),
+			"dangerouslyDisableSandbox": true,
+		},
+	}, coretools.ExecutionContext{
+		"cwd":                 dir,
+		"allowed_read_roots":  []string{dir, runtimeDir},
+		"allowed_write_roots": []string{dir, runtimeDir},
+	})
+	if !strings.Contains(result.Content, "Success (exit 0)") {
+		t.Fatalf("expected runtime root command to pass, got error=%v content=%q", result.IsError, result.Content)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("runtime target was not created: %v", err)
+	}
+}
+
 func TestBashInterpretsGrepNoMatchAsNonError(t *testing.T) {
 	registry := coretools.NewToolRegistry(coretools.NewBashTool())
 	dir := t.TempDir()

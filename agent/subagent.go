@@ -190,7 +190,8 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 		currentMessageID := ""
 		outputTruncated := false
 
-		for result := range client.StreamChat(ctx, systemPrompt, prepareSubagentAPIMessages(messages), toolSchemas, nil) {
+		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(s.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+		for result := range client.StreamChat(streamCtx, systemPrompt, prepareSubagentAPIMessages(messages), toolSchemas, nil) {
 			if result.Err != nil {
 				if ctx.Err() != nil {
 					return s.contextStopResult(sessionState, fullText, ctx.Err())
@@ -376,7 +377,8 @@ func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessi
 		return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
 	}
 	fullText := ""
-	for result := range client.StreamChat(ctx, sessionState.SystemPrompt, prepareSubagentAPIMessages(messages), nil, nil) {
+	streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(s.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+	for result := range client.StreamChat(streamCtx, sessionState.SystemPrompt, prepareSubagentAPIMessages(messages), nil, nil) {
 		if result.Err != nil {
 			return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
 		}
@@ -513,7 +515,9 @@ func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
 		"cwd":                     s.Config.CWD,
 		"config":                  s.Config,
 		"runtime_dir":             s.Config.ProjectRuntimeDir,
-		"allowed_read_roots":      []string{s.Config.CWD},
+		"web_search_scope":        s.Config.WebSearchCacheScope,
+		"allowed_read_roots":      compactToolRoots(s.Config.CWD, s.Config.ProjectRuntimeDir),
+		"allowed_write_roots":     compactToolRoots(s.Config.CWD, s.Config.ProjectRuntimeDir),
 		"parent_state":            s.ParentState,
 		"_registry":               s.Registry,
 		"_pending_skill_messages": []map[string]any{},

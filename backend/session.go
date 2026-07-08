@@ -87,6 +87,18 @@ func (m *SessionManager) Count() int {
 	return len(m.sessions)
 }
 
+func (m *SessionManager) Shutdown() {
+	m.mu.Lock()
+	sessions := make([]*SessionController, 0, len(m.sessions))
+	for _, controller := range m.sessions {
+		sessions = append(sessions, controller)
+	}
+	m.mu.Unlock()
+	for _, controller := range sessions {
+		controller.Shutdown()
+	}
+}
+
 func (m *SessionManager) createWithState(sessionID, cwd string, state *agent.AgentState) (*SessionController, error) {
 	cfg := m.baseConfig
 	if strings.TrimSpace(cwd) != "" && cwd != cfg.CWD {
@@ -254,6 +266,13 @@ func (c *SessionController) Abort() {
 	c.emitStatus("aborted", nil)
 }
 
+func (c *SessionController) Shutdown() {
+	c.Abort()
+	if c.engine != nil {
+		c.engine.Shutdown()
+	}
+}
+
 func (c *SessionController) Clear() {
 	c.Abort()
 	c.engine.Reset()
@@ -330,6 +349,14 @@ func (c *SessionController) Tokens() map[string]any {
 }
 
 func (c *SessionController) ToggleYolo() map[string]any {
+	return c.setYolo(!c.RuntimeConfig().Yolo)
+}
+
+func (c *SessionController) SetYolo(enabled bool) map[string]any {
+	return c.setYolo(enabled)
+}
+
+func (c *SessionController) setYolo(enabled bool) map[string]any {
 	c.stateMu.Lock()
 	state := c.state
 	if state == nil {
@@ -340,7 +367,6 @@ func (c *SessionController) ToggleYolo() map[string]any {
 	if state.PermissionState == nil {
 		state.PermissionState = security.DefaultPermissionState()
 	}
-	enabled := !state.PermissionState.YoloMode
 	state.PermissionState.YoloMode = enabled
 	c.cfg.Yolo = enabled
 	if c.engine != nil {

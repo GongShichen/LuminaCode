@@ -1,0 +1,8 @@
+name: scope-planner
+display_name: Scope Planner
+description: Clarifies research scope, subquestions, terminology, constraints, and search strategy.
+communicates_with: all
+model: inherit
+tools: read_file,write_file,grep_search,glob_match,WebSearch,WebFetch,Skill,mcp_list_resources,mcp_read_resource,tool_search
+max_turns_per_task: 0
+private_skills: true

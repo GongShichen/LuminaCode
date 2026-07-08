@@ -100,7 +100,7 @@ func (e *SkillExecutor) BuildInlineSkillMessage(skill SkillSpec, prompt string, 
 	sanitized := regexp.MustCompile(`(?i)</?system[-_]reminder[^>]*>`).ReplaceAllString(prompt, "")
 	sanitized = strings.TrimSpace(sanitized)
 	text := "<system-reminder>\n" +
-		"Skill '" + skill.CanonicalName + "' (" + sourceLabel + ") is active for this turn.\n\n" +
+		"Skill '" + skill.CanonicalName + "' (" + sourceLabel + ") is active for this turn. Treat this as transient task context; follow it only where it helps the current user request and do not carry it into unrelated future turns.\n\n" +
 		sanitized + "\n</system-reminder>"
 	return map[string]any{
 		"role":    "user",

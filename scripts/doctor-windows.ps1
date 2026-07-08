@@ -62,6 +62,8 @@ $frontend = Join-Path $AppRoot "frontend\dist\index.js"
 $systemPrompt = Join-Path $AppRoot "SYSTEM\system-prompt.md"
 $skills = Join-Path $AppRoot "SKILLS"
 $defaults = Join-Path $AppRoot "CONFIG\defaults.json"
+$mcpConfig = Join-Path $AppRoot "CONFIG\mcp.json"
+$arxivPython = Join-Path $AppRoot "mcp\arxiv-mcp\.venv\Scripts\python.exe"
 $endpoint = Join-Path $HOME ".lumina\run\backend.json"
 $command = Get-Command lumina -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -81,4 +83,24 @@ Status-Line "Frontend" ($(if (Test-Path $frontend) { $frontend } else { "missing
 Status-Line "System prompt" ($(if (Test-Path $systemPrompt) { $systemPrompt } else { "missing" }))
 Status-Line "Skills" ($(if (Test-Path $skills) { $skills } else { "missing" }))
 Status-Line "Defaults" ($(if (Test-Path $defaults) { $defaults } else { "not configured" }))
+if (Test-Path $defaults) {
+    try {
+        $defaultsJson = Get-Content -LiteralPath $defaults -Raw | ConvertFrom-Json
+        $webBase = [string]$defaultsJson.web_search_base_url
+        Status-Line "WebSearch" ($(if ($webBase) { $webBase } else { "not configured" }))
+        if ($webBase) {
+            try {
+                Invoke-WebRequest -Uri "$webBase/search?q=lumina&format=json" -UseBasicParsing -TimeoutSec 5 | Out-Null
+                Status-Line "SearxNG" "JSON API ready"
+            } catch {
+                Status-Line "SearxNG" "not reachable or JSON disabled"
+            }
+        }
+    } catch {
+        Status-Line "WebSearch" "defaults parse failed"
+    }
+} else {
+    Status-Line "WebSearch" "not configured"
+}
+Status-Line "arXiv MCP" ($(if ((Test-Path $arxivPython) -and (Test-Path $mcpConfig)) { "installed" } else { "not installed" }))
 Status-Line "Endpoint" ($(if (Test-Path $endpoint) { $endpoint } else { "not running" }))

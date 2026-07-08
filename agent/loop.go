@@ -139,6 +139,8 @@ func (e *CoreExecutionEngine) RegisterDefaultTools() {
 	e.Registry.Register(coretools.NewNotebookEditTool())
 	e.Registry.Register(coretools.NewGrepSearchTool())
 	e.Registry.Register(coretools.NewGlobMatchTool())
+	e.Registry.Register(coretools.NewWebSearchTool())
+	e.Registry.Register(coretools.NewWebFetchTool())
 	e.Registry.Register(coretools.NewBashTool())
 	e.Registry.Register(NewAgentTool())
 	e.Registry.Register(NewTaskListTool())
@@ -222,6 +224,11 @@ func (e *CoreExecutionEngine) maybePromptMCPTrust(ctx context.Context, out chan<
 		e.mcpMu.Unlock()
 		return
 	}
+	if e.Config.Yolo {
+		e.mcpMu.Unlock()
+		e.applyMCPTrustDecision(pending, true)
+		return
+	}
 	ch := make(chan bool, 1)
 	e.mu.Lock()
 	e.mcpTrustCh = ch
@@ -245,6 +252,10 @@ func (e *CoreExecutionEngine) maybePromptMCPTrust(ctx context.Context, out chan<
 	}
 	e.clearMCPTrustFuture(ch)
 
+	e.applyMCPTrustDecision(pending, granted)
+}
+
+func (e *CoreExecutionEngine) applyMCPTrustDecision(pending []map[string]any, granted bool) {
 	e.mcpMu.Lock()
 	defer e.mcpMu.Unlock()
 	if e.mcpContext == nil {
@@ -535,10 +546,11 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"cwd":                     e.Config.CWD,
 			"config":                  e.Config,
 			"runtime_dir":             e.Config.ProjectRuntimeDir,
+			"web_search_scope":        e.Config.WebSearchCacheScope,
 			"_session_id":             e.SessionID,
 			"_agent_id":               e.sessionMemoryAgentID(),
-			"allowed_read_roots":      []string{e.Config.CWD},
-			"allowed_write_roots":     []string{e.Config.CWD},
+			"allowed_read_roots":      compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
+			"allowed_write_roots":     compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
 			"_registry":               activeRegistry,
 			"parent_state":            state,
 			"task_runtime":            e.TaskRuntime,
@@ -579,7 +591,8 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		if len(requestOptions.AnthropicCacheEdits) == 0 {
 			requestOptions = nil
 		}
-		for result := range client.StreamChat(ctx, state.SystemPrompt, messages, activeRegistry.GetAPISchemas(), requestOptions) {
+		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(e.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+		for result := range client.StreamChat(streamCtx, state.SystemPrompt, messages, activeRegistry.GetAPISchemas(), requestOptions) {
 			if result.Err != nil {
 				if ctx.Err() != nil || e.isAborted() {
 					e.restoreInFlightCacheEdits()
@@ -1492,7 +1505,7 @@ func BuildSystemPrompt(cwd string) string {
 	if err == nil && strings.TrimSpace(prompt) != "" {
 		return prompt
 	}
-	return "You are LuminaCode, a coding agent. Work in the current directory: " + cwd
+	return "You are LuminaCode, a general-purpose local agent. Work in the current directory: " + cwd
 }
 
 func insertBeforeCurrentUserMessage(state *AgentState, message map[string]any) {
@@ -1543,6 +1556,26 @@ func sendStream(ctx context.Context, out chan<- StreamEvent, event StreamEvent) 
 	case out <- event:
 		return true
 	}
+}
+
+func compactToolRoots(values ...string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(value); err == nil {
+			value = abs
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func ClonePermissionState(state *security.PermissionState) *security.PermissionState {

@@ -1,0 +1,8 @@
+name: qa
+display_name: Citation QA
+description: Verifies citation coverage, source accessibility, artifact completeness, and evidence consistency.
+communicates_with: all
+model: inherit
+tools: read_file,write_file,grep_search,glob_match,WebSearch,WebFetch,Skill,mcp_list_resources,mcp_read_resource,tool_search
+max_turns_per_task: 0
+private_skills: true

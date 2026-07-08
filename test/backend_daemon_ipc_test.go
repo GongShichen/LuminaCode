@@ -416,6 +416,30 @@ func TestBackendDaemonSessionYoloTogglesCurrentSessionState(t *testing.T) {
 	mustStopDaemon(t, errCh)
 }
 
+func TestBackendDaemonSessionCreateCanStartInYoloMode(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.NewConfigForCWD(root)
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endpointPath := filepath.Join(root, "run", "backend.json")
+	errCh := startTestDaemon(t, ctx, cfg, endpointPath)
+	conn := dialEndpoint(t, waitForEndpoint(t, endpointPath))
+	defer conn.Close()
+
+	writeRPC(t, conn, "create-yolo", "session.create", map[string]any{"cwd": root, "yolo": true})
+	created := waitForRPCOK(t, conn, "create-yolo")
+	var snapshot backend.SessionSnapshot
+	decodeResult(t, created.Result, &snapshot)
+	state := session.NewStore(cfg.SessionDir).LoadState(snapshot.SessionID)
+	if state == nil || state.PermissionState == nil || !state.PermissionState.YoloMode {
+		t.Fatalf("expected session.create yolo=true to persist yolo state, snapshot=%#v state=%#v", snapshot, state)
+	}
+
+	cancel()
+	mustStopDaemon(t, errCh)
+}
+
 func waitForEndpoint(t *testing.T, path string) backend.EndpointInfo {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
