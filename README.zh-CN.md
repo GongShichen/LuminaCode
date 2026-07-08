@@ -43,7 +43,14 @@ LuminaCode 的重点不是“和模型聊天”，而是给模型提供一个真
 安装 CLI：
 
 ```sh
+# macOS/Linux
 make install
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
 
 进入任意项目目录启动：
@@ -85,6 +92,9 @@ export LUMINA_API_BASE_URL="https://api.deepseek.com/anthropic"
 export LUMINA_API_MODEL="deepseek-v4-pro[1m]"
 export LUMINA_API_TYPE="anthropic"
 ```
+
+也兼容通用的 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_DEFAULT_MODEL` 和
+`LLM_API_TYPE` 环境变量；如果两套变量同时存在，`LUMINA_*` 优先。
 
 也可以在启动时传参：
 
@@ -260,22 +270,42 @@ lumina-backend daemon --host 127.0.0.1 --port 0
 
 ## 安装与卸载
 
-安装：
+macOS/Linux 安装：
 
 ```sh
 make install
 ```
 
-检查安装路径和 shell 配置：
+Windows PowerShell 安装：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+```
+
+Windows 安装脚本会构建 `lumina-backend.exe`、构建 TypeScript 前端、安装 `lumina.cmd` 启动器、复制资源到 `%USERPROFILE%\.lumina`，并默认把安装目录加入用户 `PATH`。
+
+macOS/Linux 检查安装路径和 shell 配置：
 
 ```sh
 make doctor
 ```
 
-卸载：
+Windows 检查：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-windows.ps1
+```
+
+macOS/Linux 卸载：
 
 ```sh
 make uninstall
+```
+
+Windows 卸载：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.ps1
 ```
 
 `make uninstall` 会删除已安装的 `lumina`、`lumina-backend` 命令和 `~/.lumina` 资源目录。它不会修改 shell rc 文件，也不会删除项目目录下的 `.Lumina` 数据。
@@ -292,13 +322,22 @@ npm --prefix frontend test
 构建：
 
 ```sh
+# macOS/Linux
 make build
 ```
 
 本地安装：
 
 ```sh
+# macOS/Linux
 make install
+```
+
+Windows 从源码构建并运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
+.\tmp\lumina.cmd --help
 ```
 
 ## 目录结构

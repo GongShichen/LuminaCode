@@ -218,7 +218,7 @@ func TestBashInterpretsGrepNoMatchAsNonError(t *testing.T) {
 	}
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "bash-1", Name: "run_shell",
-		Input: map[string]any{"command": "grep nomatch " + path, "dangerouslyDisableSandbox": true},
+		Input: map[string]any{"command": "grep nomatch " + shellPath(path), "dangerouslyDisableSandbox": true},
 	}, coretools.ExecutionContext{"cwd": dir})
 	if !strings.Contains(result.Content, "[Exit code: 1") ||
 		!strings.Contains(result.Content, "No match found (not an error)") {
@@ -300,7 +300,7 @@ func TestBashBackgroundDescriptionUsesPythonCharacterSlice(t *testing.T) {
 func TestBashLargeUnicodeOutputTruncatesWithPythonDecodeReplacement(t *testing.T) {
 	registry := coretools.NewToolRegistry(coretools.NewBashTool())
 	dir := t.TempDir()
-	command := `python3 -c "import sys; sys.stdout.write('测' * ((5*1024*1024)//3+2))"`
+	command := `PYTHONIOENCODING=utf-8 ` + pythonCommandName() + ` -c "import sys; sys.stdout.write('\u6d4b' * ((5*1024*1024)//3+2))"`
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "bash-large-unicode", Name: "run_shell",
 		Input: map[string]any{"command": command, "dangerouslyDisableSandbox": true},

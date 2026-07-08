@@ -69,7 +69,14 @@ to `lumina-backend` and do not depend on the interactive frontend.
 Install the CLI:
 
 ```sh
+# macOS/Linux
 make install
+```
+
+On Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
 
 Start LuminaCode from any project directory:
@@ -113,6 +120,10 @@ export LUMINA_API_BASE_URL="https://api.deepseek.com/anthropic"
 export LUMINA_API_MODEL="deepseek-v4-pro[1m]"
 export LUMINA_API_TYPE="anthropic"
 ```
+
+LuminaCode also accepts the generic `LLM_API_KEY`, `LLM_BASE_URL`,
+`LLM_DEFAULT_MODEL`, and `LLM_API_TYPE` environment variables. If both sets are
+present, `LUMINA_*` takes precedence.
 
 Equivalent runtime flags:
 
@@ -303,22 +314,45 @@ TypeScript `lumina` frontend; headless use goes through `lumina` passthrough or
 
 ## Installation
 
-Install:
+Install on macOS/Linux:
 
 ```sh
 make install
 ```
 
-Inspect detected paths and shell setup:
+Install on Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+```
+
+The Windows installer builds `lumina-backend.exe`, builds the TypeScript
+frontend, installs a `lumina.cmd` launcher, copies bundled resources to
+`%USERPROFILE%\.lumina`, and adds the install directory to the user `PATH`
+unless `-NoPathUpdate` is passed.
+
+Inspect detected paths and shell setup on macOS/Linux:
 
 ```sh
 make doctor
 ```
 
-Uninstall:
+Inspect the Windows install:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-windows.ps1
+```
+
+Uninstall on macOS/Linux:
 
 ```sh
 make uninstall
+```
+
+Uninstall on Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.ps1
 ```
 
 `make uninstall` removes the installed `lumina` and `lumina-backend` commands
@@ -337,13 +371,22 @@ npm --prefix frontend test
 Build:
 
 ```sh
+# macOS/Linux
 make build
 ```
 
 Install locally:
 
 ```sh
+# macOS/Linux
 make install
+```
+
+Build and run from the source tree on Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
+.\tmp\lumina.cmd --help
 ```
 
 ## Repository Layout

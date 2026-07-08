@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os/exec"
 	"time"
+
+	bashpkg "LuminaCode/tools/bash"
 )
 
 func RunShellCommand(ctx context.Context, dir string, command string, timeout time.Duration) CommandResult {
@@ -15,7 +17,8 @@ func RunShellCommand(ctx context.Context, dir string, command string, timeout ti
 	start := time.Now()
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
+	argv := bashpkg.ShellArgv(command, "")
+	cmd := exec.CommandContext(cmdCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

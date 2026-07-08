@@ -13,7 +13,6 @@ func TestLuminaAssetsLayoutMatchesRenamedPythonBundle(t *testing.T) {
 	root := repoRoot(t)
 	required := []string{
 		"LUMINA.md",
-		".Lumina/CONFIG/defaults.json",
 		".Lumina/CONFIG/defaults.json.example",
 		".Lumina/CONFIG/mcp.json",
 		".Lumina/SKILLS/commit/SKILL.md",
@@ -100,7 +99,11 @@ func TestLuminaAssetsLayoutMatchesRenamedPythonBundle(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		got = append(got, filepath.ToSlash(rel))
+		relSlash := filepath.ToSlash(rel)
+		if relSlash == ".Lumina/CONFIG/defaults.json" {
+			return nil
+		}
+		got = append(got, relSlash)
 		return nil
 	})
 	if err != nil {

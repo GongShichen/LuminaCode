@@ -115,16 +115,24 @@ func (l *SkillLoader) loadDirectory(root string, source SkillSource) []SkillSpec
 
 func expandSkillHome(path string) string {
 	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home := skillHomeDir(); home != "" {
 			return home
 		}
 	}
 	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home := skillHomeDir(); home != "" {
 			return filepath.Join(home, path[2:])
 		}
 	}
 	return path
+}
+
+func skillHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 func uniqueExistingOrder(paths []string) []string {

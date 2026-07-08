@@ -110,6 +110,32 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestConfigAcceptsLLMEnvironmentFallbacks(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	t.Setenv("LUMINA_HOME", "")
+	t.Setenv("LUMINA_API_KEY", "")
+	t.Setenv("LUMINA_API_BASE_URL", "")
+	t.Setenv("LUMINA_API_MODEL", "")
+	t.Setenv("LUMINA_API_TYPE", "")
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")
+	t.Setenv("ANTHROPIC_MODEL", "anthropic-model")
+	t.Setenv("LLM_API_KEY", "llm-key")
+	t.Setenv("LLM_BASE_URL", "https://llm.example")
+	t.Setenv("LLM_DEFAULT_MODEL", "llm-model")
+	t.Setenv("LLM_API_TYPE", "openai_compatible")
+
+	cfg := config.NewConfig()
+	if cfg.APIKey != "llm-key" ||
+		cfg.APIBaseURL != "https://llm.example" ||
+		cfg.APIModel != "llm-model" ||
+		cfg.APIType != "openai_compatible" {
+		t.Fatalf("LLM_* environment fallbacks were not applied: %#v", cfg)
+	}
+}
+
 func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc --outDir dist && chmod +x dist/index.js",
+    "build": "tsc --outDir dist",
     "test": "tsc --noEmit"
   },
   "dependencies": {

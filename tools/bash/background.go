@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -290,6 +289,14 @@ func (m *BackgroundManager) runTask(
 	}
 	err := cmd.Start()
 	if err != nil {
+		if hasTimeout && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			timeoutSeconds := formatDurationSeconds(timeout)
+			output := fmt.Sprintf("[Command timed out after %ss]\nCommand: %s\n", timeoutSeconds, task.Command)
+			_ = os.WriteFile(task.OutputPath, []byte(output), 0o644)
+			_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o644)
+			m.finishTask(task.TaskID, "failed", nil)
+			return
+		}
 		_ = os.WriteFile(task.ErrorPath, []byte("Background task crashed: "+err.Error()), 0o644)
 		m.finishTask(task.TaskID, "failed", nil)
 		return
@@ -348,17 +355,12 @@ func AutoBackgroundIfBlocking(startTime time.Time, manager *BackgroundManager, c
 }
 
 func shellCommand(ctx context.Context, command string) *exec.Cmd {
-	argv := ShellCommandArgs(command)
+	argv := ShellArgv(command, "")
 	return exec.CommandContext(ctx, argv[0], argv[1:]...)
 }
 
 func prepareProcessGroup(cmd *exec.Cmd) {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	prepareProcessGroupForPlatform(cmd)
 }
 
 func PrepareProcessGroup(cmd *exec.Cmd) {
@@ -366,21 +368,7 @@ func PrepareProcessGroup(cmd *exec.Cmd) {
 }
 
 func TerminateProcessTree(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	if runtime.GOOS == "windows" {
-		_ = exec.Command("taskkill", "/PID", strconv.Itoa(cmd.Process.Pid), "/T", "/F").Run()
-		return
-	}
-	pigid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err == nil {
-		_ = syscall.Kill(-pigid, syscall.SIGTERM)
-		time.Sleep(5 * time.Second)
-		_ = syscall.Kill(-pigid, syscall.SIGKILL)
-		return
-	}
-	_ = cmd.Process.Kill()
+	terminateProcessTreeForPlatform(cmd)
 }
 
 func terminateProcessTree(cmd *exec.Cmd) {

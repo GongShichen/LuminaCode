@@ -400,7 +400,7 @@ func DiscoverProjectDocs(cwd string, cfg config.Config) (ProjectDocDiscoveryResu
 		return result, nil
 	}
 
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	if home := instructionHomeDir(); home != "" {
 		doc, homeErr := readProjectInstructionFileWithOptions(filepath.Join(home, ".lumina"), cfg.ProjectDocFilenamesOrDefault(), cfg.ProjectDocMaxBytesOrDefault())
 		if homeErr == nil {
 			result.Docs = []ProjectDoc{doc}
@@ -409,6 +409,14 @@ func DiscoverProjectDocs(cwd string, cfg config.Config) (ProjectDocDiscoveryResu
 		}
 	}
 	return result, nil
+}
+
+func instructionHomeDir() string {
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		return home
+	}
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 func findLuminaProjectRoot(cwd string) (string, error) {

@@ -44,7 +44,7 @@ func GetAgentMemoryDirectories(agentType, projectRoot string) []AgentMemoryScope
 	safeType := SanitizeAgentTypeForPath(agentType)
 	root := ResolveAgentMemoryProjectRoot(projectRoot)
 	runtimeRoot := config.ProjectRuntimeDir(root)
-	home, _ := os.UserHomeDir()
+	home := memoryHomeDir()
 	return []AgentMemoryScope{
 		{Name: "user", Path: filepath.Join(home, ".Lumina", "agent-memory", safeType)},
 		{Name: "project", Path: filepath.Join(runtimeRoot, "agent-memory", safeType)},

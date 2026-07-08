@@ -50,11 +50,23 @@ export function shouldPassthrough(args: string[]): boolean {
 
 export function backendBin(): string {
   if (process.env.LUMINA_BACKEND_BIN) return process.env.LUMINA_BACKEND_BIN;
-  const sibling = path.join(__dirname, "lumina-backend");
-  if (fs.existsSync(sibling)) return sibling;
-  const binSibling = path.join(path.dirname(process.argv[1] || ""), "lumina-backend");
-  if (fs.existsSync(binSibling)) return binSibling;
-  return "lumina-backend";
+  const searchDirs = [__dirname];
+  const argvScript = process.argv[1] || "";
+  if (argvScript) searchDirs.push(path.dirname(argvScript));
+  for (const dir of searchDirs) {
+    for (const name of backendExecutableNames()) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return process.platform === "win32" ? "lumina-backend.exe" : "lumina-backend";
+}
+
+function backendExecutableNames(): string[] {
+  if (process.platform === "win32") {
+    return ["lumina-backend.exe", "lumina-backend"];
+  }
+  return ["lumina-backend", "lumina-backend.exe"];
 }
 
 export function runBackendPassthrough(args: string[]): void {
