@@ -2,44 +2,22 @@
 
 [简体中文](README.zh-CN.md)
 
-LuminaCode is a terminal-first coding agent with a Go backend runtime and a
-TypeScript terminal frontend. It works inside the current project directory,
-builds context from local files and project instructions, uses tools with
-permission checks, and keeps sessions resumable across long-running development
-work.
-
-The goal is not only to chat with a model, but to give the model an agent
-runtime: project context, skills, tools, memory, MCP integrations, session
-state, and safety boundaries.
+LuminaCode is a local general-purpose Agent. It uses a Go backend and a
+TypeScript TUI, with project context, tools, skills, MCP, memory, sessions, and
+Agent Teams.
 
 ## Agent Capabilities
 
-- Understands the current project directory and uses it as the default working
-  root.
-- Reads project instructions from `LUMINA.md` or `AGENTS.md`, with a fallback to
-  user-level instructions under `~/.lumina`.
-- Loads reusable skills from project, user, legacy project, and bundled skill
-  directories.
-- Injects selected skill context into model requests without polluting the
-  visible dialogue.
-- Executes file and shell tools with permission prompts and safety checks.
-- Supports MCP servers declared by the project and stores trusted server
-  fingerprints under the project root.
-- Maintains session state, message history, tool results, and recovery data so
-  sessions can be resumed.
-- Stores each session in its own session directory, including transcript,
-  state, task, skill-recovery, and session-memory data.
-- Tracks context-window usage and uses the configured context limit for local
-  compression decisions.
+- Uses the launch directory as the default project root.
+- Reads `LUMINA.md` / `AGENTS.md`, with user-level fallback under `~/.lumina`.
+- Loads project, user, and bundled skills.
+- Runs file, shell, web, MCP, memory, and task tools with permission controls.
+- Keeps resumable sessions with transcript, state, tasks, tool results, skill
+  recovery, and session memory.
 - Supports OpenAI-compatible and Anthropic-compatible streaming APIs.
-- Preserves provider error details, including status codes and raw response
-  bodies, for easier debugging.
-- Separates user-visible conversation from internal reasoning, tool calls, tool
-  results, and other runtime records.
-- Supports sub-agents with explicit per-call timeouts and graceful timeout
-  finalization.
-- Provides headless execution and benchmark harness modes without requiring the
-  interactive frontend.
+- Keeps visible chat separate from tool payloads, tool results, and runtime
+  records.
+- Supports sub-agents, Agent Teams, headless mode, and benchmark harnesses.
 
 ## Architecture
 
@@ -49,20 +27,115 @@ The installed command is split into two processes:
 - `lumina-backend`: the Go runtime that owns agent execution, tools, skills,
   MCP, memory, sessions, and headless/benchmark modes.
 
-Interactive sessions communicate with the backend over a localhost WebSocket.
-The backend endpoint is written to:
+Interactive sessions use localhost WebSocket:
 
 ```text
 ~/.lumina/run/backend.json
 ```
 
-The backend only listens on `127.0.0.1` and WebSocket connections must carry the
-generated auth token. Multiple sessions can exist at the same time; each session
-has independent runtime state, and only one active submit is allowed within a
-single session.
+The backend listens on `127.0.0.1`, requires an auth token, supports multiple
+sessions, and serializes submits within each session. Headless paths are handled
+by `lumina-backend`.
 
-Single-shot prompts, session listing, and benchmark/headless paths are forwarded
-to `lumina-backend` and do not depend on the interactive frontend.
+## Agent Team
+
+Agent Team mode runs a task through isolated specialist agents. Each member has
+its own prompt, skills, context, task state, and A2A inbox/outbox while sharing
+the same backend runtime and tool system.
+
+Commands:
+
+```text
+/Team      choose an installed team and enter Team mode
+/TeamOut   leave Team mode
+/NewTeam   create a new editable team template
+```
+
+The TUI shows Team dialogue as a group chat. Raw tool payloads, full tool
+results, MCP payloads, and hidden reasoning stay in runtime logs.
+
+Runtime summary:
+
+- Loop: observe -> plan -> dispatch -> agent work -> collect -> gate -> finalize.
+- Stop policy: user interrupt or task complete.
+- Failures become recovery inputs for the next loop.
+- Ordinary Agent context and Team Agent contexts remain isolated.
+
+```text
+{session_dir}/{parent_session_id}/teams/{team_session_id}/
+{session_dir}/{parent_session_id}/teams/{team_session_id}/agents/{agent_id}/
+~/.lumina/project/{project_root_name}/teams/{team_name}/{team_session_id}/
+```
+
+### Built-in Teams
+
+Installed under `~/.lumina/TEAM/`:
+
+- `product-development`: full-stack delivery with `team-leader`, `research`,
+  `frontend`, `backend`, `qa`, `reviewer`, `devops`, and `ux-design`. Uses
+  contract, QA, reviewer, task-policy, and follow-up/deferral gates.
+- `deep-research`: research team with `team-leader`, `scope-planner`,
+  `search-strategist`, `source-reader`, `evidence-analyst`, `report-writer`,
+  `qa`, and `reviewer`. Uses SearxNG `WebSearch` / `WebFetch` and arXiv MCP;
+  can export report and evidence files.
+
+### Creating a Team
+
+`/NewTeam` asks for a display name and creates:
+
+```text
+~/.lumina/TEAM/{team_name}/
+├── team.yaml
+├── team-system.md
+├── shared-prompt.md
+├── completion-policy.md
+└── team-leader/
+    ├── agent.yaml
+    ├── system.md
+    └── skills/
+```
+
+The template starts with only `team-leader`. Add new agent directories and list
+their ids in `team.yaml`.
+
+### Team Configuration
+
+Minimal `team.yaml` shape:
+
+```yaml
+name: my-team
+display_name: My Team
+entry_agent: team-leader
+loop:
+  max_iterations: 0
+  max_parallel_agents: 2
+  completion_policy: team_leader_only
+  stop_policy: user_interrupt_or_task_complete_only
+gates:
+  require_contract: false
+  checks: []
+transcript:
+  show_member_dialogue: true
+  show_tool_details: false
+  show_thinking: false
+agents:
+  - team-leader
+```
+
+Agent `agent.yaml`:
+
+```yaml
+name: team-leader
+display_name: Team Leader
+communicates_with: all
+model: inherit
+tools: inherit
+max_turns_per_task: 0
+private_skills: true
+```
+
+`communicates_with` can be `all` or a list of agent ids. Private skills live in
+that agent's `skills/` directory.
 
 ## Quick Start
 
@@ -86,33 +159,30 @@ cd /path/to/project
 lumina
 ```
 
-Run a single prompt and exit:
+Single prompt:
 
 ```sh
 lumina -p "Summarize this repository"
 ```
 
-List saved sessions:
+List sessions:
 
 ```sh
 lumina --list
 ```
 
-Resume a saved session:
+Resume:
 
 ```sh
 lumina --resume <session-id>
 ```
 
-By default, the working directory is the directory where `lumina` is started.
-You usually do not need to pass `--cwd`.
+The launch directory is the default working directory.
 
 ## API Configuration
 
-LuminaCode does not hard-code a default model. Configure the provider through
-environment variables, command-line flags, or installed defaults.
-
-Example environment variables:
+No default model is hard-coded. Configure via env, flags, or
+`~/.lumina/CONFIG/defaults.json`:
 
 ```sh
 export LUMINA_API_KEY="..."
@@ -121,11 +191,7 @@ export LUMINA_API_MODEL="deepseek-v4-pro[1m]"
 export LUMINA_API_TYPE="anthropic"
 ```
 
-LuminaCode also accepts the generic `LLM_API_KEY`, `LLM_BASE_URL`,
-`LLM_DEFAULT_MODEL`, and `LLM_API_TYPE` environment variables. If both sets are
-present, `LUMINA_*` takes precedence.
-
-Equivalent runtime flags:
+Generic `LLM_*` variables are also accepted; `LUMINA_*` wins. Equivalent flags:
 
 ```sh
 lumina \
@@ -136,59 +202,34 @@ lumina \
   --max-tokens 1000000
 ```
 
-Supported API type values:
+`--api-type`: `anthropic`, `openai_compatible`, or `auto`.
 
-- `anthropic`
-- `openai_compatible`
-- `auto`
-
-`--max-tokens` represents the model context-window size used by LuminaCode for
-local accounting and compression thresholds. The local compression threshold is
-`80%` of that value.
-
-LuminaCode does not force a provider-side completion `max_tokens` parameter into
-API requests.
-
-The installed defaults file is:
-
-```text
-~/.lumina/CONFIG/defaults.json
-```
-
-LuminaCode reloads runtime configuration before each agent turn, so edits to
-this file can affect new requests without reinstalling.
+`--max-tokens` is the local context-window size used for accounting and the 80%
+compression threshold. LuminaCode does not force provider-side completion
+`max_tokens`. Runtime config is hot-read before each agent turn.
 
 ## Project Instructions
 
-LuminaCode first checks the current working directory for:
+Read order:
 
-1. `LUMINA.md`
-2. `AGENTS.md`
+1. `{cwd}/LUMINA.md`
+2. `{cwd}/AGENTS.md`
+3. `~/.lumina/LUMINA.md`
+4. `~/.lumina/AGENTS.md`
 
-If neither file exists, it falls back to:
-
-1. `~/.lumina/LUMINA.md`
-2. `~/.lumina/AGENTS.md`
-
-These files are optional. Use them to document repository conventions, testing
-commands, coding style, tool restrictions, or domain-specific guidance.
+All files are optional.
 
 ## Skills
 
-Skills are reusable instruction packages stored in `SKILL.md` files. LuminaCode
-loads them from:
+Skills are `SKILL.md` instruction packages loaded from:
 
 - `{project_root}/skills/`
 - `{project_root}/.Lumina/PROJECT_SKILLS/`
 - `~/.lumina/skills/`
 - `~/.lumina/SKILLS/`
 
-A skill can provide focused behavior such as code review, repository analysis,
-paper writing, experiment execution, or project-specific workflows. When a skill
-is invoked, its processed prompt is injected into the model context for that
-turn while remaining separate from the visible chat transcript.
-
-Example invocation:
+Invoked skill context is injected into the model request without entering the
+visible transcript.
 
 ```text
 /review inspect the authentication flow
@@ -196,72 +237,55 @@ Example invocation:
 
 ## Tools and Permissions
 
-LuminaCode gives the model access to local capabilities through tools. Built-in
-tools cover common coding-agent needs such as reading files, editing files,
-running shell commands, managing tasks, and interacting with memory.
-
-Tool execution is guarded by permission logic. Risky operations can require
-human approval before they run. Project MCP servers also require trust approval
-before their tools are exposed.
+Tools cover file edits, shell, tasks, memory, web search/fetch, and MCP. Risky
+operations and project MCP servers can require approval.
 
 ## MCP
 
-Project MCP servers can be configured with `.mcp.json`. LuminaCode prompts
-before trusting project MCP servers and stores accepted fingerprints in:
+Project MCP config: `.mcp.json`. Trust records:
 
 ```text
 ~/.lumina/project/{project_root_name}/CONFIG/trusted_mcp.json
 ```
 
-Use `/mcp` during an interactive session to inspect registered MCP tools.
+Use `/mcp` to inspect registered MCP tools.
 
 ## Sessions and Runtime Data
 
-LuminaCode keeps enough runtime state to resume previous sessions, including
-messages, tool results, task recovery data, and skill recovery metadata.
-
-Installed resources live under:
+Installed resources:
 
 ```text
 ~/.lumina/
 ```
 
-Common installed resources:
-
 - `CONFIG/defaults.json`
 - `SYSTEM/system-prompt.md`
 - `SYSTEM/extraction_system.md`
 - `SKILLS/`
+- `TEAM/`
 - `frontend/`
 
-Project-scoped runtime data generated by LuminaCode lives under:
+Project runtime data:
 
 ```text
 ~/.lumina/project/{project_root_name}/
 ```
-
-Common project-scoped runtime data:
 
 - `CONFIG/trusted_mcp.json`
 - `agent-memory/`
 - `agent-memory-local/`
 - `background/tool-results/`
 
-Project-authored resources can still live in the project, for example:
+Project-authored resources:
 
 - `{project_root}/skills/`
 - `{project_root}/.Lumina/PROJECT_SKILLS/`
 
-Session history lives under the configured `session_dir`. The built-in default is
-`~/.lumina/sessions`; installed configuration can override it through
-`~/.lumina/CONFIG/defaults.json`. Each session is stored in its own subdirectory
-named by session id:
+Session history uses `session_dir` (`~/.lumina/sessions` by default):
 
 ```text
 {session_dir}/{session_id}/
 ```
-
-Common per-session files:
 
 - `transcript.jsonl`
 - `transcript.md`
@@ -272,7 +296,7 @@ Common per-session files:
 - `skill-recovery.commit.json`
 - `session.sqlite`
 
-Large background tool outputs are stored under:
+Large background outputs:
 
 ```text
 ~/.lumina/project/{project_root_name}/background/tool-results/
@@ -284,8 +308,7 @@ Large background tool outputs are stored under:
 lumina [flags]
 ```
 
-`lumina` starts the TypeScript frontend for interactive sessions. The Go
-backend can also be called directly:
+`lumina` starts the TS frontend. Direct backend usage:
 
 ```sh
 lumina-backend -p "Summarize this repository"
@@ -308,60 +331,49 @@ Common flags:
 - `-bare`: disable auto-memory and other persistent features
 - `-verbose`, `-v`: enable debug output
 
-The old Go interactive TUI has been removed. Interactive use goes through the
-TypeScript `lumina` frontend; headless use goes through `lumina` passthrough or
-`lumina-backend`.
+Interactive mode uses the TypeScript frontend; headless mode uses `lumina`
+passthrough or `lumina-backend`.
 
 ## Installation
 
-Install on macOS/Linux:
+macOS/Linux:
 
 ```sh
 make install
 ```
 
-Install on Windows PowerShell:
+Windows:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
 
-The Windows installer builds `lumina-backend.exe`, builds the TypeScript
-frontend, installs a `lumina.cmd` launcher, copies bundled resources to
-`%USERPROFILE%\.lumina`, and adds the install directory to the user `PATH`
-unless `-NoPathUpdate` is passed.
-
-Inspect detected paths and shell setup on macOS/Linux:
+Doctor:
 
 ```sh
 make doctor
 ```
 
-Inspect the Windows install:
-
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-windows.ps1
 ```
 
-Uninstall on macOS/Linux:
+Uninstall:
 
 ```sh
 make uninstall
 ```
 
-Uninstall on Windows:
-
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.ps1
 ```
 
-`make uninstall` removes the installed `lumina` and `lumina-backend` commands
-and the `~/.lumina` resource directory. It does not edit shell rc files and does
-not remove project-local `.Lumina` data.
+`make uninstall` shuts down backend/MCP/SearxNG, removes installed commands and
+`~/.lumina`, and leaves shell rc files plus project-local `.Lumina` untouched.
 
 ## Development
 
-Run tests:
+Test:
 
 ```sh
 go test ./...
@@ -375,14 +387,14 @@ Build:
 make build
 ```
 
-Install locally:
+Install:
 
 ```sh
 # macOS/Linux
 make install
 ```
 
-Build and run from the source tree on Windows:
+Windows source-tree setup:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
@@ -404,6 +416,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `session/`: session persistence, migration, and recovery
 - `sessionmemory/`: per-session memory commit log and history tools
 - `skills/`: skill loading, prompt processing, discovery, and execution
+- `team/`: Agent Team configuration, runtime loop, A2A dialogue, gates, and
+  persistence
 - `tools/`: built-in tools
 - `ui/`: shared runtime frame model and legacy renderer tests
 - `test/`: parity and regression tests
