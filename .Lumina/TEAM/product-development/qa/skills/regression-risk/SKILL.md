@@ -9,9 +9,11 @@ context: inline
 Consider:
 
 - Existing commands and compatibility.
-- Session persistence and resume.
-- Permission flows.
-- TUI input and scroll behavior.
-- Build and install paths.
+- Data persistence, migrations, resume/retry behavior, caches, and background work.
+- Permission, authentication, authorization, privacy, and destructive-action flows.
+- User-facing interaction, accessibility, error handling, and long-content behavior.
+- API, schema, event, or file-format compatibility.
+- Build, install, deployment, configuration, and environment paths.
+- Performance, reliability, observability, and cleanup behavior.
 
 Prioritize risks by user impact.

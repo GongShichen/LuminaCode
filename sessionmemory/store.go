@@ -189,14 +189,19 @@ func Open(ctx context.Context, cfg config.Config, sessionID string, complete Sum
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
-	if cfg.SessionDir == "" {
-		cfg = config.NewConfigForCWD(cfg.CWD)
+	sessionDir := cfg.SessionMemoryDir
+	if strings.TrimSpace(sessionDir) == "" {
+		sessionDir = cfg.SessionDir
 	}
-	if err := os.MkdirAll(cfg.SessionDir, 0o755); err != nil {
+	if sessionDir == "" {
+		cfg = config.NewConfigForCWD(cfg.CWD)
+		sessionDir = cfg.SessionDir
+	}
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return nil, err
 	}
-	path := sessionSQLitePath(cfg.SessionDir, sessionID)
-	if err := migrateLegacySQLite(cfg.SessionDir, sessionID, path); err != nil {
+	path := sessionSQLitePath(sessionDir, sessionID, cfg.SessionMemoryAgentID)
+	if err := migrateLegacySQLite(sessionDir, sessionID, cfg.SessionMemoryAgentID, path); err != nil {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
@@ -704,20 +709,35 @@ func limitMessages(messages []MessageSnippet, limit int) []MessageSnippet {
 }
 
 func safeSessionID(sessionID string) string {
+	return safePathID(sessionID, "session")
+}
+
+func safeAgentID(agentID string) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" || agentID == "main" {
+		return "session"
+	}
+	return safePathID(agentID, "agent")
+}
+
+func safePathID(value, fallback string) string {
 	re := regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
-	clean := re.ReplaceAllString(sessionID, "_")
+	clean := re.ReplaceAllString(value, "_")
 	clean = strings.Trim(clean, "._-")
 	if clean == "" {
-		return "session"
+		return fallback
 	}
 	return clean
 }
 
-func sessionSQLitePath(sessionDir, sessionID string) string {
-	return filepath.Join(sessionDir, safeSessionID(sessionID), "session.sqlite")
+func sessionSQLitePath(sessionDir, sessionID, agentID string) string {
+	return filepath.Join(sessionDir, safeSessionID(sessionID), safeAgentID(agentID)+".sqlite")
 }
 
-func migrateLegacySQLite(sessionDir, sessionID, targetPath string) error {
+func migrateLegacySQLite(sessionDir, sessionID, agentID, targetPath string) error {
+	if safeAgentID(agentID) != "session" {
+		return os.MkdirAll(filepath.Dir(targetPath), 0o755)
+	}
 	legacyPath := filepath.Join(sessionDir, safeSessionID(sessionID)+".sqlite")
 	if _, err := os.Stat(legacyPath); err != nil {
 		return os.MkdirAll(filepath.Dir(targetPath), 0o755)

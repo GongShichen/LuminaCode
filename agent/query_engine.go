@@ -161,6 +161,11 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 		}
 		if q.CoreEngine != nil {
 			q.CoreEngine.SessionID = sid
+			agentID := "main"
+			if len(sessionID) > 1 && strings.TrimSpace(sessionID[1]) != "" {
+				agentID = strings.TrimSpace(sessionID[1])
+			}
+			q.CoreEngine.AgentID = agentID
 		}
 		state.Messages = StripTransientContextMessages(state.Messages)
 		q.buildOrRefreshSystemPrompt(state)
@@ -279,6 +284,7 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 	}
 	extraContext := coretools.ExecutionContext{
 		"_session_id":         sid,
+		"_agent_id":           q.CoreEngine.sessionMemoryAgentID(),
 		"runtime_dir":         q.Config.ProjectRuntimeDir,
 		"_skill_persistence":  q.CoreEngine.skillPersistence,
 		"_skill_agent_scope":  "main",

@@ -348,10 +348,8 @@ func AutoBackgroundIfBlocking(startTime time.Time, manager *BackgroundManager, c
 }
 
 func shellCommand(ctx context.Context, command string) *exec.Cmd {
-	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/C", command)
-	}
-	return exec.CommandContext(ctx, "sh", "-c", command)
+	argv := ShellCommandArgs(command)
+	return exec.CommandContext(ctx, argv[0], argv[1:]...)
 }
 
 func prepareProcessGroup(cmd *exec.Cmd) {

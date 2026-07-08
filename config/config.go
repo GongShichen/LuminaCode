@@ -39,8 +39,10 @@ type Config struct {
 	AnthropicCacheEditsEnabled bool
 	MaxParentTurns             int
 
-	SessionDir        string
-	ProjectRuntimeDir string
+	SessionDir           string
+	SessionMemoryDir     string
+	SessionMemoryAgentID string
+	ProjectRuntimeDir    string
 
 	SessionMemoryEnabled             bool
 	SessionMemoryTurnInterval        int

@@ -12,7 +12,7 @@ import (
 )
 
 type SessionHistoryListInput struct {
-	Query string `json:"query,omitempty" jsonschema_description:"Optional search query for session history commit summaries"`
+	Query string `json:"query,omitempty" jsonschema_description:"Optional search query for this agent's session history commit summaries"`
 	Limit int    `json:"limit,omitempty" jsonschema:"default=20" jsonschema_description:"Maximum number of commits to return"`
 }
 
@@ -36,11 +36,11 @@ func NewSessionHistoryListTool() coretools.Tool {
 }
 
 func (t *SessionHistoryListTool) Execute(ctx context.Context, execCtx coretools.ExecutionContext, input any) (string, error) {
-	cfg, sessionID, err := sessionHistoryContext(execCtx)
+	in := derefSessionHistoryList(input)
+	cfg, sessionID, agentID, err := sessionHistoryContext(execCtx)
 	if err != nil {
 		return err.Error(), nil
 	}
-	in := derefSessionHistoryList(input)
 	store, err := sessionmemory.Open(ctx, cfg, sessionID, nil)
 	if err != nil {
 		return fmt.Sprintf("Error opening session history: %s", err), nil
@@ -52,6 +52,7 @@ func (t *SessionHistoryListTool) Execute(ctx context.Context, execCtx coretools.
 	}
 	payload := map[string]any{
 		"session_id": sessionID,
+		"agent_id":   agentID,
 		"query":      in.Query,
 		"commits":    items,
 	}
@@ -73,11 +74,11 @@ func NewSessionHistoryGetTool() coretools.Tool {
 }
 
 func (t *SessionHistoryGetTool) Execute(ctx context.Context, execCtx coretools.ExecutionContext, input any) (string, error) {
-	cfg, sessionID, err := sessionHistoryContext(execCtx)
+	in := derefSessionHistoryGet(input)
+	cfg, sessionID, agentID, err := sessionHistoryContext(execCtx)
 	if err != nil {
 		return err.Error(), nil
 	}
-	in := derefSessionHistoryGet(input)
 	if in.CommitNo <= 0 {
 		return "Error: commit_no must be a positive integer.", nil
 	}
@@ -92,6 +93,7 @@ func (t *SessionHistoryGetTool) Execute(ctx context.Context, execCtx coretools.E
 	}
 	payload := map[string]any{
 		"session_id": sessionID,
+		"agent_id":   agentID,
 		"commit":     detail,
 	}
 	if detail.OmittedMessages > 0 {
@@ -100,16 +102,21 @@ func (t *SessionHistoryGetTool) Execute(ctx context.Context, execCtx coretools.E
 	return marshalSessionHistoryJSON(payload), nil
 }
 
-func sessionHistoryContext(execCtx coretools.ExecutionContext) (config.Config, string, error) {
+func sessionHistoryContext(execCtx coretools.ExecutionContext) (config.Config, string, string, error) {
 	cfg, _ := execCtx["config"].(config.Config)
 	if !cfg.SessionMemoryEnabled {
-		return cfg, "", fmt.Errorf("session memory is disabled")
+		return cfg, "", "", fmt.Errorf("session memory is disabled")
 	}
 	sessionID := strings.TrimSpace(fmt.Sprint(execCtx["_session_id"]))
 	if sessionID == "" || sessionID == "<nil>" {
-		return cfg, "", fmt.Errorf("session id is not available")
+		return cfg, "", "", fmt.Errorf("session id is not available")
 	}
-	return cfg, sessionID, nil
+	agentID := strings.TrimSpace(fmt.Sprint(execCtx["_agent_id"]))
+	if agentID == "" || agentID == "<nil>" {
+		agentID = "main"
+	}
+	cfg.SessionMemoryAgentID = agentID
+	return cfg, sessionID, agentID, nil
 }
 
 func derefSessionHistoryList(input any) SessionHistoryListInput {

@@ -1,7 +1,7 @@
 ---
 name: Benchmark Research
-description: Identify benchmark harness requirements and upstream constraints.
-when-to-use: Use when task touches benchmark integration or evaluation behavior.
+description: Identify benchmark, evaluation, experiment, or comparison requirements and upstream constraints.
+when-to-use: Use when task touches benchmark integration, model/product evaluation, performance testing, or score interpretation.
 user-invocable: false
 context: inline
 ---
@@ -9,8 +9,10 @@ context: inline
 Report:
 
 - Upstream benchmark contract.
-- What LuminaCode may adapt versus must leave untouched.
+- What the product may adapt versus must leave untouched.
 - Required files, containers, commands, and outputs.
-- Failure modes that indicate harness issues versus model issues.
+- Dataset/task integrity rules, scoring logic, official versus debug modes, and reproducibility requirements.
+- Failure modes that indicate harness issues, product issues, environment issues, or model/agent behavior.
+- Metrics and report fields needed to make the result interpretable.
 
 Do not alter benchmark definitions or scoring logic.

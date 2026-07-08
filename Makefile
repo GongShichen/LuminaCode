@@ -100,6 +100,7 @@ install: build
 		preserved_config="$$(mktemp)"; \
 		cp "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
 	fi; \
+	rm -rf "$(APP_ROOT)/SYSTEM" "$(APP_ROOT)/TEAM" "$(APP_ROOT)/SKILLS" "$(APP_ROOT)/frontend"; \
 	cp -R ".Lumina/." "$(APP_ROOT)/"; \
 	rm -rf "$(APP_ROOT)/frontend"; \
 	mkdir -p "$(APP_ROOT)/frontend"; \

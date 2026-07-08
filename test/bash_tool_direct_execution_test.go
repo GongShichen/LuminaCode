@@ -43,3 +43,24 @@ func TestBashToolDirectExecutionDoesNotCancelSimpleCommands(t *testing.T) {
 		t.Fatalf("mkdir output = %q", mkdirOut)
 	}
 }
+
+func TestBashToolDirectExecutionUsesPipefail(t *testing.T) {
+	dir := t.TempDir()
+	tool := coretools.NewBashTool()
+	execCtx := coretools.ExecutionContext{"cwd": dir}
+
+	input, err := tool.DecodeInput(map[string]any{
+		"command":     "false | cat",
+		"description": "pipefail smoke",
+	})
+	if err != nil {
+		t.Fatalf("decode pipefail input: %v", err)
+	}
+	out, err := tool.Execute(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatalf("execute pipefail: %v", err)
+	}
+	if strings.Contains(out, "[Exit code: 0") {
+		t.Fatalf("pipeline failure should not be masked by the last command: %q", out)
+	}
+}

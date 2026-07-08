@@ -60,6 +60,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
 		session.ID = persisted.ID
 		session.rootDir = root
+		session.refreshAgentSystemPrompts()
 		session.dialogue = readJSONL[DialogueEntry](filepath.Join(root, "dialogue.jsonl"))
 		session.timeline = readJSONL[TimelineEvent](filepath.Join(root, "timeline.jsonl"))
 		var artifacts []Artifact
@@ -68,7 +69,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		}
 		session.loopIteration = persisted.Snapshot.LoopIteration
 		session.waitingForUser = false
-		session.gate = persisted.Snapshot.GateStatus
+		session.gate = cloneGateStatus(persisted.Snapshot.GateStatus)
 		session.contract = cloneContract(persisted.Snapshot.TeamContract)
 		session.gateVerdicts = cloneGateVerdicts(persisted.Snapshot.GateVerdicts)
 		if session.gateVerdicts == nil {

@@ -13,5 +13,7 @@ Structure findings as:
 - Confidence.
 - Impact on the task.
 - Recommended next step.
+- Open questions and what evidence would resolve them.
+- Scope boundaries: what was inspected and what was not.
 
 Separate confirmed facts from inference.

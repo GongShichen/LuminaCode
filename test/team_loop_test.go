@@ -24,6 +24,31 @@ func TestProductDevelopmentTeamBundleIsComplete(t *testing.T) {
 	if spec.DisplayName != "Product Development Team" {
 		t.Fatalf("display name mismatch: %s", spec.DisplayName)
 	}
+	if spec.SharedPromptPath == "" {
+		t.Fatal("product-development team should load shared prompt path")
+	}
+	if spec.Loop.A2ADefaultTimeoutSeconds != 900 {
+		t.Fatalf("product-development should use a long A2A wait window for QA/Review, got %d", spec.Loop.A2ADefaultTimeoutSeconds)
+	}
+	if len(spec.TaskPolicies) < 4 {
+		t.Fatalf("product-development should declare task policies in team.yaml, got %d", len(spec.TaskPolicies))
+	}
+	hasPreContractDocsPolicy := false
+	hasExclusiveGatePolicy := false
+	for _, policy := range spec.TaskPolicies {
+		if policy.Name == "pre_contract_planning_writes" && policy.AuditWrites && len(policy.AllowedWriteGlobs) > 0 && len(policy.DeniedWriteGlobs) > 0 {
+			hasPreContractDocsPolicy = true
+		}
+		if policy.Name == "gate_agents_exclusive_workspace" && policy.ExclusiveWorkspace && strings.Contains(strings.Join(policy.Targets, ","), "qa") && strings.Contains(strings.Join(policy.Targets, ","), "reviewer") {
+			hasExclusiveGatePolicy = true
+		}
+	}
+	if !hasPreContractDocsPolicy {
+		t.Fatalf("product-development should configure pre-contract write policy, got %#v", spec.TaskPolicies)
+	}
+	if !hasExclusiveGatePolicy {
+		t.Fatalf("product-development should configure exclusive workspace gate policy, got %#v", spec.TaskPolicies)
+	}
 	requiredAgents := []string{"team-leader", "research", "frontend", "backend", "qa", "reviewer", "devops", "ux-design"}
 	if len(spec.AgentSpecs) != len(requiredAgents) {
 		t.Fatalf("agent count mismatch: got %d want %d", len(spec.AgentSpecs), len(requiredAgents))
@@ -38,8 +63,8 @@ func TestProductDevelopmentTeamBundleIsComplete(t *testing.T) {
 			t.Fatalf("agent %s missing prompt or skills path", id)
 		}
 		privateSkills := skills.NewSkillLoader(config.Config{UserSkillsDir: agent.SkillsDir, IsolatedSkillsOnly: true}).LoadFrontmatterOnly()
-		if len(privateSkills) != 3 {
-			t.Fatalf("agent %s private skill count = %d, want 3", id, len(privateSkills))
+		if len(privateSkills) < 3 {
+			t.Fatalf("agent %s private skill count = %d, want at least 3", id, len(privateSkills))
 		}
 	}
 }
@@ -58,6 +83,7 @@ func TestCreateTeamTemplateCreatesLeaderOnlyTeam(t *testing.T) {
 	for _, rel := range []string{
 		"team.yaml",
 		"team-system.md",
+		"shared-prompt.md",
 		"completion-policy.md",
 		filepath.Join("team-leader", "agent.yaml"),
 		filepath.Join("team-leader", "system.md"),
@@ -67,18 +93,59 @@ func TestCreateTeamTemplateCreatesLeaderOnlyTeam(t *testing.T) {
 			t.Fatalf("expected template path %s: %v", rel, err)
 		}
 	}
+	shared, err := os.ReadFile(filepath.Join(result.Path, "shared-prompt.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(shared)) != "" {
+		t.Fatalf("new team shared prompt should default to empty, got %q", string(shared))
+	}
 	spec, err := loader.Load("data-analysis-team")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if spec.SharedPromptPath == "" {
+		t.Fatal("template team should load shared prompt path")
+	}
 	if len(spec.AgentSpecs) != 1 || spec.AgentSpecs[0].Name != "team-leader" {
 		t.Fatalf("template should contain only team-leader, got %#v", spec.AgentSpecs)
 	}
-	if spec.Gates.QAAgent != "" || spec.Gates.ReviewerAgent != "" || spec.Gates.RequireContract {
-		t.Fatalf("template should not enable QA/Reviewer gates by default: %#v", spec.Gates)
+	if len(spec.Gates.Checks) != 0 || spec.Gates.RequireContract {
+		t.Fatalf("template should not enable gates by default: %#v", spec.Gates)
+	}
+	if spec.Loop.A2ADefaultTimeoutSeconds != 300 {
+		t.Fatalf("template teams should use default A2A wait window 300, got %d", spec.Loop.A2ADefaultTimeoutSeconds)
 	}
 	if _, err := loader.CreateTemplate("Data Analysis Team"); err == nil {
 		t.Fatal("expected duplicate template creation to fail")
+	}
+}
+
+func TestTeamLoaderAllowsMissingSharedPromptForLegacyTeams(t *testing.T) {
+	cfg := config.NewConfigForCWD(t.TempDir())
+	cfg.TeamDir = t.TempDir()
+	root := filepath.Join(cfg.TeamDir, "legacy-team")
+	if err := os.MkdirAll(filepath.Join(root, "team-leader"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"team.yaml":            "name: legacy-team\nentry_agent: team-leader\nagents:\n  - team-leader\n",
+		"team-system.md":       "# Team System\n",
+		"completion-policy.md": "# Completion Policy\n",
+		filepath.Join("team-leader", "agent.yaml"): "name: team-leader\ncommunicates_with: all\n",
+		filepath.Join("team-leader", "system.md"):  "# Team Leader\n",
+	}
+	for rel, content := range files {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec, err := luminateam.NewLoader(cfg).Load("legacy-team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.SharedPromptPath != "" {
+		t.Fatalf("legacy team without shared prompt should load with empty shared path, got %q", spec.SharedPromptPath)
 	}
 }
 
@@ -127,7 +194,7 @@ func TestProductDevelopmentTeamKeepsRuntimeOutOfParentWorkspace(t *testing.T) {
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-system.md"):           "QA must verify parent workspace cleanliness",
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-leader", "system.md"): "Include a parent-workspace-clean check",
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "qa", "system.md"):          "verify parent workspace cleanliness",
-		filepath.Join(root, ".Lumina", "TEAM", "product-development", "devops", "system.md"):      "~/.lumina/project/{project_root_name}/",
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "devops", "system.md"):      "prevent verification byproducts from leaking into the parent workspace",
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "completion-policy.md"):     "the parent working directory remains clean",
 	}
 	for path, want := range required {
@@ -146,7 +213,7 @@ func TestProductDevelopmentTeamRequiresBuildAndRegatesBlockingReviewNotes(t *tes
 	required := map[string]string{
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-system.md"):           "`accepted_with_notes` containing `CRITICAL`",
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "completion-policy.md"):     "all relevant declared build/check/test commands pass",
-		filepath.Join(root, ".Lumina", "TEAM", "product-development", "qa", "system.md"):          "`npm run build` when `package.json` has a `build` script",
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "qa", "system.md"):          "Use the stack's native commands",
 		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-leader", "system.md"): "Treat Reviewer `accepted_with_notes` as a repair trigger",
 	}
 	for path, want := range required {
@@ -156,6 +223,80 @@ func TestProductDevelopmentTeamRequiresBuildAndRegatesBlockingReviewNotes(t *tes
 		}
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("%s missing build/regate rule %q", path, want)
+		}
+	}
+}
+
+func TestProductDevelopmentTeamDefinesStandardProductFlow(t *testing.T) {
+	root := repoRoot(t)
+	required := []struct {
+		path string
+		want string
+	}{
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "shared-prompt.md"), "PRD, UX design, frontend technical plan, backend technical plan"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "shared-prompt.md"), "Development starts only after Team Leader plan review passes"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-leader", "system.md"), "PRD, UX design, frontend/backend technical plans"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "ux-design", "system.md"), "Do not write frontend or backend technical plans"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "frontend", "system.md"), "Do not design backend internals"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "backend", "system.md"), "Do not design frontend screens"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "qa", "system.md"), "PRD, UX design, frontend technical plan, backend technical plan"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "reviewer", "system.md"), "frontend/backend boundary overreach"},
+		{filepath.Join(root, ".Lumina", "TEAM", "product-development", "completion-policy.md"), "Team Leader plan review"},
+	}
+	for _, item := range required {
+		data, err := os.ReadFile(item.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), item.want) {
+			t.Fatalf("%s missing product-flow rule %q", item.path, item.want)
+		}
+	}
+}
+
+func TestProductDevelopmentTeamRequiresStageDocuments(t *testing.T) {
+	root := repoRoot(t)
+	requiredDocs := []string{
+		"PRD.md",
+		"UX_DESIGN.md",
+		"BACKEND_PLAN.md",
+		"FRONTEND_PLAN.md",
+		"INTERFACE_CONTRACT.md",
+		"INTEGRATION_REPORT.md",
+		"QA_REPORT.md",
+		"REVIEW_REPORT.md",
+	}
+	files := []string{
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "shared-prompt.md"),
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-system.md"),
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "team-leader", "system.md"),
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "completion-policy.md"),
+	}
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, doc := range requiredDocs {
+			if !strings.Contains(text, doc) {
+				t.Fatalf("%s missing required stage document %s", path, doc)
+			}
+		}
+	}
+	specialistRules := map[string]string{
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "backend", "system.md"):  "INTERFACE_CONTRACT.md",
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "frontend", "system.md"): "INTERFACE_CONTRACT.md",
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "qa", "system.md"):       "QA_REPORT.md",
+		filepath.Join(root, ".Lumina", "TEAM", "product-development", "reviewer", "system.md"): "REVIEW_REPORT.md",
+	}
+	for path, want := range specialistRules {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("%s missing specialist document rule %q", path, want)
 		}
 	}
 }
@@ -228,6 +369,24 @@ func TestTeamLeaderMustRecordContractBeforeImplementationDispatch(t *testing.T) 
 	}
 }
 
+func TestGenericTeamRuntimeDoesNotHardcodeProductDevelopmentPolicies(t *testing.T) {
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.TeamDir = t.TempDir()
+	cfg.SessionDir = t.TempDir()
+	loader := luminateam.NewLoader(cfg)
+	if _, err := loader.CreateTemplate("Generic Runtime Team"); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := loader.Load("generic-runtime-team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.TaskPolicies) != 0 || len(spec.Gates.Checks) != 0 || spec.Gates.RequireContract {
+		t.Fatalf("generic team should not inherit product-development policies/gates, got policies=%#v gates=%#v", spec.TaskPolicies, spec.Gates)
+	}
+}
+
 func TestTeamAgentsInheritAndSyncYoloMode(t *testing.T) {
 	root := repoRoot(t)
 	cfg := config.NewConfigForCWD(root)
@@ -275,15 +434,14 @@ func TestTeamCompleteAcceptsExistingFileArtifacts(t *testing.T) {
 	recordPassingContractAndGates(t, session, []string{artifactPath})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{artifactPath},
 	})
 	if !strings.Contains(result, "marked complete") {
 		t.Fatalf("expected completion with file artifact, got %q", result)
 	}
 	snapshot := session.Snapshot()
-	if snapshot.GateStatus.QA != "pass" || snapshot.GateStatus.Reviewer != "pass" {
+	if snapshot.GateStatus["qa"] != "pass" || snapshot.GateStatus["reviewer"] != "pass" {
 		t.Fatalf("session gate should be persisted after completion, got %#v", snapshot.GateStatus)
 	}
 	if got := snapshot.Dialogue[len(snapshot.Dialogue)-1]; got.Kind != "final" {
@@ -323,8 +481,7 @@ func TestTeamCompleteAcceptsArtifactsUnderNamedProjectRoot(t *testing.T) {
 	recordPassingContractAndGates(t, session, []string{"README.md", "backend/main.go", "cli/src/index.ts"})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md", "backend/main.go", "cli/src/index.ts"},
 	})
 	if !strings.Contains(result, "marked complete") {
@@ -347,11 +504,10 @@ func TestTeamCompleteRequiresStructuredGateVerdicts(t *testing.T) {
 	session.RecordContract("team-leader", testContract(workdir, []string{"README.md"}))
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "accepted_with_notes",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "accepted_with_notes"},
 		RequiredArtifacts: []string{"README.md"},
 	})
-	if !strings.Contains(result, "missing structured QA gate verdict") {
+	if !strings.Contains(result, "missing structured gate verdict for qa") {
 		t.Fatalf("expected missing QA verdict rejection, got %q", result)
 	}
 }
@@ -376,11 +532,10 @@ func TestTeamCompleteRejectsMissingQAEvidence(t *testing.T) {
 	session.SubmitGateVerdict("reviewer", luminateam.GateVerdict{Role: "reviewer", Status: "pass", Summary: "ok"})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md"},
 	})
-	if !strings.Contains(result, "QA evidence missing required contract checks") {
+	if !strings.Contains(result, "gate qa evidence missing required contract checks") {
 		t.Fatalf("expected missing evidence rejection, got %q", result)
 	}
 }
@@ -404,8 +559,7 @@ func TestTeamCompleteRejectsBlockingReviewerFinding(t *testing.T) {
 	})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "accepted_with_notes",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "accepted_with_notes"},
 		RequiredArtifacts: []string{"README.md"},
 	})
 	if !strings.Contains(result, "blocking") {
@@ -438,8 +592,7 @@ func TestProductTeamRejectsNonblockingReviewerNotesWithoutDeferral(t *testing.T)
 	})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "accepted_with_notes",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "accepted_with_notes"},
 		RequiredArtifacts: []string{"README.md"},
 	})
 	if !strings.Contains(result, "nonblocking finding without follow-up or deferral reason") {
@@ -472,8 +625,7 @@ func TestProductTeamAllowsNonblockingReviewerNotesWithDeferral(t *testing.T) {
 	})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "accepted_with_notes",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "accepted_with_notes"},
 		RequiredArtifacts: []string{"README.md"},
 		DeferralReasons: map[string]string{
 			"Reviewer:style:minor improvement suggestion": "Safe to defer because it does not affect correctness or requested behavior.",
@@ -523,11 +675,10 @@ func TestTeamContractUpdateCannotRemoveRequiredChecks(t *testing.T) {
 	session.SubmitGateVerdict("reviewer", luminateam.GateVerdict{Role: "reviewer", Status: "pass", Summary: "ok"})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md"},
 	})
-	if !strings.Contains(result, "QA evidence missing required contract checks") {
+	if !strings.Contains(result, "gate qa evidence missing required contract checks") {
 		t.Fatalf("expected preserved contract checks to block weak QA evidence, got %q", result)
 	}
 }
@@ -564,8 +715,7 @@ func TestTeamQAGateVerdictsMergeEvidence(t *testing.T) {
 	}
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md"},
 	})
 	if !strings.Contains(result, "marked complete") {
@@ -600,11 +750,10 @@ func TestTeamCompletionRejectsQABlockingFinding(t *testing.T) {
 	session.SubmitGateVerdict("reviewer", luminateam.GateVerdict{Role: "reviewer", Status: "pass", Summary: "ok"})
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md"},
 	})
-	if !strings.Contains(result, "QA has blocking finding") {
+	if !strings.Contains(result, "qa has blocking finding") {
 		t.Fatalf("expected QA blocking finding to reject completion, got %q", result)
 	}
 }
@@ -652,12 +801,57 @@ func TestTeamQAGateVerdictRefreshClearsResolvedFindings(t *testing.T) {
 	}
 	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
 		FinalAnswer:       "done",
-		QAStatus:          "pass",
-		ReviewerStatus:    "pass",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
 		RequiredArtifacts: []string{"README.md"},
 	})
 	if !strings.Contains(result, "marked complete") {
 		t.Fatalf("expected refreshed QA findings to allow completion, got %q", result)
+	}
+}
+
+func TestTeamGateVerdictLatestStatusWins(t *testing.T) {
+	root := repoRoot(t)
+	workdir := t.TempDir()
+	cfg := config.NewConfigForCWD(workdir)
+	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
+	cfg.SessionDir = t.TempDir()
+	manager := luminateam.NewManager(cfg, nil, nil)
+	session, err := manager.Start("parent-session", "product-development", workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRequiredArtifacts(t, workdir, "todolite", []string{"README.md"})
+	session.RecordContract("team-leader", testContract(workdir, []string{"README.md"}))
+	session.SubmitGateVerdict("qa", luminateam.GateVerdict{
+		Role:    "qa",
+		Status:  "pass",
+		Summary: "initial pass",
+		Evidence: []luminateam.GateEvidence{
+			{Name: "go test", Command: "go test ./...", Passed: true, OutputSummary: "pass"},
+			{Name: "npm test", Command: "npm test", Passed: true, OutputSummary: "pass"},
+			{Name: "cli backend smoke", Command: "todo add/list/done/delete through backend", Passed: true, OutputSummary: "pass"},
+		},
+	})
+	session.SubmitGateVerdict("qa", luminateam.GateVerdict{
+		Role:    "qa",
+		Status:  "fail",
+		Summary: "regression found",
+		Findings: []luminateam.GateFinding{
+			{Category: "correctness", Summary: "latest regression blocks release", Blocking: true},
+		},
+	})
+	session.SubmitGateVerdict("reviewer", luminateam.GateVerdict{Role: "reviewer", Status: "pass", Summary: "ok"})
+	snapshot := session.Snapshot()
+	if got := snapshot.GateVerdicts["qa"].Status; got != "fail" {
+		t.Fatalf("latest gate status should win, got %q", got)
+	}
+	result := session.CompleteTask("team-leader", luminateam.CompleteTeamTaskInput{
+		FinalAnswer:       "done",
+		GateStatuses:      map[string]string{"qa": "pass", "reviewer": "pass"},
+		RequiredArtifacts: []string{"README.md"},
+	})
+	if !strings.Contains(result, `gate_statuses[qa] "pass" does not match latest gate verdict "fail"`) {
+		t.Fatalf("expected latest failing QA verdict to block completion, got %q", result)
 	}
 }
 
@@ -667,16 +861,55 @@ func TestTeamPrivateSkillsDoNotLeakIntoOrdinarySkillLoader(t *testing.T) {
 	cfg.UserSkillsDir = filepath.Join(root, ".Lumina", "TEAM", "product-development", "frontend", "skills")
 	cfg.IsolatedSkillsOnly = true
 	privateSkills := skills.NewSkillLoader(cfg).LoadFrontmatterOnly()
-	if len(privateSkills) != 3 {
-		t.Fatalf("private skill loader got %d skills, want 3", len(privateSkills))
+	privateNames := map[string]struct{}{}
+	for _, skill := range privateSkills {
+		privateNames[skill.CanonicalName] = struct{}{}
+	}
+	for _, want := range []string{"api-consumption-contract", "frontend-implementation-plan", "terminal-ui-design", "tui-interaction-review"} {
+		if _, ok := privateNames[want]; !ok {
+			t.Fatalf("private frontend skill loader missing %s; got %#v", want, privateNames)
+		}
 	}
 	cfg.IsolatedSkillsOnly = false
 	cfg.UserSkillsDir = filepath.Join(t.TempDir(), "no-user-skills")
 	ordinary := skills.NewSkillLoader(cfg).LoadFrontmatterOnly()
 	for _, skill := range ordinary {
 		switch skill.CanonicalName {
-		case "tui-interaction-review", "terminal-ui-design", "frontend-implementation-plan":
+		case "api-consumption-contract", "tui-interaction-review", "terminal-ui-design", "frontend-implementation-plan":
 			t.Fatalf("team private skill leaked into ordinary loader: %s", skill.CanonicalName)
+		}
+	}
+}
+
+func TestTeamAgentsCanSeeExpandedRoleSkills(t *testing.T) {
+	root := repoRoot(t)
+	cfg := config.NewConfigForCWD(root)
+	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
+	cfg.SessionDir = t.TempDir()
+	session, err := luminateam.NewManager(cfg, nil, nil).Start("parent-session", "product-development", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := map[string][]string{
+		"team-leader": {"prd-authoring", "artifact-gate", "task-breakdown"},
+		"ux-design":   {"design-spec", "interaction-copy", "workflow-critique"},
+		"backend":     {"ipc-contract", "integration-handoff", "persistence-plan"},
+		"frontend":    {"api-consumption-contract", "frontend-implementation-plan", "tui-interaction-review"},
+		"qa":          {"acceptance-runbook", "qa-report", "test-matrix"},
+		"reviewer":    {"process-compliance-review", "code-review-checklist", "security-review"},
+		"devops":      {"runtime-cleanliness", "install-flow-audit", "release-check"},
+		"research":    {"domain-discovery-brief", "repo-map", "evidence-report"},
+	}
+	for agentID, wants := range required {
+		names := session.AgentSkillNames(agentID)
+		seen := map[string]struct{}{}
+		for _, name := range names {
+			seen[name] = struct{}{}
+		}
+		for _, want := range wants {
+			if _, ok := seen[want]; !ok {
+				t.Fatalf("agent %s cannot see private skill %s; got %v", agentID, want, names)
+			}
 		}
 	}
 }

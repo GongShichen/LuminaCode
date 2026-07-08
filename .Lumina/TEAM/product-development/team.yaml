@@ -5,15 +5,209 @@ entry_agent: team-leader
 loop:
   max_iterations: 0
   max_parallel_agents: 4
-  completion_policy: leader_with_reviewer_and_qa
+  a2a_default_timeout_seconds: 900
+  wait_for_pending_a2a_before_next_iteration: true
+  completion_policy: leader_with_required_gates
   require_final_artifact: true
   stop_policy: user_interrupt_or_task_complete_only
 gates:
   require_contract: true
-  qa_agent: qa
-  reviewer_agent: reviewer
+  checks:
+    - name: qa
+      agent: qa
+      pass_statuses:
+        - pass
+        - not_applicable
+      allowed_statuses:
+        - pass
+        - not_applicable
+        - fail
+      evidence_required_statuses:
+        - pass
+    - name: reviewer
+      agent: reviewer
+      pass_statuses:
+        - pass
+        - accepted_with_notes
+      allowed_statuses:
+        - pass
+        - accepted_with_notes
+        - reject
+      findings_required_statuses:
+        - accepted_with_notes
+        - reject
+      blocking_findings_fail: true
   nonblocking_findings: require_followup_or_deferral
   deferral_requires_reason: true
+task_policies:
+  - name: pre_contract_planning_writes
+    description: Before the team contract is recorded, product-development work may only create or update planning and contract documents.
+    targets:
+      - team-leader
+      - ux-design
+      - frontend
+      - backend
+    task_types:
+      - team-loop
+      - prd
+      - ux-design
+      - design
+      - technical-plan
+      - "*plan*"
+    before_contract: true
+    audit_writes: true
+    allowed_write_globs:
+      - "*.md"
+      - "**/*.md"
+    denied_write_globs:
+      - "**/data/"
+      - "**/data/**"
+      - "**/static/"
+      - "**/static/**"
+      - "**/src/"
+      - "**/src/**"
+      - "**/public/"
+      - "**/public/**"
+      - "**/assets/"
+      - "**/assets/**"
+      - "**/tests/"
+      - "**/tests/**"
+      - "**/*.py"
+      - "**/*.js"
+      - "**/*.html"
+      - "**/*.css"
+      - "**/*.json"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.toml"
+  - name: gate_agents_require_contract
+    description: QA and Reviewer may only run after the Team Leader records the contract.
+    targets:
+      - qa
+      - reviewer
+    requires_contract: true
+  - name: team_leader_coordination_only
+    description: Team Leader loop iterations may coordinate, inspect, synthesize, and update markdown artifacts, but must not directly implement or repair product code.
+    targets:
+      - team-leader
+    task_types:
+      - team-loop
+    audit_writes: true
+    allowed_write_globs:
+      - "*.md"
+      - "**/*.md"
+      - "*.log"
+      - "**/*.log"
+      - "*.tmp"
+      - "**/*.tmp"
+      - ".pytest_cache/"
+      - ".pytest_cache/**"
+      - "**/.pytest_cache/"
+      - "**/.pytest_cache/**"
+    denied_write_globs:
+      - "**/data/"
+      - "**/data/**"
+      - "**/src/"
+      - "**/src/**"
+      - "**/public/"
+      - "**/public/**"
+      - "**/assets/"
+      - "**/assets/**"
+      - "**/tests/"
+      - "**/tests/**"
+      - "**/*.py"
+      - "**/*.js"
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.jsx"
+      - "**/*.html"
+      - "**/*.css"
+      - "**/*.json"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.toml"
+      - "**/*.egg-info/"
+      - "**/*.egg-info/**"
+      - "**/*.dist-info/"
+      - "**/*.dist-info/**"
+  - name: gate_agents_exclusive_workspace
+    description: QA and Reviewer run acceptance commands against the same working tree, so they must not mutate or inspect runtime data concurrently.
+    targets:
+      - qa
+      - reviewer
+    task_types:
+      - "*qa*"
+      - "*quality*"
+      - "*acceptance*"
+      - "*verification*"
+      - "*validate*"
+      - "*review*"
+    requires_contract: true
+    exclusive_workspace: true
+  - name: delivery_work_requires_contract
+    description: Implementation, integration, verification, and release-style delivery tasks require a recorded team contract.
+    targets:
+      - "*"
+    task_types:
+      - implementation
+      - implement
+      - coding
+      - build
+      - integration
+      - integrate
+      - qa
+      - quality
+      - acceptance
+      - verification
+      - validate
+      - review
+      - smoke
+      - release
+    requires_contract: true
+    exclusive_workspace: true
+    audit_writes: true
+    restrict_writes_to_expected_artifacts: true
+    allowed_write_globs:
+      - "__pycache__/"
+      - "__pycache__/**"
+      - "**/__pycache__/"
+      - "**/__pycache__/**"
+      - ".pytest_cache/"
+      - ".pytest_cache/**"
+      - "**/.pytest_cache/"
+      - "**/.pytest_cache/**"
+      - ".mypy_cache/"
+      - ".mypy_cache/**"
+      - "**/.mypy_cache/"
+      - "**/.mypy_cache/**"
+      - ".ruff_cache/"
+      - ".ruff_cache/**"
+      - "**/.ruff_cache/"
+      - "**/.ruff_cache/**"
+      - "node_modules/"
+      - "node_modules/**"
+      - "**/node_modules/"
+      - "**/node_modules/**"
+      - "dist/"
+      - "dist/**"
+      - "**/dist/"
+      - "**/dist/**"
+      - "build/"
+      - "build/**"
+      - "**/build/"
+      - "**/build/**"
+      - "coverage/"
+      - "coverage/**"
+      - "**/coverage/"
+      - "**/coverage/**"
+      - "data/"
+      - "data/**"
+      - "**/data/"
+      - "**/data/**"
+      - "*.log"
+      - "**/*.log"
+      - "*.tmp"
+      - "**/*.tmp"
 transcript:
   show_member_dialogue: true
   show_tool_details: false

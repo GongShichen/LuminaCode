@@ -13,5 +13,7 @@ Synthesize by preserving attribution:
 - Conflicts or uncertainties.
 - Decisions the Team Leader makes.
 - Remaining gate or artifact work.
+- Contract changes, scope changes, or assumptions that must be recorded before implementation continues.
+- Risks accepted for now and the concrete deferral reason, if any.
 
 Do not hide rejected or incomplete work; convert it into next tasks.

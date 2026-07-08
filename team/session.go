@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,6 +172,8 @@ type Session struct {
 	gate           GateStatus
 	contract       *AcceptanceContract
 	gateVerdicts   map[string]GateVerdict
+	a2aTasks       map[string]TeamTask
+	agentActiveA2A map[string]string
 	loopIteration  int
 	waitingForUser bool
 	completed      bool
@@ -177,6 +183,7 @@ type Session struct {
 	cancel context.CancelFunc
 	runCtx context.Context
 
+	workspaceMu  sync.Mutex
 	permissionMu sync.Mutex
 	permissions  map[string]chan string
 }
@@ -213,7 +220,10 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 		rootDir:         root,
 		agents:          map[string]*AgentRuntime{},
 		activity:        map[string]ActivityRow{},
+		gate:            GateStatus{},
 		gateVerdicts:    map[string]GateVerdict{},
+		a2aTasks:        map[string]TeamTask{},
+		agentActiveA2A:  map[string]string{},
 		permissions:     map[string]chan string{},
 	}
 	for _, agentSpec := range spec.AgentSpecs {
@@ -231,7 +241,8 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	cfg := s.Config
 	cfg.SessionDir = filepath.Join(s.rootDir, "agents")
-	cfg.SystemPromptPath = spec.SystemPromptPath
+	cfg.SessionMemoryDir = s.Config.SessionDir
+	cfg.SystemPromptPath = s.materializeAgentSystemPrompt(spec)
 	cfg.UserSkillsDir = spec.SkillsDir
 	cfg.SkillsDir = ".Lumina/__team_no_project_skills__"
 	cfg.BundledSkillsDir = filepath.Join(spec.RootDir, "__no_bundled_skills__")
@@ -246,12 +257,13 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	}
 	engine := agent.NewQueryEngine(&cfg)
 	engine.CoreEngine.Registry = engine.CoreEngine.Registry.FilteredCopy(nil, ordinarySubagentToolDenylist(), false, false)
+	engine.CoreEngine.Registry.Register(NewGetTeamContextTool(s, spec.Name))
 	engine.CoreEngine.Registry.Register(NewSendA2AMessageTool(s, spec.Name))
 	if spec.Name == s.Spec.EntryAgent {
 		engine.CoreEngine.Registry.Register(NewRecordTeamContractTool(s, spec.Name))
 		engine.CoreEngine.Registry.Register(NewCompleteTeamTaskTool(s, spec.Name))
 	}
-	if spec.Name == "qa" || spec.Name == "reviewer" {
+	if s.isGateAgent(spec.Name) {
 		engine.CoreEngine.Registry.Register(NewSubmitGateVerdictTool(s, spec.Name))
 	}
 	state := agent.NewAgentState()
@@ -262,6 +274,45 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 		state.PermissionState.YoloMode = true
 	}
 	return &AgentRuntime{Spec: spec, Engine: engine, State: &state}
+}
+
+func (s *Session) refreshAgentSystemPrompts() {
+	for _, runtime := range s.agents {
+		if runtime == nil || runtime.Engine == nil {
+			continue
+		}
+		path := s.materializeAgentSystemPrompt(runtime.Spec)
+		runtime.Engine.Config.SystemPromptPath = path
+		if runtime.Engine.CoreEngine != nil {
+			runtime.Engine.CoreEngine.Config.SystemPromptPath = path
+		}
+	}
+}
+
+func (s *Session) materializeAgentSystemPrompt(spec TeamAgentSpec) string {
+	base := strings.TrimSpace(readText(spec.SystemPromptPath))
+	shared := strings.TrimSpace(s.sharedPromptText())
+	var body strings.Builder
+	body.WriteString("[SECTION: Team Agent Instructions]\n")
+	if shared != "" {
+		body.WriteString("# Shared Team Prompt\n\n")
+		body.WriteString(shared)
+	}
+	if base != "" {
+		if shared != "" {
+			body.WriteString("\n\n")
+		}
+		body.WriteString(base)
+	}
+	text := strings.TrimRight(body.String(), "\n") + "\n"
+	path := filepath.Join(s.rootDir, "prompts", spec.Name+".system.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return spec.SystemPromptPath
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return spec.SystemPromptPath
+	}
+	return path
 }
 
 func (s *Session) ApplyRuntimeConfig(cfg config.Config) {
@@ -308,6 +359,14 @@ func (s *Session) AgentToolNames(agentID string) []string {
 		names = append(names, tool.Name())
 	}
 	return names
+}
+
+func (s *Session) AgentSkillNames(agentID string) []string {
+	runtime := s.agents[agentID]
+	if runtime == nil || runtime.Engine == nil || runtime.Engine.CoreEngine == nil {
+		return nil
+	}
+	return runtime.Engine.CoreEngine.SkillNames(s.Config.CWD)
 }
 
 func (s *Session) AgentYoloEnabled(agentID string) bool {
@@ -382,9 +441,12 @@ func (s *Session) runLoop(ctx context.Context, input string) {
 			s.emit("team.frame.snapshot", s.Snapshot())
 			return
 		}
+		s.mu.Unlock()
+		if s.waitForPendingA2ABeforeNextIteration(ctx) {
+			continue
+		}
 		s.loopIteration++
 		iteration := s.loopIteration
-		s.mu.Unlock()
 		s.emit("team.loop.iteration", s.Snapshot())
 		prompt := s.leaderPrompt(input, iteration)
 		result, err := s.runAgentTask(ctx, s.Spec.EntryAgent, "user", prompt, "team-loop", []string{"final-answer"}, true)
@@ -411,6 +473,8 @@ func (s *Session) runLoop(ctx context.Context, input string) {
 
 func (s *Session) leaderPrompt(userInput string, iteration int) string {
 	teamSystem := readText(s.Spec.TeamSystemPath)
+	sharedPrompt := strings.TrimSpace(s.sharedPromptText())
+	sharedSection := leaderSharedPromptSection(sharedPrompt)
 	policy := readText(s.Spec.CompletionPolicy)
 	return fmt.Sprintf(`Team Loop iteration #%d.
 
@@ -422,6 +486,7 @@ User request:
 
 Team system instructions:
 %s
+%s
 
 Completion policy:
 %s
@@ -432,19 +497,44 @@ Available agents:
 Current readable dialogue:
 %s
 
+Current A2A task status:
+%s
+
 Hard runtime rules:
 - A2A is traceable. Never say A2A messages cannot be tracked.
-- Before dispatching implementation, QA, or review work, call RecordTeamContract with the acceptance contract.
+- Follow this team's configured task policies and gates. If a dispatch requires a recorded contract, call RecordTeamContract first.
 - Verbal assignment is invalid. To assign work, call SendA2AMessage and wait for the tool result.
+- If an A2A task is pending or running for a target agent, do not send the same target duplicate work. Continue with other unblocked work or wait for the existing task status to become completed.
+- Before starting a new Team Leader iteration, the runtime waits for pending A2A tasks when this team enables wait_for_pending_a2a_before_next_iteration.
 - If a specialist exists, do not replace that specialist with a generic background agent or ordinary sub-agent.
 - Every specialist's visible progress is projected into the Team transcript; keep member messages useful for the user.
 - Preserve user-specified artifact paths exactly.
 - If the user asks to create a new named project or directory, infer the project root as Current working directory + "/" + that name unless the user gives an absolute path. All dispatches, files, README paths, tests, and final artifact checks must use that project root. Do not flatten named projects into the current working directory.
-- If a Reviewer verdict is "reject" or QA verdict is "fail", immediately dispatch concrete repair tasks for the cited findings, then re-run QA and Reviewer gates.
-- If the user asks for multiple components such as "Go backend + TS CLI", treat those components as integrated by default. The frontend/CLI must consume the backend/API unless the user explicitly asks for independent or direct-file implementations.
-- QA and Reviewer must use SubmitGateVerdict. CompleteTeamTask only succeeds when runtime gate verdicts satisfy the recorded contract.
+- If a configured gate verdict rejects or fails the work, immediately dispatch concrete repair tasks for the cited findings, then re-run the relevant gates.
+- If the user asks for multiple components, treat them as integrated by default. User-facing components must consume the agreed component contract unless the user explicitly asks for independent, direct-file, or mock-only implementations.
+- Configured gate agents must use SubmitGateVerdict. CompleteTeamTask only succeeds when runtime gate verdicts satisfy the recorded contract.
 
-Continue the Team Loop. Use SendA2AMessage for member-to-member work. Do not stop because of timeout, error, rejection, or long iteration count. Only call CompleteTeamTask when the completion policy is fully satisfied.`, iteration, s.Config.CWD, userInput, teamSystem, policy, s.agentCardsText(), s.dialogueText())
+Continue the Team Loop. Use SendA2AMessage for member-to-member work. Do not stop because of timeout, error, rejection, or long iteration count. Only call CompleteTeamTask when the completion policy is fully satisfied.`, iteration, s.Config.CWD, userInput, teamSystem, sharedSection, policy, s.agentCardsText(), s.dialogueText(), s.a2aTaskStatusText())
+}
+
+func leaderSharedPromptSection(sharedPrompt string) string {
+	sharedPrompt = strings.TrimSpace(sharedPrompt)
+	if sharedPrompt == "" {
+		return ""
+	}
+	const maxLoopPromptSharedPromptRunes = 1800
+	visible := truncateTeamVisible(sharedPrompt, maxLoopPromptSharedPromptRunes)
+	if visible != sharedPrompt {
+		visible += "\n\n[Shared prompt shortened here; the full shared prompt is already prepended to each agent system prompt.]"
+	}
+	return "\nShared team prompt:\n" + visible + "\n"
+}
+
+func (s *Session) sharedPromptText() string {
+	if s == nil || strings.TrimSpace(s.Spec.SharedPromptPath) == "" {
+		return ""
+	}
+	return readText(s.Spec.SharedPromptPath)
 }
 
 func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMessageInput) map[string]any {
@@ -453,13 +543,49 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 		return map[string]any{"status": "error", "error": err.Error()}
 	}
 	if input.TimeoutSeconds <= 0 {
-		input.TimeoutSeconds = 300
+		input.TimeoutSeconds = s.defaultA2ATimeoutSeconds()
 	}
 	targets := normalizeTargets(input.To)
 	allowed, msg := s.validateTargets(from, targets)
 	if !allowed {
 		return map[string]any{"status": "error", "error": msg}
 	}
+	results := make([]map[string]any, 0, len(targets))
+	notifyTargets := make([]string, 0, len(targets))
+	startTargets := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target == s.Spec.EntryAgent && from != s.Spec.EntryAgent {
+			notifyTargets = append(notifyTargets, target)
+			continue
+		}
+		if task, active := s.activeA2ATask(target); active {
+			results = append(results, map[string]any{
+				"to":               target,
+				"status":           "task_pending",
+				"task_id":          task.ID,
+				"existing_task_id": task.ID,
+				"message":          fmt.Sprintf("%s already has an active A2A task from %s: %s", target, task.From, firstNonEmpty(task.Summary, "working")),
+			})
+			continue
+		}
+		startTargets = append(startTargets, target)
+	}
+	if len(notifyTargets) > 0 {
+		notifyID := "a2a-" + uuid.NewString()[:8]
+		s.appendDialogue(DialogueEntry{
+			FromAgent: from, ToAgent: notifyTargets, Kind: "message",
+			Summary: input.TaskType, Content: input.Message, TaskID: notifyID,
+			ArtifactRefs: input.ExpectedArtifacts,
+		})
+		s.appendTimeline("message/deliver", map[string]any{"task_id": notifyID, "from": from, "to": notifyTargets, "message": input.Message})
+		for _, target := range notifyTargets {
+			results = append(results, map[string]any{"to": target, "status": "delivered", "task_id": notifyID})
+		}
+	}
+	if len(startTargets) == 0 {
+		return map[string]any{"status": "ok", "results": results}
+	}
+	targets = startTargets
 	taskID := "a2a-" + uuid.NewString()[:8]
 	s.appendDialogue(DialogueEntry{
 		FromAgent: from, ToAgent: targets, Kind: "message",
@@ -467,7 +593,6 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 		ArtifactRefs: input.ExpectedArtifacts,
 	})
 	s.appendTimeline("message/send", map[string]any{"task_id": taskID, "from": from, "to": targets, "message": input.Message})
-	results := make([]map[string]any, 0, len(targets))
 	var wg sync.WaitGroup
 	resultCh := make(chan map[string]any, len(targets))
 	parallelism := s.Spec.Loop.MaxParallelAgents
@@ -477,6 +602,17 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 	sem := make(chan struct{}, parallelism)
 	for _, target := range targets {
 		target := target
+		a2aTask, started := s.beginA2ATask(taskID, from, target, input.TaskType)
+		if !started {
+			results = append(results, map[string]any{
+				"to":               target,
+				"status":           "task_pending",
+				"task_id":          a2aTask.ID,
+				"existing_task_id": a2aTask.ID,
+				"message":          fmt.Sprintf("%s already has an active A2A task from %s: %s", target, a2aTask.From, firstNonEmpty(a2aTask.Summary, "working")),
+			})
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -484,6 +620,7 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 				if recovered := recover(); recovered != nil {
 					msg := fmt.Sprintf("agent dispatch panic: %v\n%s", recovered, debug.Stack())
 					s.appendRecovery(msg)
+					s.finishA2ATask(a2aTask.ID, target, "error", "", msg)
 					resultCh <- map[string]any{"to": target, "status": "error", "error": msg}
 				}
 			}()
@@ -500,25 +637,30 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 				}()
 				result, err := s.runAgentTask(s.activeRunContext(), target, from, input.Message, input.TaskType, input.ExpectedArtifacts, false)
 				if err != nil {
+					s.finishA2ATask(a2aTask.ID, target, "error", "", err.Error())
 					done <- map[string]any{"to": target, "status": "error", "error": err.Error()}
 					return
 				}
-				done <- map[string]any{"to": target, "status": "completed", "result": result}
+				s.finishA2ATask(a2aTask.ID, target, "completed", result, "")
+				done <- map[string]any{"to": target, "status": "completed", "task_id": a2aTask.ID, "result": result}
 			}()
 			awaitResponse := true
 			if input.AwaitResponse != nil {
 				awaitResponse = *input.AwaitResponse
 			}
 			if !awaitResponse {
-				resultCh <- map[string]any{"to": target, "status": "queued", "task_id": taskID}
+				resultCh <- map[string]any{"to": target, "status": "queued", "task_id": a2aTask.ID}
 				return
 			}
 			select {
 			case result := <-done:
 				resultCh <- result
+			case task := <-a2aTask.done:
+				resultCh <- a2aResultFromTask(task)
 			case <-time.After(time.Duration(input.TimeoutSeconds) * time.Second):
+				s.markA2ATaskPending(a2aTask.ID, target)
 				s.appendRecovery(fmt.Sprintf("%s did not finish within wait window; Team Loop continues with task pending.", target))
-				s.setActivity(target, "running", "continuing after A2A wait timeout", taskID)
+				s.setActivity(target, "running", "continuing after A2A wait timeout", a2aTask.ID)
 				s.appendDialogue(DialogueEntry{
 					FromAgent: target,
 					ToAgent:   []string{from},
@@ -528,11 +670,12 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 						"%s did not finish within the %d second A2A wait window. This is not a user interrupt; the agent keeps working in the Team run context and the Team Loop may continue, retry, or collect a later result.",
 						s.agentDisplayName(target), input.TimeoutSeconds,
 					),
-					TaskID: taskID,
+					TaskID: a2aTask.ID,
 				})
-				resultCh <- map[string]any{"to": target, "status": "task_pending", "task_id": taskID}
+				resultCh <- map[string]any{"to": target, "status": "task_pending", "task_id": a2aTask.ID}
 			case <-ctx.Done():
-				resultCh <- map[string]any{"to": target, "status": "interrupted_by_user", "task_id": taskID}
+				s.finishA2ATask(a2aTask.ID, target, "interrupted", "", ctx.Err().Error())
+				resultCh <- map[string]any{"to": target, "status": "interrupted_by_user", "task_id": a2aTask.ID}
 			}
 		}()
 	}
@@ -544,6 +687,13 @@ func (s *Session) SendA2AMessage(ctx context.Context, from string, input A2AMess
 	return map[string]any{"status": "ok", "task_id": taskID, "results": results}
 }
 
+func (s *Session) defaultA2ATimeoutSeconds() int {
+	if s == nil || s.Spec.Loop.A2ADefaultTimeoutSeconds <= 0 {
+		return 300
+	}
+	return s.Spec.Loop.A2ADefaultTimeoutSeconds
+}
+
 func (s *Session) activeRunContext() context.Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -553,21 +703,217 @@ func (s *Session) activeRunContext() context.Context {
 	return context.Background()
 }
 
+func (s *Session) shouldWaitForPendingA2ABeforeNextIteration() bool {
+	if s == nil || s.Spec.Loop.WaitForPendingA2ABeforeNextIteration == nil {
+		return true
+	}
+	return *s.Spec.Loop.WaitForPendingA2ABeforeNextIteration
+}
+
+func (s *Session) waitForPendingA2ABeforeNextIteration(ctx context.Context) bool {
+	if !s.shouldWaitForPendingA2ABeforeNextIteration() {
+		return false
+	}
+	tasks := s.activeA2ATasks()
+	if len(tasks) == 0 {
+		return false
+	}
+	s.appendTimeline("loop.waiting_for_a2a", map[string]any{"tasks": tasks})
+	s.appendRecovery("Waiting for pending A2A tasks before the next Team Leader iteration to avoid overlapping workspace edits.")
+	s.emit("team.frame.snapshot", s.Snapshot())
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-ticker.C:
+			if len(s.activeA2ATasks()) == 0 {
+				s.appendTimeline("loop.a2a_wait_complete", map[string]any{"previous_tasks": tasks})
+				s.emit("team.frame.snapshot", s.Snapshot())
+				return true
+			}
+		}
+	}
+}
+
+func a2aTaskKey(taskID, target string) string {
+	return taskID + "\x00" + target
+}
+
+func isTerminalA2AStatus(status string) bool {
+	switch status {
+	case "completed", "error", "failed", "interrupted":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Session) activeA2ATasks() []TeamTask {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks := make([]TeamTask, 0, len(s.agentActiveA2A))
+	for target, key := range s.agentActiveA2A {
+		task, ok := s.a2aTasks[key]
+		if !ok || isTerminalA2AStatus(task.Status) {
+			delete(s.agentActiveA2A, target)
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].To == tasks[j].To {
+			return tasks[i].ID < tasks[j].ID
+		}
+		return tasks[i].To < tasks[j].To
+	})
+	return tasks
+}
+
+func (s *Session) activeA2ATask(target string) (TeamTask, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	activeKey := s.agentActiveA2A[target]
+	if activeKey == "" {
+		return TeamTask{}, false
+	}
+	task, ok := s.a2aTasks[activeKey]
+	if !ok || isTerminalA2AStatus(task.Status) {
+		delete(s.agentActiveA2A, target)
+		return TeamTask{}, false
+	}
+	return task, true
+}
+
+func (s *Session) beginA2ATask(taskID, from, target, summary string) (TeamTask, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if activeKey := s.agentActiveA2A[target]; activeKey != "" {
+		if task, ok := s.a2aTasks[activeKey]; ok && !isTerminalA2AStatus(task.Status) {
+			return task, false
+		}
+		delete(s.agentActiveA2A, target)
+	}
+	task := TeamTask{
+		ID:      taskID,
+		From:    from,
+		To:      target,
+		Status:  "running",
+		Summary: summary,
+		done:    make(chan TeamTask, 1),
+	}
+	key := a2aTaskKey(taskID, target)
+	s.a2aTasks[key] = task
+	s.agentActiveA2A[target] = key
+	return task, true
+}
+
+func (s *Session) markA2ATaskPending(taskID, target string) {
+	key := a2aTaskKey(taskID, target)
+	s.mu.Lock()
+	task, ok := s.a2aTasks[key]
+	if ok && !isTerminalA2AStatus(task.Status) {
+		task.Status = "pending"
+		s.a2aTasks[key] = task
+	}
+	s.mu.Unlock()
+	s.persist()
+}
+
+func (s *Session) finishA2ATask(taskID, target, status, result, errText string) {
+	key := a2aTaskKey(taskID, target)
+	var task TeamTask
+	var previousStatus string
+	var ok bool
+	var notify chan TeamTask
+	s.mu.Lock()
+	task, ok = s.a2aTasks[key]
+	if !ok {
+		task = TeamTask{ID: taskID, To: target}
+	}
+	previousStatus = task.Status
+	if isTerminalA2AStatus(previousStatus) {
+		s.mu.Unlock()
+		return
+	}
+	notify = task.done
+	task.Status = status
+	task.Result = result
+	task.Err = errText
+	s.a2aTasks[key] = task
+	if s.agentActiveA2A[target] == key {
+		delete(s.agentActiveA2A, target)
+	}
+	s.mu.Unlock()
+	if notify != nil {
+		select {
+		case notify <- task:
+		default:
+		}
+	}
+	s.persist()
+	if previousStatus == "pending" {
+		content := fmt.Sprintf("A2A task %s for %s is now %s.", taskID, target, status)
+		if errText != "" {
+			content += " Error: " + errText
+		}
+		if result != "" {
+			content += "\n\nResult preview:\n" + truncateTeamVisible(result, 1200)
+		}
+		s.appendDialogue(DialogueEntry{
+			FromAgent: "team-loop",
+			ToAgent:   []string{task.From},
+			Kind:      "task_status",
+			Summary:   "A2A task completed",
+			Content:   content,
+			TaskID:    taskID,
+		})
+	}
+}
+
+func (s *Session) finishActiveA2ATask(target, status, result, errText string) bool {
+	s.mu.Lock()
+	activeKey := s.agentActiveA2A[target]
+	if activeKey == "" {
+		s.mu.Unlock()
+		return false
+	}
+	task, ok := s.a2aTasks[activeKey]
+	s.mu.Unlock()
+	if !ok || isTerminalA2AStatus(task.Status) {
+		return false
+	}
+	s.finishA2ATask(task.ID, target, status, result, errText)
+	return true
+}
+
+func a2aResultFromTask(task TeamTask) map[string]any {
+	out := map[string]any{
+		"to":      task.To,
+		"status":  task.Status,
+		"task_id": task.ID,
+	}
+	if task.Result != "" {
+		out["result"] = task.Result
+	}
+	if task.Err != "" {
+		out["error"] = task.Err
+	}
+	return out
+}
+
 func (s *Session) ensureContractBeforeDispatch(from string, input A2AMessageInput) error {
 	if from != s.Spec.EntryAgent {
 		return nil
 	}
-	if !s.Spec.Gates.RequireContract {
-		return nil
-	}
-	taskType := strings.ToLower(strings.TrimSpace(input.TaskType))
-	if taskType == "" {
-		return nil
-	}
-	requires := []string{"implementation", "implement", "backend", "frontend", "qa", "verification", "review"}
+	targets := normalizeTargets(input.To)
+	s.mu.Lock()
+	hasContract := s.contract != nil
+	s.mu.Unlock()
 	matched := false
-	for _, marker := range requires {
-		if strings.Contains(taskType, marker) {
+	for _, policy := range s.matchTaskPolicies(targets, input.TaskType, !hasContract) {
+		if policy.RequiresContract {
 			matched = true
 			break
 		}
@@ -575,13 +921,10 @@ func (s *Session) ensureContractBeforeDispatch(from string, input A2AMessageInpu
 	if !matched {
 		return nil
 	}
-	s.mu.Lock()
-	hasContract := s.contract != nil
-	s.mu.Unlock()
 	if hasContract {
 		return nil
 	}
-	return fmt.Errorf("Cannot dispatch %q before recording Team Acceptance Contract. Team Leader must call RecordTeamContract first.", input.TaskType)
+	return fmt.Errorf("Cannot dispatch %q before recording the team contract. Team Leader must call RecordTeamContract first.", input.TaskType)
 }
 
 func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskType string, expectedArtifacts []string, isLeader bool) (string, error) {
@@ -618,10 +961,27 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 		"summary":  firstNonEmpty(taskType, "started"),
 	})
 	s.emit("team.agent.started", s.Snapshot())
-	agentPrompt := fmt.Sprintf("Message from %s.\nTask type: %s\nExpected artifacts: %s\n\n%s", from, taskType, strings.Join(expectedArtifacts, ", "), prompt)
+	policies := s.matchTaskPolicies([]string{agentID}, taskType, !s.hasRecordedContract())
+	stageGuard := teamTaskStageGuard(agentID, taskType, expectedArtifacts, policies)
+	if requiresExclusiveWorkspace(policies) {
+		s.setActivity(agentID, "running", "waiting for exclusive workspace", taskID)
+		s.workspaceMu.Lock()
+		defer s.workspaceMu.Unlock()
+		s.setActivity(agentID, "running", firstNonEmpty(taskType, "working"), taskID)
+	}
+	workspaceBefore := map[string]workspaceFileStamp(nil)
+	if shouldAuditTaskWrites(policies) {
+		workspaceBefore = snapshotWorkspaceFiles(s.Config.CWD)
+	}
+	agentPrompt := fmt.Sprintf("Message from %s.\nTask type: %s\nExpected artifacts: %s\n\n%s\n\n%s", from, taskType, strings.Join(expectedArtifacts, ", "), stageGuard, prompt)
 	var text strings.Builder
 	var eventErrors []string
-	for event := range runtime.Engine.SubmitMessage(ctx, agentPrompt, runtime.State, agentID) {
+	var writeAttemptPaths []string
+	agentSessionID := s.ParentSessionID
+	if strings.TrimSpace(agentSessionID) == "" {
+		agentSessionID = agentID
+	}
+	for event := range runtime.Engine.SubmitMessage(ctx, agentPrompt, runtime.State, agentSessionID, agentID) {
 		switch event.Type {
 		case "text":
 			text.WriteString(event.Content)
@@ -641,6 +1001,11 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 			})
 			if isTruthy(event.Metadata["is_error"]) {
 				s.setActivity(agentID, "running", "tool error; continuing", taskID)
+			} else {
+				if path, ok := writeFilePathFromToolResult(fmt.Sprint(event.Metadata["result"])); ok && s.pathInsideWorkspace(path) {
+					writeAttemptPaths = append(writeAttemptPaths, path)
+				}
+				s.recordWriteFileArtifactFromEvent(agentID, event)
 			}
 		case "error":
 			msg := formatAgentError(agentID, event)
@@ -659,6 +1024,34 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 		s.persist()
 		s.emit("team.frame.snapshot", s.Snapshot())
 		return "", ctx.Err()
+	}
+	if len(workspaceBefore) > 0 {
+		auditExpectedArtifacts := s.expectedArtifactsForWorkspaceAudit(expectedArtifacts)
+		violations := append(
+			taskWriteViolations(s.Config.CWD, workspaceBefore, snapshotWorkspaceFiles(s.Config.CWD), auditExpectedArtifacts, policies),
+			taskWriteAttemptViolations(s.Config.CWD, writeAttemptPaths, auditExpectedArtifacts, policies)...,
+		)
+		violations = compactSortedStrings(violations)
+		if len(violations) > 12 {
+			violations = append(violations[:12], fmt.Sprintf("... %d more", len(violations)-12))
+		}
+		if len(violations) > 0 {
+			errMsg := fmt.Sprintf("agent %s modified implementation/runtime files during %s stage: %s", agentID, firstNonEmpty(taskType, "planning"), strings.Join(violations, ", "))
+			if invalidated := s.invalidateGateVerdictsForAgent(agentID, errMsg); len(invalidated) > 0 {
+				errMsg += fmt.Sprintf(" (invalidated gate verdicts: %s)", strings.Join(invalidated, ", "))
+			}
+			s.appendTimeline("team.agent.stage_violation", map[string]any{
+				"agent_id":   agentID,
+				"task_id":    taskID,
+				"task_type":  taskType,
+				"violations": violations,
+			})
+			s.appendRecovery(errMsg)
+			s.setActivity(agentID, "failed", "stage violation", taskID)
+			s.persist()
+			s.emit("team.frame.snapshot", s.Snapshot())
+			return "", fmt.Errorf("%s", errMsg)
+		}
 	}
 	result := strings.TrimSpace(text.String())
 	if result != "" && !isLeader {
@@ -691,6 +1084,508 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 	return result, nil
 }
 
+type workspaceFileStamp struct {
+	size    int64
+	modTime int64
+	isDir   bool
+}
+
+func (s *Session) hasRecordedContract() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contract != nil
+}
+
+func (s *Session) TeamContext(from string, input GetTeamContextInput) TeamContextView {
+	limit := input.RecentDialogueLimit
+	if limit <= 0 {
+		limit = 8
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	artifacts := append([]Artifact(nil), s.artifacts...)
+	verdicts := cloneGateVerdicts(s.gateVerdicts)
+	rows := make([]ActivityRow, 0, len(s.activity))
+	for _, row := range s.activity {
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i].AgentID < rows[j].AgentID
+	})
+	tasks := make([]TeamTask, 0, len(s.a2aTasks))
+	for _, task := range s.a2aTasks {
+		task.done = nil
+		if len(task.Result) > 1200 {
+			task.Result = truncateTeamVisible(task.Result, 1200)
+		}
+		tasks = append(tasks, task)
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].ID == tasks[j].ID {
+			return tasks[i].To < tasks[j].To
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+	var recent []DialogueEntry
+	if input.IncludeRecentDialogue && len(s.dialogue) > 0 {
+		start := len(s.dialogue) - limit
+		if start < 0 {
+			start = 0
+		}
+		recent = append([]DialogueEntry(nil), s.dialogue[start:]...)
+	}
+	return TeamContextView{
+		TeamSessionID:   s.ID,
+		ParentSessionID: s.ParentSessionID,
+		TeamName:        s.Spec.Name,
+		CurrentAgent:    from,
+		CWD:             s.Config.CWD,
+		Contract:        cloneContract(s.contract),
+		Artifacts:       artifacts,
+		GateVerdicts:    verdicts,
+		ActivityRows:    rows,
+		A2ATasks:        tasks,
+		RecentDialogue:  recent,
+	}
+}
+
+func (s *Session) matchTaskPolicies(targets []string, taskType string, beforeContract bool) []TeamTaskPolicySpec {
+	taskType = strings.ToLower(strings.TrimSpace(taskType))
+	targets = normalizeTargets(targets)
+	var matched []TeamTaskPolicySpec
+	for _, policy := range s.Spec.TaskPolicies {
+		if policy.BeforeContract && !beforeContract {
+			continue
+		}
+		if !policyMatchesTargets(policy, targets) {
+			continue
+		}
+		if !policyMatchesTaskType(policy, taskType) {
+			continue
+		}
+		matched = append(matched, policy)
+	}
+	return matched
+}
+
+func policyMatchesTargets(policy TeamTaskPolicySpec, targets []string) bool {
+	if len(policy.Targets) == 0 || len(targets) == 0 {
+		return true
+	}
+	for _, target := range targets {
+		for _, pattern := range policy.Targets {
+			if matchPolicyPattern(strings.ToLower(strings.TrimSpace(pattern)), strings.ToLower(strings.TrimSpace(target))) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func policyMatchesTaskType(policy TeamTaskPolicySpec, taskType string) bool {
+	if len(policy.TaskTypes) == 0 {
+		return true
+	}
+	for _, pattern := range policy.TaskTypes {
+		if matchPolicyPattern(strings.ToLower(strings.TrimSpace(pattern)), taskType) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchPolicyPattern(pattern, value string) bool {
+	if pattern == "" {
+		return value == ""
+	}
+	if pattern == "*" || pattern == "all" {
+		return true
+	}
+	if ok := matchSlashGlob(pattern, value); ok {
+		return true
+	}
+	return pattern == value
+}
+
+func teamTaskStageGuard(agentID, taskType string, expectedArtifacts []string, policies []TeamTaskPolicySpec) string {
+	expected := strings.Join(nonEmptyStrings(expectedArtifacts), ", ")
+	if expected == "" {
+		expected = "(none declared)"
+	}
+	if len(policies) == 0 {
+		return "Stage guard:\n- Follow the Team shared process and stay within this task type, role boundary, and expected artifact list."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Stage guard:\n- Agent: %s\n- Task type: %s\n- Expected artifacts: %s\n", agentID, firstNonEmpty(taskType, "(unspecified)"), expected)
+	for _, policy := range policies {
+		fmt.Fprintf(&b, "- Active policy: %s", firstNonEmpty(policy.Name, "(unnamed)"))
+		if strings.TrimSpace(policy.Description) != "" {
+			fmt.Fprintf(&b, " - %s", strings.TrimSpace(policy.Description))
+		}
+		b.WriteString("\n")
+		if policy.RequiresContract {
+			b.WriteString("  - This task requires a recorded team contract before dispatch.\n")
+		}
+		if policy.ExclusiveWorkspace {
+			b.WriteString("  - This task has exclusive workspace access while it runs; do not assume other agents can concurrently mutate project files.\n")
+		}
+		if policy.RestrictWritesToExpectedArtifacts {
+			b.WriteString("  - Writes are restricted to the expected artifacts plus explicitly allowed write globs.\n")
+		}
+		if len(policy.AllowedWriteGlobs) > 0 {
+			fmt.Fprintf(&b, "  - Allowed write globs: %s\n", strings.Join(policy.AllowedWriteGlobs, ", "))
+		}
+		if len(policy.DeniedWriteGlobs) > 0 {
+			fmt.Fprintf(&b, "  - Denied write globs: %s\n", strings.Join(policy.DeniedWriteGlobs, ", "))
+		}
+	}
+	b.WriteString("- Stay within the active policy. If the requested work conflicts with the policy, report the conflict instead of bypassing it.")
+	return b.String()
+}
+
+func shouldAuditTaskWrites(policies []TeamTaskPolicySpec) bool {
+	for _, policy := range policies {
+		if policy.AuditWrites || policy.RestrictWritesToExpectedArtifacts || len(policy.AllowedWriteGlobs) > 0 || len(policy.DeniedWriteGlobs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresExclusiveWorkspace(policies []TeamTaskPolicySpec) bool {
+	for _, policy := range policies {
+		if policy.ExclusiveWorkspace {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) invalidateGateVerdictsForAgent(agentID, reason string) []string {
+	agentID = strings.TrimSpace(agentID)
+	if s == nil || agentID == "" {
+		return nil
+	}
+	var invalidated []string
+	s.mu.Lock()
+	for name, verdict := range s.gateVerdicts {
+		if verdict.AgentID != agentID {
+			continue
+		}
+		delete(s.gateVerdicts, name)
+		invalidated = append(invalidated, name)
+		delete(s.gate, name)
+	}
+	s.mu.Unlock()
+	invalidated = compactSortedStrings(invalidated)
+	if len(invalidated) > 0 {
+		s.appendTimeline("team.gate.invalidated", map[string]any{
+			"agent_id": agentID,
+			"gates":    invalidated,
+			"reason":   reason,
+		})
+	}
+	return invalidated
+}
+
+func snapshotWorkspaceFiles(root string) map[string]workspaceFileStamp {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	out := map[string]workspaceFileStamp{}
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			switch name {
+			case ".git", ".lumina", ".Lumina", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build":
+				if path != root {
+					return filepath.SkipDir
+				}
+			}
+			if path != root {
+				if info, err := d.Info(); err == nil {
+					if rel, err := filepath.Rel(root, path); err == nil {
+						out[filepath.ToSlash(rel)+"/"] = workspaceFileStamp{modTime: info.ModTime().UnixNano(), isDir: true}
+					}
+				}
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		out[filepath.ToSlash(rel)] = workspaceFileStamp{size: info.Size(), modTime: info.ModTime().UnixNano()}
+		return nil
+	})
+	return out
+}
+
+func taskWriteViolations(root string, before, after map[string]workspaceFileStamp, expectedArtifacts []string, policies []TeamTaskPolicySpec) []string {
+	if len(after) == 0 {
+		return nil
+	}
+	allowedExact := allowedExpectedArtifactSet(root, expectedArtifacts)
+	allowGlobs := collectPolicyGlobs(policies, true)
+	denyGlobs := collectPolicyGlobs(policies, false)
+	restrictToAllowList := len(allowGlobs) > 0 || restrictWritesToExpectedArtifacts(policies)
+	var violations []string
+	for rel, stamp := range after {
+		prev, existed := before[rel]
+		if existed && prev == stamp {
+			continue
+		}
+		if matchesAnySlashGlob(denyGlobs, rel) {
+			violations = append(violations, rel)
+			continue
+		}
+		if isAllowedExpectedArtifact(rel, allowedExact) || matchesAnySlashGlob(allowGlobs, rel) {
+			continue
+		}
+		if stamp.isDir {
+			continue
+		}
+		if restrictToAllowList {
+			violations = append(violations, rel)
+		}
+	}
+	sort.Strings(violations)
+	if len(violations) > 12 {
+		violations = append(violations[:12], fmt.Sprintf("... %d more", len(violations)-12))
+	}
+	return violations
+}
+
+func taskWriteAttemptViolations(root string, writtenPaths []string, expectedArtifacts []string, policies []TeamTaskPolicySpec) []string {
+	if len(writtenPaths) == 0 {
+		return nil
+	}
+	allowedExact := allowedExpectedArtifactSet(root, expectedArtifacts)
+	allowGlobs := collectPolicyGlobs(policies, true)
+	denyGlobs := collectPolicyGlobs(policies, false)
+	restrictToAllowList := len(allowGlobs) > 0 || restrictWritesToExpectedArtifacts(policies)
+	var violations []string
+	for _, path := range writtenPaths {
+		rel, ok := workspaceRelPath(root, path)
+		if !ok {
+			continue
+		}
+		if matchesAnySlashGlob(denyGlobs, rel) {
+			violations = append(violations, rel)
+			continue
+		}
+		if isAllowedExpectedArtifact(rel, allowedExact) || matchesAnySlashGlob(allowGlobs, rel) {
+			continue
+		}
+		if restrictToAllowList {
+			violations = append(violations, rel)
+		}
+	}
+	violations = compactSortedStrings(violations)
+	if len(violations) > 12 {
+		violations = append(violations[:12], fmt.Sprintf("... %d more", len(violations)-12))
+	}
+	return violations
+}
+
+func compactSortedStrings(values []string) []string {
+	values = nonEmptyStrings(values)
+	sort.Strings(values)
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func restrictWritesToExpectedArtifacts(policies []TeamTaskPolicySpec) bool {
+	for _, policy := range policies {
+		if policy.RestrictWritesToExpectedArtifacts {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceRelPath(root, path string) (string, bool) {
+	root = strings.TrimSpace(root)
+	path = strings.TrimSpace(path)
+	if root == "" || path == "" {
+		return "", false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return filepath.ToSlash(filepath.Clean(rel)), true
+}
+
+func allowedExpectedArtifactSet(root string, expectedArtifacts []string) map[string]bool {
+	allowed := map[string]bool{}
+	for _, artifact := range expectedArtifacts {
+		artifact = strings.TrimSpace(artifact)
+		if artifact == "" {
+			continue
+		}
+		artifact = strings.Trim(artifact, "`\"'")
+		if filepath.IsAbs(artifact) {
+			if rel, err := filepath.Rel(root, artifact); err == nil {
+				artifact = rel
+			}
+		}
+		allowed[filepath.ToSlash(filepath.Clean(artifact))] = true
+	}
+	return allowed
+}
+
+func (s *Session) expectedArtifactsForWorkspaceAudit(expectedArtifacts []string) []string {
+	out := append([]string(nil), expectedArtifacts...)
+	if s == nil {
+		return out
+	}
+	cwd := strings.TrimSpace(s.Config.CWD)
+	if cwd == "" {
+		return out
+	}
+	s.mu.Lock()
+	projectRoot := ""
+	if s.contract != nil {
+		projectRoot = strings.TrimSpace(s.contract.ProjectRoot)
+	}
+	s.mu.Unlock()
+	if projectRoot == "" {
+		return out
+	}
+	if !filepath.IsAbs(projectRoot) {
+		projectRoot = filepath.Join(cwd, projectRoot)
+	}
+	projectRoot = filepath.Clean(projectRoot)
+	cwd = filepath.Clean(cwd)
+	projectRel, err := filepath.Rel(cwd, projectRoot)
+	if err != nil || projectRel == "." || strings.HasPrefix(projectRel, "..") {
+		return out
+	}
+	projectRel = filepath.ToSlash(projectRel)
+	seen := map[string]bool{}
+	for _, artifact := range out {
+		seen[filepath.ToSlash(filepath.Clean(strings.TrimSpace(artifact)))] = true
+	}
+	for _, artifact := range expectedArtifacts {
+		artifact = strings.TrimSpace(artifact)
+		if artifact == "" || filepath.IsAbs(artifact) {
+			continue
+		}
+		clean := filepath.ToSlash(filepath.Clean(strings.Trim(artifact, "`\"'")))
+		if clean == "." || strings.HasPrefix(clean, projectRel+"/") {
+			continue
+		}
+		expanded := filepath.ToSlash(filepath.Join(projectRel, clean))
+		if !seen[expanded] {
+			out = append(out, expanded)
+			seen[expanded] = true
+		}
+	}
+	return out
+}
+
+func isAllowedExpectedArtifact(rel string, allowed map[string]bool) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if allowed[rel] {
+		return true
+	}
+	base := filepath.Base(rel)
+	return allowed[base]
+}
+
+func collectPolicyGlobs(policies []TeamTaskPolicySpec, allowed bool) []string {
+	var globs []string
+	for _, policy := range policies {
+		if allowed {
+			globs = append(globs, policy.AllowedWriteGlobs...)
+		} else {
+			globs = append(globs, policy.DeniedWriteGlobs...)
+		}
+	}
+	return nonEmptyStrings(globs)
+}
+
+func matchesAnySlashGlob(patterns []string, rel string) bool {
+	for _, pattern := range patterns {
+		if matchSlashGlob(pattern, rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchSlashGlob(pattern, rel string) bool {
+	pattern = filepath.ToSlash(filepath.Clean(strings.TrimSpace(pattern)))
+	rel = filepath.ToSlash(filepath.Clean(strings.TrimSpace(rel)))
+	if pattern == "." || pattern == "" {
+		return rel == "." || rel == ""
+	}
+	if pattern == "*" || pattern == "**" {
+		return true
+	}
+	if pattern == rel {
+		return true
+	}
+	ok, err := filepath.Match(pattern, rel)
+	if err == nil && ok {
+		return true
+	}
+	regex := slashGlobRegex(pattern)
+	ok, err = regexp.MatchString(regex, rel)
+	return err == nil && ok
+}
+
+func slashGlobRegex(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		switch ch {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString("[^/]*")
+			}
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(ch)))
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
 func (s *Session) RecordContract(from string, input AcceptanceContract) string {
 	if from != s.Spec.EntryAgent {
 		return "Only the Team Leader can record the team acceptance contract."
@@ -711,6 +1606,7 @@ func (s *Session) RecordContract(from string, input AcceptanceContract) string {
 	}
 	s.contract = cloneContract(&input)
 	s.mu.Unlock()
+	s.registerExistingArtifacts(from, input.RequiredArtifacts)
 	s.appendTimeline("team.contract.recorded", input)
 	s.appendDialogue(DialogueEntry{
 		FromAgent: from,
@@ -724,53 +1620,117 @@ func (s *Session) RecordContract(from string, input AcceptanceContract) string {
 	return "Team acceptance contract recorded."
 }
 
+func (s *Session) registerExistingArtifacts(owner string, artifacts []string) {
+	var changed bool
+	for _, artifact := range nonEmptyStrings(artifacts) {
+		if path, ok := s.resolveExpectedArtifactPath(artifact); ok {
+			before := len(s.Artifacts())
+			s.recordArtifact(owner, s.artifactDisplayName(artifact, path), firstLineFromFile(path), path)
+			if len(s.Artifacts()) != before {
+				changed = true
+			}
+		}
+	}
+	if changed {
+		s.persist()
+	}
+}
+
+func (s *Session) isGateAgent(agentID string) bool {
+	for _, check := range s.Spec.Gates.Checks {
+		if strings.TrimSpace(check.Agent) == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) gateCheckForRoleOrAgent(role, from string) (TeamGateCheckSpec, bool) {
+	role = strings.TrimSpace(role)
+	from = strings.TrimSpace(from)
+	for _, check := range s.Spec.Gates.Checks {
+		if check.Name == role || check.Agent == role || check.Agent == from {
+			if check.Agent == from {
+				return check, true
+			}
+		}
+	}
+	return TeamGateCheckSpec{}, false
+}
+
+func (s *Session) validateGateVerdictInput(from, role string, verdict GateVerdict) (bool, string) {
+	check, ok := s.gateCheckForRoleOrAgent(role, from)
+	if !ok {
+		return false, fmt.Sprintf("%s is not a configured gate for agent %s.", role, from)
+	}
+	if check.Agent != from {
+		return false, fmt.Sprintf("gate %s must be submitted by agent %s, not %s.", check.Name, check.Agent, from)
+	}
+	status := strings.TrimSpace(verdict.Status)
+	if status == "" {
+		return false, "status must not be empty."
+	}
+	if !statusIn(status, check.AllowedStatuses) {
+		return false, fmt.Sprintf("status must be one of: %s.", strings.Join(check.AllowedStatuses, ", "))
+	}
+	if statusIn(status, check.EvidenceRequiredStatuses) && len(verdict.Evidence) == 0 {
+		return false, fmt.Sprintf("gate %s status %s requires evidence.", check.Name, status)
+	}
+	if statusIn(status, check.FindingsRequiredStatuses) && len(verdict.Findings) == 0 {
+		return false, fmt.Sprintf("gate %s status %s requires findings.", check.Name, status)
+	}
+	return true, ""
+}
+
+func statusIn(status string, allowed []string) bool {
+	status = strings.TrimSpace(status)
+	for _, item := range allowed {
+		if status == strings.TrimSpace(item) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Session) SubmitGateVerdict(from string, input GateVerdict) string {
 	role := strings.TrimSpace(input.Role)
 	if role == "" {
 		role = from
 	}
-	if role != "qa" && role != "reviewer" {
-		return "Cannot submit gate verdict: role must be qa or reviewer."
+	check, ok := s.gateCheckForRoleOrAgent(role, from)
+	if !ok {
+		return fmt.Sprintf("Cannot submit gate verdict: %s is not configured as a gate for agent %s.", role, from)
 	}
-	if from != role {
-		return fmt.Sprintf("Cannot submit %s verdict from agent %s.", role, from)
+	if ok, msg := s.validateGateVerdictInput(from, check.Name, input); !ok {
+		return "Cannot submit gate verdict: " + msg
 	}
-	if role == "reviewer" && strings.TrimSpace(input.Status) == "reject" {
-		// Rejections are stored, but completion will continue to fail until repair and re-review.
-	} else if role == "qa" && !validQAStatus(input.Status) {
-		return "Cannot submit QA verdict: status must be pass or not_applicable."
-	} else if role == "reviewer" && !validReviewerStatus(input.Status) {
-		return "Cannot submit Reviewer verdict: status must be pass, accepted_with_notes, or reject."
-	}
-	input.Role = role
+	input.Role = check.Name
 	input.AgentID = from
 	input.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.mu.Lock()
 	if s.gateVerdicts == nil {
 		s.gateVerdicts = map[string]GateVerdict{}
 	}
-	if role == "qa" {
-		if previous, ok := s.gateVerdicts[role]; ok {
-			input = mergeQAGateVerdict(previous, input)
-		}
+	if previous, ok := s.gateVerdicts[check.Name]; ok {
+		input = mergeGateVerdict(previous, input)
 	}
-	s.gateVerdicts[role] = input
-	if role == "qa" {
-		s.gate.QA = input.Status
-	} else {
-		s.gate.Reviewer = input.Status
+	s.gateVerdicts[check.Name] = input
+	if s.gate == nil {
+		s.gate = GateStatus{}
 	}
+	s.gate[check.Name] = input.Status
 	s.mu.Unlock()
 	s.appendTimeline("team.gate.verdict", input)
 	s.appendDialogue(DialogueEntry{
 		FromAgent: from,
 		ToAgent:   []string{s.Spec.EntryAgent},
 		Kind:      "gate_verdict",
-		Summary:   fmt.Sprintf("%s verdict: %s", strings.ToUpper(role), input.Status),
+		Summary:   fmt.Sprintf("%s verdict: %s", strings.ToUpper(check.Name), input.Status),
 		Content:   gateVerdictDialogueSummary(input),
 	})
 	s.persist()
 	s.emit("team.frame.snapshot", s.Snapshot())
+	s.finishActiveA2ATask(from, "completed", gateVerdictDialogueSummary(input), "")
 	return "Gate verdict recorded."
 }
 
@@ -793,7 +1753,9 @@ func (s *Session) CompleteTask(from string, input CompleteTeamTaskInput) string 
 	s.mu.Lock()
 	s.completed = true
 	s.finalAnswer = input.FinalAnswer
-	s.gate = GateStatus{QA: input.QAStatus, Reviewer: input.ReviewerStatus}
+	if statuses := completionGateStatuses(input); len(statuses) > 0 {
+		s.gate = cloneGateStatus(statuses)
+	}
 	if row, ok := s.activity[from]; ok {
 		row.Status = "completed"
 		row.Summary = firstNonEmpty(input.Summary, "Team task complete")
@@ -805,7 +1767,7 @@ func (s *Session) CompleteTask(from string, input CompleteTeamTaskInput) string 
 		Summary: firstNonEmpty(input.Summary, "Team task complete"),
 		Content: input.FinalAnswer, ArtifactRefs: input.RequiredArtifacts,
 	})
-	s.appendTimeline("loop.completed", map[string]any{"summary": input.Summary, "qa_status": input.QAStatus, "reviewer_status": input.ReviewerStatus, "deferral_reasons": input.DeferralReasons})
+	s.appendTimeline("loop.completed", map[string]any{"summary": input.Summary, "gate_statuses": completionGateStatuses(input), "deferral_reasons": input.DeferralReasons})
 	s.persist()
 	return "Team task marked complete."
 }
@@ -823,50 +1785,28 @@ func (s *Session) validateCompletion(input CompleteTeamTaskInput) error {
 	if contract != nil {
 		required = append(required, contract.RequiredArtifacts...)
 	}
-	if gates.QAAgent != "" {
-		qa, ok := verdicts[gates.QAAgent]
+	for _, check := range gates.Checks {
+		verdict, ok := verdicts[check.Name]
 		if !ok {
-			return fmt.Errorf("missing structured QA gate verdict from %s; that agent must call SubmitGateVerdict", gates.QAAgent)
+			return fmt.Errorf("missing structured gate verdict for %s from %s; that agent must call SubmitGateVerdict", check.Name, check.Agent)
 		}
-		if strings.TrimSpace(input.QAStatus) == "" {
-			return fmt.Errorf("qa_status is required for team QA gate %s", gates.QAAgent)
+		wantStatus := completionGateStatus(input, check.Name)
+		if strings.TrimSpace(wantStatus) == "" {
+			return fmt.Errorf("gate_statuses[%s] is required for configured gate agent %s", check.Name, check.Agent)
 		}
-		if input.QAStatus != qa.Status {
-			return fmt.Errorf("qa_status %q does not match latest QA verdict %q", input.QAStatus, qa.Status)
+		if wantStatus != verdict.Status {
+			return fmt.Errorf("gate_statuses[%s] %q does not match latest gate verdict %q", check.Name, wantStatus, verdict.Status)
 		}
-		if !validQAStatus(qa.Status) || qa.Status != "pass" {
-			if qa.Status != "not_applicable" {
-				return fmt.Errorf("QA gate is not pass/not_applicable: %s", qa.Status)
-			}
+		if !statusIn(verdict.Status, check.PassStatuses) {
+			return fmt.Errorf("gate %s is not in pass statuses (%s): %s", check.Name, strings.Join(check.PassStatuses, ", "), verdict.Status)
 		}
-		if err := validateGateFindings("QA", qa, gates, input.DeferralReasons); err != nil {
+		if err := validateGateFindings(check.Name, verdict, gates, input.DeferralReasons); err != nil {
 			return err
 		}
-		if qa.Status == "pass" && contract != nil {
-			if missing := missingRequiredEvidence(contract, qa.Evidence); len(missing) > 0 {
-				return fmt.Errorf("QA evidence missing required contract checks: %s", strings.Join(missing, ", "))
+		if statusIn(verdict.Status, check.EvidenceRequiredStatuses) && contract != nil {
+			if missing := missingRequiredEvidence(contract, verdict.Evidence); len(missing) > 0 {
+				return fmt.Errorf("gate %s evidence missing required contract checks: %s", check.Name, strings.Join(missing, ", "))
 			}
-		}
-	}
-	if gates.ReviewerAgent != "" {
-		reviewer, ok := verdicts[gates.ReviewerAgent]
-		if !ok {
-			return fmt.Errorf("missing structured Reviewer gate verdict from %s; that agent must call SubmitGateVerdict", gates.ReviewerAgent)
-		}
-		if strings.TrimSpace(input.ReviewerStatus) == "" {
-			return fmt.Errorf("reviewer_status is required for team Reviewer gate %s", gates.ReviewerAgent)
-		}
-		if input.ReviewerStatus != reviewer.Status {
-			return fmt.Errorf("reviewer_status %q does not match latest Reviewer verdict %q", input.ReviewerStatus, reviewer.Status)
-		}
-		if !validReviewerStatus(reviewer.Status) {
-			return fmt.Errorf("Reviewer gate is not pass/accepted_with_notes: %s", reviewer.Status)
-		}
-		if strings.EqualFold(reviewer.Status, "accepted_with_notes") && containsBlockingLanguage(reviewer) {
-			return fmt.Errorf("Reviewer accepted_with_notes contains blocking language")
-		}
-		if err := validateGateFindings("Reviewer", reviewer, gates, input.DeferralReasons); err != nil {
-			return err
 		}
 	}
 	required = append(required, input.RequiredArtifacts...)
@@ -879,10 +1819,27 @@ func (s *Session) validateCompletion(input CompleteTeamTaskInput) error {
 	return nil
 }
 
+func completionGateStatuses(input CompleteTeamTaskInput) GateStatus {
+	statuses := GateStatus{}
+	for k, v := range input.GateStatuses {
+		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
+			statuses[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return statuses
+}
+
+func completionGateStatus(input CompleteTeamTaskInput, name string) string {
+	return completionGateStatuses(input)[name]
+}
+
 func validateGateFindings(label string, verdict GateVerdict, gates TeamGateSpec, deferrals map[string]string) error {
 	for _, finding := range verdict.Findings {
 		if finding.Blocking {
 			return fmt.Errorf("%s has blocking finding: %s", label, finding.Summary)
+		}
+		if isResolvedGateFinding(finding) {
+			continue
 		}
 		if gates.NonblockingFindings == "require_followup_or_deferral" {
 			reason := gateFindingDeferralReason(label, finding, deferrals)
@@ -892,6 +1849,33 @@ func validateGateFindings(label string, verdict GateVerdict, gates TeamGateSpec,
 		}
 	}
 	return nil
+}
+
+func isResolvedGateFinding(finding GateFinding) bool {
+	text := strings.ToLower(strings.TrimSpace(finding.Summary + " " + finding.Details))
+	if text == "" {
+		return false
+	}
+	resolvedMarkers := []string{
+		"fixed",
+		"verified",
+		"resolved",
+		"confirmed",
+		"validated",
+		"no regression",
+		"已修复",
+		"已验证",
+		"验证通过",
+		"已解决",
+		"修复确认",
+		"无回归",
+	}
+	for _, marker := range resolvedMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func gateFindingDeferralReason(label string, finding GateFinding, deferrals map[string]string) string {
@@ -908,8 +1892,14 @@ func gateFindingDeferralReason(label string, finding GateFinding, deferrals map[
 		normalized[normalizeDeferralKey(key)] = strings.TrimSpace(value)
 	}
 	for _, key := range keys {
-		if reason := normalized[normalizeDeferralKey(key)]; reason != "" {
+		want := normalizeDeferralKey(key)
+		if reason := normalized[want]; reason != "" {
 			return reason
+		}
+		for actual, reason := range normalized {
+			if reason != "" && deferralKeysMatch(want, actual) {
+				return reason
+			}
 		}
 	}
 	return ""
@@ -919,6 +1909,60 @@ func normalizeDeferralKey(key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.Join(strings.Fields(key), " ")
 	return key
+}
+
+func deferralKeysMatch(want, actual string) bool {
+	want = normalizeDeferralKey(want)
+	actual = normalizeDeferralKey(actual)
+	if want == "" || actual == "" {
+		return false
+	}
+	if want == actual || strings.Contains(want, actual) || strings.Contains(actual, want) {
+		return true
+	}
+	wantTokens := significantDeferralTokens(want)
+	actualTokens := significantDeferralTokens(actual)
+	if len(wantTokens) < 4 || len(actualTokens) < 4 {
+		return false
+	}
+	actualSet := map[string]struct{}{}
+	for _, token := range actualTokens {
+		actualSet[token] = struct{}{}
+	}
+	matched := 0
+	for _, token := range wantTokens {
+		if _, ok := actualSet[token]; ok {
+			matched++
+		}
+	}
+	required := int(math.Ceil(float64(len(wantTokens)) * 0.75))
+	if required < 4 {
+		required = 4
+	}
+	return matched >= required
+}
+
+func significantDeferralTokens(value string) []string {
+	replacer := strings.NewReplacer(
+		":", " ", ";", " ", ",", " ", ".", " ", "(", " ", ")", " ",
+		"`", " ", "'", " ", "\"", " ", "—", " ", "-", " ", "_", " ",
+		"/", " ", "\\", " ",
+	)
+	value = replacer.Replace(strings.ToLower(value))
+	var out []string
+	stop := map[string]struct{}{
+		"a": {}, "an": {}, "and": {}, "are": {}, "as": {}, "but": {}, "for": {}, "has": {}, "in": {}, "is": {}, "it": {}, "of": {}, "or": {}, "the": {}, "to": {}, "use": {}, "uses": {}, "with": {},
+	}
+	for _, token := range strings.Fields(value) {
+		if len([]rune(token)) < 2 {
+			continue
+		}
+		if _, ok := stop[token]; ok {
+			continue
+		}
+		out = append(out, token)
+	}
+	return out
 }
 
 func (s *Session) missingRequiredArtifactsLocked(required []string) []string {
@@ -1051,10 +2095,12 @@ func gateVerdictDialogueSummary(verdict GateVerdict) string {
 
 func missingRequiredEvidence(contract *AcceptanceContract, evidence []GateEvidence) []string {
 	seen := map[string]bool{}
+	var passed []GateEvidence
 	for _, item := range evidence {
 		if !item.Passed {
 			continue
 		}
+		passed = append(passed, item)
 		for _, key := range []string{item.Name, item.Command} {
 			key = normalizeEvidenceKey(key)
 			if key != "" {
@@ -1072,6 +2118,9 @@ func missingRequiredEvidence(contract *AcceptanceContract, evidence []GateEviden
 		if (nameKey != "" && seen[nameKey]) || (commandKey != "" && seen[commandKey]) {
 			continue
 		}
+		if requiredEvidenceCovered(check, passed) {
+			continue
+		}
 		missing = append(missing, firstNonEmpty(check.Name, check.Command))
 	}
 	return missing
@@ -1081,21 +2130,290 @@ func normalizeEvidenceKey(value string) string {
 	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
 }
 
-func containsBlockingLanguage(verdict GateVerdict) bool {
-	haystack := strings.ToLower(verdict.Summary)
-	for _, finding := range verdict.Findings {
-		haystack += "\n" + strings.ToLower(finding.Category+" "+finding.Summary+" "+finding.Details)
-	}
-	haystack = strings.ReplaceAll(haystack, "nonblocking", "")
-	haystack = strings.ReplaceAll(haystack, "non-blocking", "")
-	haystack = strings.ReplaceAll(haystack, "no blocking", "")
-	blocking := []string{"critical", "must fix", "must be fixed", "blocking", "build-breaking", "security", "data-loss", "correctness"}
-	for _, marker := range blocking {
-		if strings.Contains(haystack, marker) {
+func requiredEvidenceCovered(check ContractCheck, evidence []GateEvidence) bool {
+	for _, item := range evidence {
+		if commandEvidenceCovers(check.Command, item.Command) {
+			return true
+		}
+		if namedEvidenceCovers(check.Name, item) {
 			return true
 		}
 	}
 	return false
+}
+
+func namedEvidenceCovers(requiredName string, item GateEvidence) bool {
+	requiredName = normalizeEvidenceKey(requiredName)
+	if requiredName == "" {
+		return false
+	}
+	haystack := normalizeEvidenceKey(item.Name + " " + item.OutputSummary)
+	if haystack == "" {
+		return false
+	}
+	if strings.Contains(haystack, requiredName) {
+		return true
+	}
+	parts := significantEvidenceNameTokens(requiredName)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !strings.Contains(haystack, part) {
+			return false
+		}
+	}
+	return true
+}
+
+func significantEvidenceNameTokens(name string) []string {
+	name = strings.NewReplacer("-", " ", ":", " ", "/", " ", "_", " ").Replace(name)
+	var parts []string
+	for _, field := range strings.Fields(name) {
+		for _, part := range splitAlphaNumericAndCJK(field) {
+			part = strings.TrimSpace(part)
+			part = stripGenericEvidenceWords(part)
+			if part == "" || isGenericEvidenceNameToken(part) {
+				continue
+			}
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+func stripGenericEvidenceWords(token string) string {
+	for _, word := range []string{"命令", "验证", "场景", "测试", "检查", "功能", "路径"} {
+		token = strings.ReplaceAll(token, word, "")
+	}
+	return token
+}
+
+func splitAlphaNumericAndCJK(value string) []string {
+	var parts []string
+	var b strings.Builder
+	var lastClass int
+	flush := func() {
+		if b.Len() > 0 {
+			parts = append(parts, b.String())
+			b.Reset()
+		}
+	}
+	for _, r := range value {
+		class := evidenceRuneClass(r)
+		if class == 0 {
+			flush()
+			lastClass = 0
+			continue
+		}
+		if lastClass != 0 && class != lastClass {
+			flush()
+		}
+		b.WriteRune(r)
+		lastClass = class
+	}
+	flush()
+	return parts
+}
+
+func evidenceRuneClass(r rune) int {
+	switch {
+	case r >= 'a' && r <= 'z':
+		return 1
+	case r >= '0' && r <= '9':
+		return 1
+	case r >= '\u4e00' && r <= '\u9fff':
+		return 2
+	default:
+		return 0
+	}
+}
+
+func isGenericEvidenceNameToken(token string) bool {
+	switch token {
+	case "命令", "验证", "场景", "测试", "检查", "功能", "路径":
+		return true
+	}
+	return false
+}
+
+func commandEvidenceCovers(requiredCommand, evidenceCommand string) bool {
+	required := commandEvidenceFragments(requiredCommand)
+	if len(required) == 0 {
+		return false
+	}
+	actual := commandEvidenceFragments(evidenceCommand)
+	if len(actual) == 0 {
+		return false
+	}
+	for _, want := range required {
+		found := false
+		for _, got := range actual {
+			if commandFragmentMatches(want, got) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func commandEvidenceFragments(command string) []string {
+	command = normalizeQuotedShellArgs(strings.ToLower(strings.TrimSpace(command)))
+	command = strings.NewReplacer("&&", ";", "||", ";").Replace(command)
+	parts := strings.Split(command, ";")
+	var out []string
+	for _, part := range parts {
+		fields := commandEvidenceFields(part)
+		if len(fields) == 0 || isStatusCheckFragment(fields) {
+			continue
+		}
+		out = append(out, strings.Join(fields, " "))
+	}
+	return out
+}
+
+func commandEvidenceFields(fragment string) []string {
+	var fields []string
+	for _, field := range strings.Fields(fragment) {
+		field = strings.TrimSpace(field)
+		if field == "" || isShellRedirectionToken(field) {
+			continue
+		}
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+func normalizeQuotedShellArgs(value string) string {
+	var b strings.Builder
+	inSingle := false
+	inDouble := false
+	wroteWildcard := false
+	for _, r := range value {
+		switch {
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+				if !wroteWildcard {
+					b.WriteString(" * ")
+					wroteWildcard = true
+				}
+			}
+		case inDouble:
+			if r == '"' {
+				inDouble = false
+				if !wroteWildcard {
+					b.WriteString(" * ")
+					wroteWildcard = true
+				}
+			}
+		case r == '\'':
+			inSingle = true
+			wroteWildcard = false
+		case r == '"':
+			inDouble = true
+			wroteWildcard = false
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func isShellRedirectionToken(token string) bool {
+	if token == ">" || token == ">>" || token == "<" {
+		return true
+	}
+	if strings.Contains(token, ">&") || strings.Contains(token, "<&") {
+		return true
+	}
+	if strings.HasPrefix(token, ">") || strings.HasPrefix(token, "2>") || strings.HasPrefix(token, "1>") {
+		return true
+	}
+	return false
+}
+
+func isStatusCheckFragment(fields []string) bool {
+	if len(fields) == 0 {
+		return true
+	}
+	switch fields[0] {
+	case "echo":
+		for _, field := range fields[1:] {
+			if strings.Contains(field, "$?") {
+				return true
+			}
+		}
+	case "test", "[":
+		for _, field := range fields[1:] {
+			if strings.Contains(field, "$?") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandFragmentMatches(required, actual string) bool {
+	if required == actual {
+		return true
+	}
+	requiredFields := strings.Fields(required)
+	actualFields := strings.Fields(actual)
+	if len(requiredFields) == 0 || len(actualFields) < len(requiredFields) {
+		return false
+	}
+	for i, want := range requiredFields {
+		if want == "*" || actualFields[i] == "*" {
+			continue
+		}
+		if want != actualFields[i] {
+			if literalInputArgumentMatches(requiredFields, actualFields, i) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func literalInputArgumentMatches(requiredFields, actualFields []string, index int) bool {
+	if index != len(requiredFields)-1 || index != len(actualFields)-1 {
+		return false
+	}
+	if len(requiredFields) < 2 || requiredFields[index] == "" || actualFields[index] == "" {
+		return false
+	}
+	action := requiredFields[index-1]
+	switch action {
+	case "add", "create", "new":
+		return !looksLikeControlArgument(requiredFields[index]) && !looksLikeControlArgument(actualFields[index])
+	default:
+		return false
+	}
+}
+
+func looksLikeControlArgument(value string) bool {
+	if value == "" || value == "*" {
+		return false
+	}
+	if strings.HasPrefix(value, "-") {
+		return true
+	}
+	if _, err := strconv.Atoi(value); err == nil {
+		return true
+	}
+	lower := strings.ToLower(value)
+	switch lower {
+	case "true", "false", "null", "none", "abc", "nan":
+		return true
+	default:
+		return false
+	}
 }
 
 func uniqueStrings(values []string) []string {
@@ -1205,7 +2523,7 @@ func (s *Session) Snapshot() Snapshot {
 		Dialogue:         append([]DialogueEntry(nil), s.dialogue...),
 		ActivityRows:     activity,
 		Artifacts:        append([]Artifact(nil), s.artifacts...),
-		GateStatus:       s.gate,
+		GateStatus:       cloneGateStatus(s.gate),
 		TeamContract:     cloneContract(s.contract),
 		GateVerdicts:     cloneGateVerdicts(s.gateVerdicts),
 		InputEnabled:     !s.busy.Load(),
@@ -1236,6 +2554,21 @@ func cloneGateVerdicts(in map[string]GateVerdict) map[string]GateVerdict {
 		verdict.Evidence = append([]GateEvidence(nil), verdict.Evidence...)
 		verdict.Findings = append([]GateFinding(nil), verdict.Findings...)
 		out[key] = verdict
+	}
+	return out
+}
+
+func cloneGateStatus(in GateStatus) GateStatus {
+	if len(in) == 0 {
+		return GateStatus{}
+	}
+	out := make(GateStatus, len(in))
+	for key, status := range in {
+		key = strings.TrimSpace(key)
+		status = strings.TrimSpace(status)
+		if key != "" && status != "" {
+			out[key] = status
+		}
 	}
 	return out
 }
@@ -1300,10 +2633,15 @@ func contractCheckKey(check ContractCheck) string {
 	}, "\x00")
 }
 
-func mergeQAGateVerdict(existing GateVerdict, next GateVerdict) GateVerdict {
+func mergeGateVerdict(existing GateVerdict, next GateVerdict) GateVerdict {
+	if strings.TrimSpace(existing.Status) != "" &&
+		strings.TrimSpace(next.Status) != "" &&
+		strings.TrimSpace(existing.Status) != strings.TrimSpace(next.Status) {
+		return next
+	}
 	merged := next
-	if existing.Status == "pass" || next.Status == "pass" {
-		merged.Status = "pass"
+	if strings.TrimSpace(merged.Status) == "" {
+		merged.Status = existing.Status
 	}
 	if strings.TrimSpace(existing.Summary) != "" && strings.TrimSpace(next.Summary) != "" && existing.Summary != next.Summary {
 		merged.Summary = strings.TrimSpace(existing.Summary + "\n" + next.Summary)
@@ -1311,9 +2649,9 @@ func mergeQAGateVerdict(existing GateVerdict, next GateVerdict) GateVerdict {
 		merged.Summary = existing.Summary
 	}
 	merged.Evidence = mergeGateEvidence(existing.Evidence, next.Evidence)
-	// QA may submit several verdicts while fixing issues. Evidence is cumulative,
-	// but findings describe the latest QA verdict so resolved blockers do not
-	// poison later passes.
+	// Agents may submit several verdicts while issues are being fixed. Evidence is
+	// cumulative, but findings describe the latest verdict so resolved blockers do
+	// not poison later passes.
 	merged.Findings = append([]GateFinding(nil), next.Findings...)
 	if merged.CreatedAt == "" {
 		merged.CreatedAt = existing.CreatedAt
@@ -1412,7 +2750,7 @@ func (s *Session) Summary() SummaryData {
 		ArtifactCount:  len(s.artifacts),
 		ActivityCount:  len(s.activity),
 		LoopIteration:  s.loopIteration,
-		GateStatus:     s.gate,
+		GateStatus:     cloneGateStatus(s.gate),
 		Running:        s.busy.Load(),
 		ActiveTeamName: s.Spec.DisplayName,
 	}
@@ -1645,34 +2983,182 @@ func (s *Session) extractArtifacts(owner, taskType, result string, expected []st
 	if len(expected) == 0 && strings.TrimSpace(result) == "" {
 		return nil
 	}
+	for _, artifact := range nonEmptyStrings(expected) {
+		if path, ok := s.resolveExpectedArtifactPath(artifact); ok {
+			refs = append(refs, s.recordArtifact(owner, s.artifactDisplayName(artifact, path), firstLineFromFile(path), path).Name)
+		}
+	}
+	if len(refs) > 0 {
+		s.persist()
+		return refs
+	}
 	name := firstNonEmpty(firstString(expected), taskType, "artifact") + "-" + owner
 	id := "art-" + uuid.NewString()[:8]
 	path := filepath.Join(s.rootDir, "artifacts", id+".md")
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	_ = os.WriteFile(path, []byte(result), 0o644)
-	artifact := Artifact{ID: id, Name: name, Owner: owner, Summary: firstLine(result), Path: path, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	s.mu.Lock()
-	s.artifacts = append(s.artifacts, artifact)
-	s.mu.Unlock()
+	artifact := s.recordArtifact(owner, name, firstLine(result), path)
 	refs = append(refs, artifact.Name)
 	s.persist()
-	s.emit("team.artifact.created", artifact)
 	return refs
+}
+
+func (s *Session) recordWriteFileArtifactFromEvent(owner string, event agent.StreamEvent) {
+	if stringFromMetadata(event.Metadata, "tool_name") != "write_file" {
+		return
+	}
+	path, ok := writeFilePathFromToolResult(fmt.Sprint(event.Metadata["result"]))
+	if !ok || !s.pathInsideWorkspace(path) || !fileExists(path) {
+		return
+	}
+	s.recordArtifact(owner, filepath.ToSlash(mustRelOrBase(s.Config.CWD, path)), firstLineFromFile(path), path)
+	s.persist()
+}
+
+func writeFilePathFromToolResult(result string) (string, bool) {
+	const prefix = "File written successfully: "
+	result = strings.TrimSpace(result)
+	if !strings.HasPrefix(result, prefix) {
+		return "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(result, prefix))
+	idx := strings.LastIndex(rest, " (")
+	if idx <= 0 {
+		return "", false
+	}
+	path := strings.TrimSpace(rest[:idx])
+	if path == "" {
+		return "", false
+	}
+	return filepath.Clean(path), true
+}
+
+func (s *Session) pathInsideWorkspace(path string) bool {
+	root := strings.TrimSpace(s.Config.CWD)
+	if root == "" || strings.TrimSpace(path) == "" {
+		return false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != "..")
+}
+
+func mustRelOrBase(root, path string) string {
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+		return rel
+	}
+	return filepath.Base(path)
+}
+
+func (s *Session) recordArtifact(owner, name, summary, path string) Artifact {
+	name = firstNonEmpty(strings.TrimSpace(name), filepath.Base(path), "artifact")
+	path = filepath.Clean(path)
+	s.mu.Lock()
+	for _, existing := range s.artifacts {
+		if filepath.Clean(existing.Path) == path {
+			s.mu.Unlock()
+			return existing
+		}
+	}
+	artifact := Artifact{ID: "art-" + uuid.NewString()[:8], Name: name, Owner: owner, Summary: summary, Path: path, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	s.artifacts = append(s.artifacts, artifact)
+	s.mu.Unlock()
+	s.emit("team.artifact.created", artifact)
+	return artifact
+}
+
+func (s *Session) resolveExpectedArtifactPath(name string) (string, bool) {
+	name = strings.Trim(strings.TrimSpace(name), "`\"'")
+	if name == "" {
+		return "", false
+	}
+	if filepath.IsAbs(name) {
+		if fileExists(name) {
+			return filepath.Clean(name), true
+		}
+		return "", false
+	}
+	candidate := filepath.Join(s.Config.CWD, name)
+	if fileExists(candidate) {
+		return filepath.Clean(candidate), true
+	}
+	matches, err := filepath.Glob(filepath.Join(s.Config.CWD, "*", name))
+	if err == nil {
+		for _, match := range matches {
+			if fileExists(match) {
+				return filepath.Clean(match), true
+			}
+		}
+	}
+	return "", false
+}
+
+func (s *Session) artifactDisplayName(name, path string) string {
+	name = strings.Trim(strings.TrimSpace(name), "`\"'")
+	if filepath.IsAbs(name) {
+		if rel, err := filepath.Rel(s.Config.CWD, name); err == nil && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+			name = rel
+		} else {
+			name = filepath.Base(name)
+		}
+	}
+	if name == "" {
+		name = path
+		if filepath.IsAbs(name) {
+			if rel, err := filepath.Rel(s.Config.CWD, name); err == nil && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+				name = rel
+			} else {
+				name = filepath.Base(name)
+			}
+		}
+	}
+	if name == "" {
+		name = "artifact"
+	}
+	return filepath.ToSlash(filepath.Clean(name))
+}
+
+func firstLineFromFile(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	if scanner.Scan() {
+		return strings.TrimSpace(scanner.Text())
+	}
+	return ""
 }
 
 func (s *Session) persist() {
 	_ = os.MkdirAll(s.rootDir, 0o755)
 	snapshot := s.Snapshot()
 	s.mu.Lock()
-	teamData := map[string]any{"id": s.ID, "parent_session_id": s.ParentSessionID, "team": s.Spec.Name, "snapshot": snapshot}
 	dialogue := append([]DialogueEntry(nil), s.dialogue...)
 	timeline := append([]TimelineEvent(nil), s.timeline...)
 	artifacts := append([]Artifact(nil), s.artifacts...)
+	a2aTasks := make([]TeamTask, 0, len(s.a2aTasks))
+	for _, task := range s.a2aTasks {
+		task.done = nil
+		a2aTasks = append(a2aTasks, task)
+	}
 	agents := make(map[string]*AgentRuntime, len(s.agents))
 	for id, runtime := range s.agents {
 		agents[id] = runtime
 	}
 	s.mu.Unlock()
+	teamData := map[string]any{"id": s.ID, "parent_session_id": s.ParentSessionID, "team": s.Spec.Name, "snapshot": snapshot, "a2a_tasks": a2aTasks}
 	writeJSON(filepath.Join(s.rootDir, "team.json"), teamData)
 	writeJSONL(filepath.Join(s.rootDir, "dialogue.jsonl"), dialogue)
 	writeJSONL(filepath.Join(s.rootDir, "timeline.jsonl"), timeline)
@@ -1766,6 +3252,36 @@ func (s *Session) dialogueText() string {
 	}
 	for _, entry := range s.dialogue[start:] {
 		lines = append(lines, fmt.Sprintf("%s -> %s: %s", entry.FromAgent, strings.Join(entry.ToAgent, ","), firstNonEmpty(entry.Content, entry.Summary)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Session) a2aTaskStatusText() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.a2aTasks) == 0 {
+		return "No A2A tasks have been dispatched yet."
+	}
+	tasks := make([]TeamTask, 0, len(s.a2aTasks))
+	for _, task := range s.a2aTasks {
+		tasks = append(tasks, task)
+	}
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].ID == tasks[j].ID {
+			return tasks[i].To < tasks[j].To
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+	if len(tasks) > 20 {
+		tasks = tasks[len(tasks)-20:]
+	}
+	lines := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		detail := firstNonEmpty(task.Err, task.Result)
+		if detail != "" {
+			detail = " - " + truncateTeamVisible(detail, 220)
+		}
+		lines = append(lines, fmt.Sprintf("%s %s -> %s: %s (%s)%s", task.ID, task.From, task.To, firstNonEmpty(task.Summary, "task"), firstNonEmpty(task.Status, "unknown"), detail))
 	}
 	return strings.Join(lines, "\n")
 }

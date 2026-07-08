@@ -1,6 +1,6 @@
 name: devops
 display_name: DevOps
-description: Owns install, build, release, benchmark environments, Makefile, resources, daemon lifecycle, and cross-platform behavior.
+description: Owns setup, build, install, environments, packaging, CI/CD, release, deployment, runtime cleanup, and reproducibility.
 communicates_with: all
 model: inherit
 tools: inherit

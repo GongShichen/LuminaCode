@@ -26,6 +26,7 @@ func (l Loader) CreateTemplate(displayName string) (TeamTemplateResult, error) {
 	created := []string{
 		TeamConfigFile,
 		TeamSystemFile,
+		SharedPromptFile,
 		CompletionPolicyFile,
 		filepath.Join("team-leader", AgentConfigFile),
 		filepath.Join("team-leader", AgentSystemPromptFile),
@@ -44,11 +45,12 @@ You are an Agent Team. Keep each agent's context isolated, coordinate through re
 
 The Team Leader owns planning, delegation, artifact tracking, and the final answer. This starter team contains only the Team Leader; add more agent directories and list them in team.yaml when you need specialists.
 `,
+		SharedPromptFile: "",
 		CompletionPolicyFile: `# Completion Policy
 
 The Team Leader may complete the task when the user request is satisfied, required artifacts are produced, and the final answer explains what changed or what was delivered.
 
-No QA or Reviewer gate is required by default. Add gates.qa_agent or gates.reviewer_agent in team.yaml only after adding those agents.
+No gate is required by default. Add gates.checks entries in team.yaml only after adding the agents that own those gates.
 `,
 		filepath.Join("team-leader", AgentConfigFile): `name: team-leader
 display_name: Team Leader
@@ -99,13 +101,14 @@ entry_agent: team-leader
 loop:
   max_iterations: 0
   max_parallel_agents: 1
+  a2a_default_timeout_seconds: 300
+  wait_for_pending_a2a_before_next_iteration: true
   completion_policy: team_leader_only
   require_final_artifact: false
   stop_policy: user_interrupt_or_task_complete_only
 gates:
   require_contract: false
-  qa_agent: ""
-  reviewer_agent: ""
+  checks: []
   nonblocking_findings: allow_complete
   deferral_requires_reason: false
 transcript:

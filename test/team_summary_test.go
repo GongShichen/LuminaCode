@@ -37,8 +37,8 @@ func TestTeamSummaryReturnsExpectedFields(t *testing.T) {
 	if summary.ArtifactCount != 0 {
 		t.Fatalf("expected ArtifactCount=0 for fresh session, got %d", summary.ArtifactCount)
 	}
-	if summary.GateStatus.QA != "" || summary.GateStatus.Reviewer != "" {
-		t.Fatalf("expected empty GateStatus for fresh session, got qa=%q reviewer=%q", summary.GateStatus.QA, summary.GateStatus.Reviewer)
+	if len(summary.GateStatus) != 0 {
+		t.Fatalf("expected empty GateStatus for fresh session, got %#v", summary.GateStatus)
 	}
 }
 

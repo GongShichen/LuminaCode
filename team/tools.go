@@ -13,7 +13,7 @@ import (
 type A2AMessageInput struct {
 	To                []string `json:"to" jsonschema:"description=One or more target team agent ids"`
 	Message           string   `json:"message" jsonschema:"description=Readable message or task instructions for the target agent(s)"`
-	TaskType          string   `json:"task_type,omitempty" jsonschema:"description=Task category, for example analysis implementation review qa"`
+	TaskType          string   `json:"task_type,omitempty" jsonschema:"description=Task category, for example analysis implementation validation"`
 	ExpectedArtifacts []string `json:"expected_artifacts,omitempty" jsonschema:"description=Artifacts expected from the target agent(s)"`
 	AwaitResponse     *bool    `json:"await_response,omitempty" jsonschema:"description=If true wait for responses up to timeout_seconds. Defaults to true when omitted."`
 	TimeoutSeconds    int      `json:"timeout_seconds,omitempty" jsonschema:"description=Wait window in seconds. Timeout is not a stop condition; it returns pending status."`
@@ -21,11 +21,60 @@ type A2AMessageInput struct {
 
 type CompleteTeamTaskInput struct {
 	FinalAnswer       string            `json:"final_answer" jsonschema:"description=Final answer to show the user"`
-	QAStatus          string            `json:"qa_status,omitempty" jsonschema:"description=QA gate status when this team configures a QA gate: pass or not_applicable"`
-	ReviewerStatus    string            `json:"reviewer_status,omitempty" jsonschema:"description=Reviewer gate status when this team configures a Reviewer gate: pass or accepted_with_notes"`
+	GateStatuses      map[string]string `json:"gate_statuses,omitempty" jsonschema:"description=Statuses keyed by configured gate name, for example {\"verification\":\"pass\"}"`
 	RequiredArtifacts []string          `json:"required_artifacts,omitempty" jsonschema:"description=Required artifact names that must exist before completion"`
 	DeferralReasons   map[string]string `json:"deferral_reasons,omitempty" jsonschema:"description=Reasons for deferring configured nonblocking findings when the team policy allows deferral"`
 	Summary           string            `json:"summary,omitempty" jsonschema:"description=Short completion summary"`
+}
+
+type GetTeamContextInput struct {
+	IncludeRecentDialogue bool `json:"include_recent_dialogue,omitempty" jsonschema:"description=If true include a compact preview of recent team dialogue. Defaults to false."`
+	RecentDialogueLimit   int  `json:"recent_dialogue_limit,omitempty" jsonschema:"description=Maximum recent dialogue entries to include when include_recent_dialogue is true. Defaults to 8, maximum 20."`
+}
+
+type TeamContextView struct {
+	TeamSessionID   string                 `json:"team_session_id"`
+	ParentSessionID string                 `json:"parent_session_id"`
+	TeamName        string                 `json:"team_name"`
+	CurrentAgent    string                 `json:"current_agent"`
+	CWD             string                 `json:"cwd"`
+	Contract        *AcceptanceContract    `json:"contract,omitempty"`
+	Artifacts       []Artifact             `json:"artifacts"`
+	GateVerdicts    map[string]GateVerdict `json:"gate_verdicts,omitempty"`
+	ActivityRows    []ActivityRow          `json:"activity_rows"`
+	A2ATasks        []TeamTask             `json:"a2a_tasks"`
+	RecentDialogue  []DialogueEntry        `json:"recent_dialogue,omitempty"`
+}
+
+type GetTeamContextTool struct {
+	coretools.BaseTool
+	Runtime *Session
+	From    string
+}
+
+func NewGetTeamContextTool(runtime *Session, from string) *GetTeamContextTool {
+	return &GetTeamContextTool{
+		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
+			Name:            "GetTeamContext",
+			Description:     "Read the current Team runtime context, including the recorded acceptance contract, artifacts, gate verdicts, activity, and A2A task statuses. Use this before gate or final decisions when earlier details may be missing from dialogue.",
+			InputPrototype:  GetTeamContextInput{},
+			ReadOnly:        coretools.BoolPtr(true),
+			ConcurrencySafe: coretools.BoolPtr(true),
+			Destructive:     coretools.BoolPtr(false),
+			TimeoutSeconds:  30,
+		}},
+		Runtime: runtime,
+		From:    from,
+	}
+}
+
+func (t *GetTeamContextTool) Execute(_ context.Context, _ coretools.ExecutionContext, input any) (string, error) {
+	if t.Runtime == nil {
+		return "<tool_use_error>\nTeam runtime is not available.\n</tool_use_error>", nil
+	}
+	view := t.Runtime.TeamContext(t.From, derefTeamContext(input))
+	data, _ := json.MarshalIndent(view, "", "  ")
+	return string(data), nil
 }
 
 type RecordTeamContractTool struct {
@@ -38,7 +87,7 @@ func NewRecordTeamContractTool(runtime *Session, from string) *RecordTeamContrac
 	return &RecordTeamContractTool{
 		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
 			Name:            "RecordTeamContract",
-			Description:     "Record or update the Team Acceptance Contract before dispatching implementation, QA, or review work. Required for Product Development Team completion.",
+			Description:     "Record or update this team's acceptance contract. Teams may require this contract before selected task dispatches or final completion.",
 			InputPrototype:  AcceptanceContract{},
 			ReadOnly:        coretools.BoolPtr(false),
 			ConcurrencySafe: coretools.BoolPtr(false),
@@ -87,7 +136,7 @@ func NewSubmitGateVerdictTool(runtime *Session, from string) *SubmitGateVerdictT
 	return &SubmitGateVerdictTool{
 		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
 			Name:            "SubmitGateVerdict",
-			Description:     "Submit a structured QA or Reviewer gate verdict with evidence and findings. Required before Team completion.",
+			Description:     "Submit a structured verdict for one configured team gate, with evidence and findings when that gate requires them.",
 			InputPrototype:  GateVerdict{},
 			ReadOnly:        coretools.BoolPtr(false),
 			ConcurrencySafe: coretools.BoolPtr(false),
@@ -105,23 +154,17 @@ func (t *SubmitGateVerdictTool) ValidateInput(_ coretools.ExecutionContext, inpu
 	if role == "" {
 		role = t.From
 	}
-	if role != "qa" && role != "reviewer" {
-		return false, "role must be qa or reviewer."
-	}
-	if role == "qa" && !validQAStatus(verdict.Status) {
-		return false, "QA status must be pass or not_applicable."
-	}
-	if role == "reviewer" && !validReviewerStatus(verdict.Status) && strings.TrimSpace(verdict.Status) != "reject" {
-		return false, "Reviewer status must be pass, accepted_with_notes, or reject."
+	if t.Runtime != nil {
+		if ok, msg := t.Runtime.validateGateVerdictInput(t.From, role, verdict); !ok {
+			return false, msg
+		}
+	} else {
+		if strings.TrimSpace(verdict.Status) == "" {
+			return false, "status must not be empty."
+		}
 	}
 	if strings.TrimSpace(verdict.Summary) == "" {
 		return false, "summary must not be empty."
-	}
-	if role == "qa" && strings.TrimSpace(verdict.Status) == "pass" && len(verdict.Evidence) == 0 {
-		return false, "QA pass requires evidence."
-	}
-	if role == "reviewer" && strings.TrimSpace(verdict.Status) != "pass" && len(verdict.Findings) == 0 {
-		return false, "Reviewer non-pass verdict requires findings."
 	}
 	return true, ""
 }
@@ -171,6 +214,9 @@ func (t *SendA2AMessageTool) TimeoutForInput(input any) time.Duration {
 	wait := in.TimeoutSeconds
 	if wait <= 0 {
 		wait = 300
+		if t.Runtime != nil {
+			wait = t.Runtime.defaultA2ATimeoutSeconds()
+		}
 	}
 	return time.Duration(wait+30) * time.Second
 }
@@ -194,7 +240,7 @@ func NewCompleteTeamTaskTool(runtime *Session, from string) *CompleteTeamTaskToo
 	return &CompleteTeamTaskTool{
 		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
 			Name:            "CompleteTeamTask",
-			Description:     "Mark the current Team run complete. Only use after Team Leader has final answer, QA gate is pass/not_applicable, Reviewer gate is pass/accepted_with_notes, required artifacts exist, and no required task remains active.",
+			Description:     "Mark the current Team run complete. Only use after the final answer is ready, configured gates satisfy their pass statuses, required artifacts exist, and no required task remains active.",
 			InputPrototype:  CompleteTeamTaskInput{},
 			ReadOnly:        coretools.BoolPtr(false),
 			ConcurrencySafe: coretools.BoolPtr(false),
@@ -210,12 +256,6 @@ func (t *CompleteTeamTaskTool) ValidateInput(_ coretools.ExecutionContext, input
 	in := derefComplete(input)
 	if strings.TrimSpace(in.FinalAnswer) == "" {
 		return false, "final_answer must not be empty."
-	}
-	if strings.TrimSpace(in.QAStatus) != "" && !validQAStatus(in.QAStatus) {
-		return false, "qa_status must be pass or not_applicable."
-	}
-	if strings.TrimSpace(in.ReviewerStatus) != "" && !validReviewerStatus(in.ReviewerStatus) {
-		return false, "reviewer_status must be pass or accepted_with_notes."
 	}
 	return true, ""
 }
@@ -251,6 +291,18 @@ func derefComplete(input any) CompleteTeamTaskInput {
 	return CompleteTeamTaskInput{}
 }
 
+func derefTeamContext(input any) GetTeamContextInput {
+	switch v := input.(type) {
+	case GetTeamContextInput:
+		return v
+	case *GetTeamContextInput:
+		if v != nil {
+			return *v
+		}
+	}
+	return GetTeamContextInput{}
+}
+
 func derefContract(input any) AcceptanceContract {
 	switch v := input.(type) {
 	case AcceptanceContract:
@@ -273,16 +325,6 @@ func derefGateVerdict(input any) GateVerdict {
 		}
 	}
 	return GateVerdict{}
-}
-
-func validQAStatus(status string) bool {
-	status = strings.TrimSpace(status)
-	return status == "pass" || status == "not_applicable"
-}
-
-func validReviewerStatus(status string) bool {
-	status = strings.TrimSpace(status)
-	return status == "pass" || status == "accepted_with_notes"
 }
 
 func nonEmptyStrings(values []string) []string {

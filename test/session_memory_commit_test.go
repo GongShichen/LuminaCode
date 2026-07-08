@@ -43,6 +43,47 @@ func TestSessionMemoryCommitsOneSummaryPerInterval(t *testing.T) {
 	}
 }
 
+func TestSessionMemoryUsesAgentScopedSQLitePath(t *testing.T) {
+	cfg := sessionMemoryTestConfig(t)
+	cfg.SessionMemoryAgentID = "backend"
+	store, err := sessionmemory.Open(context.Background(), cfg, "sess", fakeSummary("agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if want := filepath.Join(cfg.SessionDir, "sess", "backend.sqlite"); store.Path() != want {
+		t.Fatalf("agent-scoped session memory sqlite path = %s, want %s", store.Path(), want)
+	}
+
+	mainCfg := cfg
+	mainCfg.SessionMemoryAgentID = "main"
+	mainStore, err := sessionmemory.Open(context.Background(), mainCfg, "sess", fakeSummary("main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mainStore.Close()
+	if want := filepath.Join(cfg.SessionDir, "sess", "session.sqlite"); mainStore.Path() != want {
+		t.Fatalf("main agent should keep legacy session.sqlite path = %s, want %s", mainStore.Path(), want)
+	}
+}
+
+func TestSessionMemoryCanUseSharedMemoryDirSeparateFromRuntimeSessionDir(t *testing.T) {
+	cfg := sessionMemoryTestConfig(t)
+	runtimeDir := filepath.Join(t.TempDir(), "team-runtime")
+	memoryDir := filepath.Join(t.TempDir(), "shared-memory")
+	cfg.SessionDir = runtimeDir
+	cfg.SessionMemoryDir = memoryDir
+	cfg.SessionMemoryAgentID = "frontend"
+	store, err := sessionmemory.Open(context.Background(), cfg, "parent-session", fakeSummary("shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if want := filepath.Join(memoryDir, "parent-session", "frontend.sqlite"); store.Path() != want {
+		t.Fatalf("session memory should use shared memory dir, got %s want %s", store.Path(), want)
+	}
+}
+
 func TestSessionMemoryManagerQueuesIntervalsWhileSummaryRuns(t *testing.T) {
 	cfg := sessionMemoryTestConfig(t)
 	cfg.SessionMemoryTurnInterval = 2

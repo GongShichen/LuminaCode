@@ -18,6 +18,7 @@ const (
 	AgentConfigFile       = "agent.yaml"
 	AgentSystemPromptFile = "system.md"
 	TeamSystemFile        = "team-system.md"
+	SharedPromptFile      = "shared-prompt.md"
 	CompletionPolicyFile  = "completion-policy.md"
 )
 
@@ -95,17 +96,24 @@ func (l Loader) Load(name string) (TeamSpec, error) {
 	if spec.DisplayName == "" {
 		spec.DisplayName = spec.Name
 	}
-	if spec.EntryAgent == "" {
-		spec.EntryAgent = "team-leader"
-	}
 	if spec.Loop.StopPolicy == "" {
 		spec.Loop.StopPolicy = "user_interrupt_or_task_complete_only"
 	}
 	if spec.Loop.MaxParallelAgents <= 0 {
 		spec.Loop.MaxParallelAgents = 4
 	}
+	if spec.Loop.A2ADefaultTimeoutSeconds <= 0 {
+		spec.Loop.A2ADefaultTimeoutSeconds = 300
+	}
+	if spec.Loop.WaitForPendingA2ABeforeNextIteration == nil {
+		wait := true
+		spec.Loop.WaitForPendingA2ABeforeNextIteration = &wait
+	}
 	spec.RootDir = root
 	spec.TeamSystemPath = filepath.Join(root, TeamSystemFile)
+	if sharedPath := filepath.Join(root, SharedPromptFile); fileExists(sharedPath) {
+		spec.SharedPromptPath = sharedPath
+	}
 	spec.CompletionPolicy = filepath.Join(root, CompletionPolicyFile)
 	spec.Transcript.ShowMemberDialogue = true
 	spec.LoadedAt = time.Now()
@@ -128,35 +136,54 @@ func (l Loader) Load(name string) (TeamSpec, error) {
 	if _, ok := spec.AgentMap[spec.EntryAgent]; !ok {
 		return TeamSpec{}, fmt.Errorf("team %q entry_agent %q is not defined", name, spec.EntryAgent)
 	}
-	spec.Gates = normalizeGateSpec(spec.Gates, spec)
-	if spec.Gates.QAAgent != "" {
-		if _, ok := spec.AgentMap[spec.Gates.QAAgent]; !ok {
-			return TeamSpec{}, fmt.Errorf("team %q gates.qa_agent %q is not defined", name, spec.Gates.QAAgent)
+	spec.Gates = normalizeGateSpec(spec.Gates)
+	for _, check := range spec.Gates.Checks {
+		if check.Agent == "" {
+			return TeamSpec{}, fmt.Errorf("team %q gate check %q missing agent", name, check.Name)
 		}
-	}
-	if spec.Gates.ReviewerAgent != "" {
-		if _, ok := spec.AgentMap[spec.Gates.ReviewerAgent]; !ok {
-			return TeamSpec{}, fmt.Errorf("team %q gates.reviewer_agent %q is not defined", name, spec.Gates.ReviewerAgent)
+		if _, ok := spec.AgentMap[check.Agent]; !ok {
+			return TeamSpec{}, fmt.Errorf("team %q gate check %q agent %q is not defined", name, check.Name, check.Agent)
 		}
 	}
 	return spec, nil
 }
 
-func normalizeGateSpec(gates TeamGateSpec, spec TeamSpec) TeamGateSpec {
+func normalizeGateSpec(gates TeamGateSpec) TeamGateSpec {
 	if gates.NonblockingFindings == "" {
 		gates.NonblockingFindings = "allow_complete"
 	}
-	legacyReviewerQA := spec.Loop.CompletionPolicy == "leader_with_reviewer_and_qa"
-	if legacyReviewerQA {
-		if gates.QAAgent == "" {
-			gates.QAAgent = "qa"
+	checks := make([]TeamGateCheckSpec, 0, len(gates.Checks))
+	for _, check := range gates.Checks {
+		check.Name = strings.TrimSpace(check.Name)
+		check.Agent = strings.TrimSpace(check.Agent)
+		if check.Name == "" {
+			check.Name = check.Agent
 		}
-		if gates.ReviewerAgent == "" {
-			gates.ReviewerAgent = "reviewer"
+		if check.Agent == "" {
+			check.Agent = check.Name
 		}
-		gates.RequireContract = true
+		if check.Name == "" {
+			continue
+		}
+		check = normalizeGateCheck(check)
+		checks = append(checks, check)
 	}
+	gates.Checks = checks
 	return gates
+}
+
+func normalizeGateCheck(check TeamGateCheckSpec) TeamGateCheckSpec {
+	if len(check.PassStatuses) == 0 {
+		check.PassStatuses = []string{"pass"}
+	}
+	if len(check.AllowedStatuses) == 0 {
+		check.AllowedStatuses = append([]string(nil), check.PassStatuses...)
+	}
+	check.PassStatuses = nonEmptyStrings(check.PassStatuses)
+	check.AllowedStatuses = uniqueStrings(append(check.AllowedStatuses, check.PassStatuses...))
+	check.EvidenceRequiredStatuses = nonEmptyStrings(check.EvidenceRequiredStatuses)
+	check.FindingsRequiredStatuses = nonEmptyStrings(check.FindingsRequiredStatuses)
+	return check
 }
 
 func (l Loader) loadAgents(root string, declared []string) ([]TeamAgentSpec, error) {

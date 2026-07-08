@@ -60,7 +60,7 @@ func (m *SandboxManager) Enable() {
 
 func (m *SandboxManager) GetSandboxCommand(command string, config SandboxConfig, cwd string) []string {
 	if !m.IsSandboxingEnabled() {
-		return []string{"sh", "-c", command}
+		return ShellCommandArgs(command)
 	}
 	switch m.platform {
 	case "darwin":
@@ -68,13 +68,14 @@ func (m *SandboxManager) GetSandboxCommand(command string, config SandboxConfig,
 	case "linux":
 		return m.linuxSandbox(command, config, cwd)
 	default:
-		return []string{"sh", "-c", command}
+		return ShellCommandArgs(command)
 	}
 }
 
 func (m *SandboxManager) macosSandbox(command string, config SandboxConfig, cwd string) []string {
 	profile := m.buildMacosProfile(config, cwd)
-	return []string{"sandbox-exec", "-p", profile, "sh", "-c", command}
+	shell := ShellCommandArgs(command)
+	return append([]string{"sandbox-exec", "-p", profile}, shell...)
 }
 
 func (m *SandboxManager) buildMacosProfile(config SandboxConfig, cwd string) string {
@@ -158,8 +159,22 @@ func (m *SandboxManager) linuxSandbox(command string, config SandboxConfig, cwd 
 	if !config.AllowNetwork {
 		args = append(args, "--unshare-net")
 	}
-	args = append(args, "--", "sh", "-c", command)
+	args = append(args, "--")
+	args = append(args, ShellCommandArgs(command)...)
 	return args
+}
+
+func ShellCommandArgs(command string) []string {
+	if runtime.GOOS == "windows" {
+		return []string{"cmd", "/C", command}
+	}
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return []string{"/bin/bash", "-o", "pipefail", "-c", command}
+	}
+	if path, err := exec.LookPath("bash"); err == nil {
+		return []string{path, "-o", "pipefail", "-c", command}
+	}
+	return []string{"sh", "-c", command}
 }
 
 var sandboxExcludedCommands = map[string]bool{

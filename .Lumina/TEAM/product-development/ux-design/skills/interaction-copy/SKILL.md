@@ -12,4 +12,7 @@ Copy should be:
 - Actionable.
 - Specific about who is acting.
 - Calm when errors happen.
-- Consistent with existing Chinese UI labels where the product already uses Chinese.
+- Consistent with the product's existing tone, terminology, and locale.
+- Clear about state, consequence, and next action.
+- Honest about uncertainty, failure, permissions, destructive actions, and background work.
+- Avoiding implementation jargon unless the target user expects it.

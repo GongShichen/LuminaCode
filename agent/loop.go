@@ -92,6 +92,7 @@ type CoreExecutionEngine struct {
 	l3Regions          []agentContext.CollapsedRegion
 	cacheEditState     RuntimeCacheEditState
 	SessionID          string
+	AgentID            string
 	sessionMemory      *sessionmemory.Manager
 	StateObserver      func(*AgentState)
 }
@@ -414,6 +415,22 @@ func (e *CoreExecutionEngine) ResolveSkillPermission(granted bool) {
 	}
 }
 
+func (e *CoreExecutionEngine) SkillNames(cwd string) []string {
+	if e == nil || e.skillRegistry == nil {
+		return nil
+	}
+	if strings.TrimSpace(cwd) == "" {
+		cwd = e.Config.CWD
+	}
+	visible := e.skillRegistry.ListVisible(cwd)
+	names := make([]string, 0, len(visible))
+	for _, skill := range visible {
+		names = append(names, skill.CanonicalName)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (e *CoreExecutionEngine) ResolveMCPTrust(granted bool) {
 	e.mu.Lock()
 	ch := e.mcpTrustCh
@@ -519,6 +536,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"config":                  e.Config,
 			"runtime_dir":             e.Config.ProjectRuntimeDir,
 			"_session_id":             e.SessionID,
+			"_agent_id":               e.sessionMemoryAgentID(),
 			"allowed_read_roots":      []string{e.Config.CWD},
 			"allowed_write_roots":     []string{e.Config.CWD},
 			"_registry":               activeRegistry,
@@ -1270,12 +1288,21 @@ func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *Ag
 	if e == nil || state == nil || e.sessionMemory == nil || e.SessionID == "" || !e.Config.SessionMemoryEnabled {
 		return
 	}
-	if err := e.sessionMemory.Observe(ctx, e.Config, e.SessionID, state.Messages, force); err != nil {
+	cfg := e.Config
+	cfg.SessionMemoryAgentID = e.sessionMemoryAgentID()
+	if err := e.sessionMemory.Observe(ctx, cfg, e.SessionID, state.Messages, force); err != nil {
 		slog.Warn("session memory observe failed", "session_id", e.SessionID, "error", err)
 	}
 	if e.StateObserver != nil {
 		e.StateObserver(state)
 	}
+}
+
+func (e *CoreExecutionEngine) sessionMemoryAgentID() string {
+	if e == nil || strings.TrimSpace(e.AgentID) == "" {
+		return "main"
+	}
+	return strings.TrimSpace(e.AgentID)
 }
 
 func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *AgentState) {
