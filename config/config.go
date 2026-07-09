@@ -65,6 +65,17 @@ type Config struct {
 	SessionMemoryMaxCommits          int
 	SessionMemoryMaxMessages         int
 	SessionMemoryVacuumAfterEviction bool
+	SessionMaintenanceEnabled        bool
+	SessionMaintenanceMode           string
+	SessionRetentionDays             int
+	SessionMaxEntries                int
+	SessionMaxDiskBytes              int64
+	SessionHighWaterRatio            float64
+	SessionArchiveBeforeDelete       bool
+	SessionProtectPinned             bool
+	TeamTimelineMaxEntries           int
+	TeamDialogueMaxEntries           int
+	TeamArtifactMaxBytes             int64
 
 	AutoMemoryEnabled                  bool
 	AutoMemoryDirectory                *string
@@ -157,6 +168,17 @@ func NewConfigForCWD(cwd string) Config {
 		SessionMemoryMaxCommits:          200,
 		SessionMemoryMaxMessages:         4000,
 		SessionMemoryVacuumAfterEviction: false,
+		SessionMaintenanceEnabled:        true,
+		SessionMaintenanceMode:           "warn",
+		SessionRetentionDays:             30,
+		SessionMaxEntries:                500,
+		SessionMaxDiskBytes:              0,
+		SessionHighWaterRatio:            0.8,
+		SessionArchiveBeforeDelete:       true,
+		SessionProtectPinned:             true,
+		TeamTimelineMaxEntries:           2000,
+		TeamDialogueMaxEntries:           1000,
+		TeamArtifactMaxBytes:             0,
 
 		AutoMemoryEnabled:                  true,
 		AutoMemoryDirectory:                nil,
@@ -230,6 +252,17 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.SessionMemoryMaxCommits = fresh.SessionMemoryMaxCommits
 	updated.SessionMemoryMaxMessages = fresh.SessionMemoryMaxMessages
 	updated.SessionMemoryVacuumAfterEviction = fresh.SessionMemoryVacuumAfterEviction
+	updated.SessionMaintenanceEnabled = fresh.SessionMaintenanceEnabled
+	updated.SessionMaintenanceMode = fresh.SessionMaintenanceMode
+	updated.SessionRetentionDays = fresh.SessionRetentionDays
+	updated.SessionMaxEntries = fresh.SessionMaxEntries
+	updated.SessionMaxDiskBytes = fresh.SessionMaxDiskBytes
+	updated.SessionHighWaterRatio = fresh.SessionHighWaterRatio
+	updated.SessionArchiveBeforeDelete = fresh.SessionArchiveBeforeDelete
+	updated.SessionProtectPinned = fresh.SessionProtectPinned
+	updated.TeamTimelineMaxEntries = fresh.TeamTimelineMaxEntries
+	updated.TeamDialogueMaxEntries = fresh.TeamDialogueMaxEntries
+	updated.TeamArtifactMaxBytes = fresh.TeamArtifactMaxBytes
 	updated.ExtractionModel = fresh.ExtractionModel
 	updated.MemoryRecallPrefetchTimeoutSeconds = fresh.MemoryRecallPrefetchTimeoutSeconds
 	updated.WebSearchEnabled = fresh.WebSearchEnabled
@@ -413,6 +446,17 @@ type luminaDefaults struct {
 	SessionMemoryMaxCommits            *int     `json:"session_memory_max_commits"`
 	SessionMemoryMaxMessages           *int     `json:"session_memory_max_messages"`
 	SessionMemoryVacuumAfterEviction   *bool    `json:"session_memory_vacuum_after_eviction"`
+	SessionMaintenanceEnabled          *bool    `json:"session_maintenance_enabled"`
+	SessionMaintenanceMode             *string  `json:"session_maintenance_mode"`
+	SessionRetentionDays               *int     `json:"session_retention_days"`
+	SessionMaxEntries                  *int     `json:"session_max_entries"`
+	SessionMaxDiskBytes                *int64   `json:"session_max_disk_bytes"`
+	SessionHighWaterRatio              *float64 `json:"session_high_water_ratio"`
+	SessionArchiveBeforeDelete         *bool    `json:"session_archive_before_delete"`
+	SessionProtectPinned               *bool    `json:"session_protect_pinned"`
+	TeamTimelineMaxEntries             *int     `json:"team_timeline_max_entries"`
+	TeamDialogueMaxEntries             *int     `json:"team_dialogue_max_entries"`
+	TeamArtifactMaxBytes               *int64   `json:"team_artifact_max_bytes"`
 	AutoMemoryEnabled                  *bool    `json:"auto_memory_enabled"`
 	AutoMemoryDirectory                *string  `json:"auto_memory_directory"`
 	ExtractionModel                    *string  `json:"extraction_model"`
@@ -555,6 +599,42 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.SessionMemoryVacuumAfterEviction != nil {
 		cfg.SessionMemoryVacuumAfterEviction = *defaults.SessionMemoryVacuumAfterEviction
+	}
+	if defaults.SessionMaintenanceEnabled != nil {
+		cfg.SessionMaintenanceEnabled = *defaults.SessionMaintenanceEnabled
+	}
+	if defaults.SessionMaintenanceMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*defaults.SessionMaintenanceMode))
+		if mode == "warn" || mode == "enforce" {
+			cfg.SessionMaintenanceMode = mode
+		}
+	}
+	if defaults.SessionRetentionDays != nil && *defaults.SessionRetentionDays > 0 {
+		cfg.SessionRetentionDays = *defaults.SessionRetentionDays
+	}
+	if defaults.SessionMaxEntries != nil && *defaults.SessionMaxEntries > 0 {
+		cfg.SessionMaxEntries = *defaults.SessionMaxEntries
+	}
+	if defaults.SessionMaxDiskBytes != nil && *defaults.SessionMaxDiskBytes >= 0 {
+		cfg.SessionMaxDiskBytes = *defaults.SessionMaxDiskBytes
+	}
+	if defaults.SessionHighWaterRatio != nil && *defaults.SessionHighWaterRatio > 0 && *defaults.SessionHighWaterRatio <= 1 {
+		cfg.SessionHighWaterRatio = *defaults.SessionHighWaterRatio
+	}
+	if defaults.SessionArchiveBeforeDelete != nil {
+		cfg.SessionArchiveBeforeDelete = *defaults.SessionArchiveBeforeDelete
+	}
+	if defaults.SessionProtectPinned != nil {
+		cfg.SessionProtectPinned = *defaults.SessionProtectPinned
+	}
+	if defaults.TeamTimelineMaxEntries != nil && *defaults.TeamTimelineMaxEntries > 0 {
+		cfg.TeamTimelineMaxEntries = *defaults.TeamTimelineMaxEntries
+	}
+	if defaults.TeamDialogueMaxEntries != nil && *defaults.TeamDialogueMaxEntries > 0 {
+		cfg.TeamDialogueMaxEntries = *defaults.TeamDialogueMaxEntries
+	}
+	if defaults.TeamArtifactMaxBytes != nil && *defaults.TeamArtifactMaxBytes >= 0 {
+		cfg.TeamArtifactMaxBytes = *defaults.TeamArtifactMaxBytes
 	}
 	if defaults.AutoMemoryEnabled != nil {
 		cfg.AutoMemoryEnabled = *defaults.AutoMemoryEnabled

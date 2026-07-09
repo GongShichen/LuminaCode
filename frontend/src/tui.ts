@@ -485,6 +485,26 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
+    const lower = text.toLowerCase();
+    if (lower === "/storage") {
+      const report = await this.rpc.call("storage.status");
+      this.pushStorageReport(report, false);
+      this.setInput("");
+      return;
+    }
+    if (lower === "/cleanup" || lower === "/cleanup --enforce") {
+      const report = await this.rpc.call("storage.cleanup", { enforce: lower.includes("--enforce") });
+      this.pushStorageReport(report, lower.includes("--enforce"));
+      this.setInput("");
+      return;
+    }
+    if (lower === "/pin" || lower === "/unpin") {
+      const meta = await this.rpc.call("session.pin", { session_id: this.sessionID, pinned: lower === "/pin" });
+      this.taskLines.push(`session ${meta?.session_id || this.sessionID}: ${meta?.pinned ? "pinned" : "unpinned"}`);
+      this.renderTasks();
+      this.setInput("");
+      return;
+    }
     if (text === "/save" || text === "/s") {
       await this.rpc.call("session.save", { session_id: this.sessionID });
       this.taskLines.push("session saved");
@@ -497,7 +517,6 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
-    const lower = text.toLowerCase();
     if (lower === "/skill") {
       await this.showSkills();
       return;
@@ -752,6 +771,24 @@ export class LuminaTui {
     this.menu.show();
     this.menu.focus();
     this.requestRender(true);
+  }
+
+  private pushStorageReport(report: any, enforced: boolean): void {
+    const total = formatBytes(Number(report?.total_bytes || 0));
+    const actions = Array.isArray(report?.actions) ? report.actions : [];
+    this.taskLines.push(`storage: ${report?.session_count || 0} sessions, ${total}`);
+    if (enforced) {
+      this.taskLines.push(`cleanup: deleted ${report?.deleted_count || 0} sessions, freed ${formatBytes(Number(report?.freed_bytes || 0))}`);
+    } else {
+      this.taskLines.push(`cleanup: dry-run, ${actions.length} planned actions`);
+    }
+    for (const action of actions.slice(0, 12)) {
+      const id = action?.session_id || String(action?.path || "").split("/").pop() || "unknown";
+      const verb = enforced ? (action?.deleted ? "removed" : action?.error ? "error" : "skipped") : "would remove";
+      this.taskLines.push(`cleanup: ${verb} ${id} ${formatBytes(Number(action?.bytes || 0))} - ${action?.reason || ""}`);
+    }
+    if (actions.length > 12) this.taskLines.push(`cleanup: ... ${actions.length - 12} more`);
+    this.renderTasks(true);
   }
 
   private async showSessions(): Promise<void> {
@@ -1356,4 +1393,16 @@ export class LuminaTui {
       this.historyDraft = "";
     }
   }
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes;
+  for (const unit of units) {
+    value /= 1024;
+    if (value < 1024) return `${value.toFixed(1)} ${unit}`;
+  }
+  return `${(value / 1024).toFixed(1)} PB`;
 }

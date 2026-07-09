@@ -45,6 +45,10 @@ var BuiltinCommandSpecs = []SlashCommandSpec{
 	{Primary: "/NewTeam", Description: "Create a new Agent Team template"},
 	{Primary: "/mcp", Description: "Show registered MCP tools for current session"},
 	{Primary: "/resume", Description: "Resume a previous session by ID"},
+	{Primary: "/storage", Description: "Show session storage usage"},
+	{Primary: "/cleanup", Description: "Dry-run session storage cleanup; use --enforce to apply"},
+	{Primary: "/pin", Description: "Protect current session from cleanup"},
+	{Primary: "/unpin", Description: "Allow current session cleanup"},
 	{Primary: "/quit", Description: "Exit LUMINA", Aliases: []string{"/q", "/exit"}},
 }
 
@@ -130,10 +134,10 @@ func ClassifyREPLSlashCommand(input string, registry *skills.SkillRegistry, cwd 
 		return SlashDispatch{Kind: SlashDispatchExit, Command: cmd, Name: cmdName}
 	}
 	switch cmd {
-	case "help", "clear", "save", "s", "tokens", "compact", "compress", "skill", "mcp", "team", "teamout", "teamsummary", "newteam":
+	case "help", "clear", "save", "s", "tokens", "compact", "compress", "skill", "mcp", "team", "teamout", "teamsummary", "newteam", "storage", "pin", "unpin":
 		return SlashDispatch{Kind: SlashDispatchBuiltin, Command: cmd, Name: cmdName}
 	}
-	if cmdName == "yolo" || cmdName == "resume" {
+	if cmdName == "yolo" || cmdName == "resume" || cmdName == "cleanup" {
 		return SlashDispatch{Kind: SlashDispatchBuiltin, Command: cmd, Name: cmdName}
 	}
 	if registry != nil {

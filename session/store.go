@@ -27,6 +27,7 @@ type Meta struct {
 	LastUpdated  float64 `json:"last_updated"`
 	MessageCount int     `json:"message_count"`
 	TurnCount    int     `json:"turn_count"`
+	Pinned       bool    `json:"pinned,omitempty"`
 }
 
 type Store struct {
@@ -263,6 +264,7 @@ func (s *Store) LoadMeta(sessionID string) *Meta {
 		LastUpdated:  floatFromAny(data["last_updated"]),
 		MessageCount: intFromAny(data["message_count"]),
 		TurnCount:    intFromAny(data["turn_count"]),
+		Pinned:       boolFromAny(data["pinned"]),
 	}
 	if meta.SessionID == "" {
 		return nil
@@ -341,6 +343,21 @@ func (s *Store) Delete(sessionID string) {
 	for _, path := range s.legacySessionPaths(sessionID) {
 		_ = os.Remove(path)
 	}
+}
+
+func (s *Store) Pin(sessionID string, pinned bool) (*Meta, error) {
+	s.migrateLegacySession(sessionID)
+	meta := s.LoadMeta(sessionID)
+	if meta == nil {
+		meta = &Meta{SessionID: sessionID}
+	}
+	if meta.CreatedAt == 0 {
+		now := float64(time.Now().UnixNano()) / 1e9
+		meta.CreatedAt = now
+		meta.LastUpdated = now
+	}
+	meta.Pinned = pinned
+	return meta, atomicWriteJSON(s.metaPath(sessionID), meta)
 }
 
 func (s *Store) upsertMeta(sessionID string, messageCount, turnCount int, provided *Meta) (*Meta, error) {
@@ -792,6 +809,17 @@ func floatFromAny(value any) float64 {
 		return float64(v)
 	default:
 		return 0
+	}
+}
+
+func boolFromAny(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
+	default:
+		return false
 	}
 }
 

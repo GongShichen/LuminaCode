@@ -1206,8 +1206,13 @@ func TestEmptyTeamSharedPromptDoesNotAddLeaderSection(t *testing.T) {
 }
 
 func TestProductDevelopmentAgentSkillsAreIsolatedAndModelInvocable(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
 	workdir := t.TempDir()
 	cfg := config.NewConfigForCWD(workdir)
+	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
 	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {

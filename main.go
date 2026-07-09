@@ -17,6 +17,7 @@ import (
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
+	"LuminaCode/maintenance"
 	"LuminaCode/memory"
 	"LuminaCode/session"
 	"LuminaCode/skills"
@@ -60,6 +61,9 @@ func run(args []string) error {
 	bare := flags.Bool("bare", false, "Disable auto-memory and other persistent features.")
 	harnessMode := flags.String("harness-mode", "", "Benchmark harness mode. Supported: terminal-bench.")
 	listFlag := flags.Bool("list", false, "List saved session files and exit.")
+	storageFlag := flags.Bool("storage", false, "Show session storage usage and exit.")
+	cleanupFlag := flags.Bool("cleanup", false, "Dry-run session storage cleanup and exit.")
+	enforceCleanup := flags.Bool("enforce", false, "Actually apply --cleanup actions.")
 	resume := flags.String("resume", "", "Resume a previous session by ID.")
 
 	if err := flags.Parse(args); err != nil {
@@ -118,6 +122,14 @@ func run(args []string) error {
 	store := session.NewStore(cfg.SessionDir)
 	if *listFlag {
 		printSessions(store)
+		return nil
+	}
+	if *storageFlag || *cleanupFlag {
+		report, err := maintenance.Cleanup(cfg, maintenance.Options{Enforce: *cleanupFlag && *enforceCleanup})
+		if err != nil {
+			return err
+		}
+		printStorageReport(os.Stdout, report)
 		return nil
 	}
 	if *prompt == "" {
@@ -446,6 +458,37 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 		}
 		fmt.Fprintf(out, "YOLO mode: %s\n", status)
 		return true, nil
+	case cmd == "storage":
+		report, err := maintenance.Status(engine.Config, maintenance.Options{CurrentSessions: currentSessionSet(sessionID)})
+		if err != nil {
+			return true, err
+		}
+		printStorageReport(out, report)
+		return true, nil
+	case cmdName == "cleanup":
+		enforce := hasCommandFlag(cmd, "--enforce")
+		report, err := maintenance.Cleanup(engine.Config, maintenance.Options{Enforce: enforce, CurrentSessions: currentSessionSet(sessionID)})
+		if err != nil {
+			return true, err
+		}
+		printStorageReport(out, report)
+		return true, nil
+	case cmd == "pin" || cmd == "unpin":
+		if store == nil || sessionID == nil || *sessionID == "" {
+			fmt.Fprintln(out, "No active session.")
+			return true, nil
+		}
+		pinned := cmd == "pin"
+		meta, err := store.Pin(*sessionID, pinned)
+		if err != nil {
+			return true, err
+		}
+		status := "unpinned"
+		if meta.Pinned {
+			status = "pinned"
+		}
+		fmt.Fprintf(out, "Session %s is %s.\n", *sessionID, status)
+		return true, nil
 	case cmdName == "resume":
 		if store == nil {
 			return true, nil
@@ -526,6 +569,22 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 	default:
 		return false, nil
 	}
+}
+
+func currentSessionSet(sessionID *string) map[string]struct{} {
+	if sessionID == nil || strings.TrimSpace(*sessionID) == "" {
+		return nil
+	}
+	return map[string]struct{}{strings.TrimSpace(*sessionID): {}}
+}
+
+func hasCommandFlag(command, flag string) bool {
+	for _, part := range strings.Fields(command) {
+		if part == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func printCommandHelp(out io.Writer, skillRegistry *skills.SkillRegistry, cwd string) {
@@ -650,4 +709,52 @@ func printSessions(store *session.Store) {
 		when := time.Unix(0, int64(meta.LastUpdated*1e9)).Format("2006-01-02 15:04")
 		fmt.Printf("  %s  - %d msgs, %d turns, last: %s\n", meta.SessionID, meta.MessageCount, meta.TurnCount, when)
 	}
+}
+
+func printStorageReport(out io.Writer, report maintenance.Report) {
+	mode := "dry-run"
+	if report.Enforced {
+		mode = "enforced"
+	}
+	fmt.Fprintf(out, "Storage %s\n", mode)
+	fmt.Fprintf(out, "  Sessions: %d\n", report.SessionCount)
+	fmt.Fprintf(out, "  Total:    %s\n", humanBytes(report.TotalBytes))
+	fmt.Fprintf(out, "  Archive:  %s\n", report.ArchiveDir)
+	if report.Enforced {
+		fmt.Fprintf(out, "  Deleted:  %d sessions, %s freed\n", report.DeletedCount, humanBytes(report.FreedBytes))
+	}
+	if len(report.Actions) == 0 {
+		fmt.Fprintln(out, "  Actions:  none")
+		return
+	}
+	fmt.Fprintln(out, "Actions")
+	for _, action := range report.Actions {
+		status := "would remove"
+		if action.Deleted {
+			status = "removed"
+		}
+		if action.Error != "" {
+			status = "error"
+		}
+		target := action.SessionID
+		if target == "" {
+			target = filepath.Base(action.Path)
+		}
+		fmt.Fprintf(out, "  %-12s %-36s %8s  %s\n", status, target, humanBytes(action.Bytes), action.Reason)
+	}
+}
+
+func humanBytes(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	value := float64(bytes)
+	for _, unit := range units {
+		value /= 1024
+		if value < 1024 {
+			return fmt.Sprintf("%.1f %s", value, unit)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", value/1024)
 }

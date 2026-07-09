@@ -12,6 +12,7 @@ import (
 	"LuminaCode/agent"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
+	"LuminaCode/maintenance"
 	"LuminaCode/security"
 	"LuminaCode/session"
 	luminaui "LuminaCode/ui"
@@ -85,6 +86,28 @@ func (m *SessionManager) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sessions)
+}
+
+func (m *SessionManager) ActiveSessionIDs() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]struct{}{}
+	for id := range m.sessions {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func (m *SessionManager) StorageStatus() (maintenance.Report, error) {
+	return maintenance.Status(m.baseConfig, maintenance.Options{CurrentSessions: m.ActiveSessionIDs()})
+}
+
+func (m *SessionManager) CleanupStorage(enforce bool) (maintenance.Report, error) {
+	return maintenance.Cleanup(m.baseConfig, maintenance.Options{Enforce: enforce, CurrentSessions: m.ActiveSessionIDs()})
+}
+
+func (m *SessionManager) Pin(sessionID string, pinned bool) (*session.Meta, error) {
+	return m.store.Pin(sessionID, pinned)
 }
 
 func (m *SessionManager) Shutdown() {

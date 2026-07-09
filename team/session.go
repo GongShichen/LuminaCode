@@ -3529,6 +3529,7 @@ func (s *Session) persist() {
 		return
 	}
 	_ = os.MkdirAll(s.rootDir, 0o755)
+	s.trimRuntimeLogs()
 	snapshot := s.Snapshot()
 	s.mu.Lock()
 	dialogue := append([]DialogueEntry(nil), s.dialogue...)
@@ -3556,6 +3557,87 @@ func (s *Session) persist() {
 		writeJSON(filepath.Join(dir, "state.json"), state)
 		writeJSONL(filepath.Join(dir, "transcript.jsonl"), state.Messages)
 	}
+}
+
+func (s *Session) trimRuntimeLogs() {
+	if s == nil {
+		return
+	}
+	dialogueLimit := s.Config.TeamDialogueMaxEntries
+	if dialogueLimit <= 0 {
+		dialogueLimit = 1000
+	}
+	timelineLimit := s.Config.TeamTimelineMaxEntries
+	if timelineLimit <= 0 {
+		timelineLimit = 2000
+	}
+	var oldDialogue []DialogueEntry
+	var oldTimeline []TimelineEvent
+	s.mu.Lock()
+	if len(s.dialogue) > dialogueLimit {
+		cut := len(s.dialogue) - dialogueLimit
+		oldDialogue = append([]DialogueEntry(nil), s.dialogue[:cut]...)
+		s.dialogue = append([]DialogueEntry(nil), s.dialogue[cut:]...)
+	}
+	if len(s.timeline) > timelineLimit {
+		cut := len(s.timeline) - timelineLimit
+		oldTimeline = append([]TimelineEvent(nil), s.timeline[:cut]...)
+		s.timeline = append([]TimelineEvent(nil), s.timeline[cut:]...)
+	}
+	s.mu.Unlock()
+	if len(oldDialogue) > 0 {
+		appendDialogueSummary(filepath.Join(s.rootDir, "dialogue.summary.md"), oldDialogue)
+	}
+	if len(oldTimeline) > 0 {
+		appendTimelineSummary(filepath.Join(s.rootDir, "timeline.summary.md"), oldTimeline)
+	}
+}
+
+func appendDialogueSummary(path string, entries []DialogueEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## Trimmed dialogue (%s, %d entries)\n\n", time.Now().UTC().Format(time.RFC3339), len(entries))
+	for _, entry := range entries {
+		fmt.Fprintf(&b, "- %s %s -> %s [%s] %s: %s\n",
+			entry.CreatedAt,
+			firstNonEmpty(entry.FromAgent, "unknown"),
+			strings.Join(entry.ToAgent, ","),
+			firstNonEmpty(entry.Kind, "message"),
+			firstNonEmpty(entry.Summary, "(no summary)"),
+			truncateTeamVisible(strings.ReplaceAll(entry.Content, "\n", " "), 500),
+		)
+	}
+	appendTextFile(path, b.String())
+}
+
+func appendTimelineSummary(path string, entries []TimelineEvent) {
+	if len(entries) == 0 {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## Trimmed timeline (%s, %d events)\n\n", time.Now().UTC().Format(time.RFC3339), len(entries))
+	for _, entry := range entries {
+		payload, _ := json.Marshal(entry.Payload)
+		fmt.Fprintf(&b, "- %s [%s] %s\n", entry.CreatedAt, entry.Type, truncateTeamVisible(string(payload), 500))
+	}
+	appendTextFile(path, b.String())
+}
+
+func appendTextFile(path, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(text)
 }
 
 func persistableAgentState(state *agent.AgentState) agent.AgentState {

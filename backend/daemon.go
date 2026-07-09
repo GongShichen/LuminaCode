@@ -606,6 +606,36 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		result := controller.ToggleYolo()
 		s.teamManager.ApplyParentRuntimeConfig(controller.ID(), controller.RuntimeConfig())
 		return result, nil
+	case "session.pin":
+		var p struct {
+			SessionID string `json:"session_id"`
+			Pinned    bool   `json:"pinned"`
+		}
+		decodeParams(req.Params, &p)
+		if strings.TrimSpace(p.SessionID) == "" {
+			return nil, &RPCError{Code: "session_id_required", Message: "session_id is required"}
+		}
+		meta, err := s.manager.Pin(p.SessionID, p.Pinned)
+		if err != nil {
+			return nil, toRPCError("session_pin_failed", err)
+		}
+		return meta, nil
+	case "storage.status":
+		report, err := s.manager.StorageStatus()
+		if err != nil {
+			return nil, toRPCError("storage_status_failed", err)
+		}
+		return report, nil
+	case "storage.cleanup":
+		var p struct {
+			Enforce bool `json:"enforce"`
+		}
+		decodeParams(req.Params, &p)
+		report, err := s.manager.CleanupStorage(p.Enforce)
+		if err != nil {
+			return nil, toRPCError("storage_cleanup_failed", err)
+		}
+		return report, nil
 	case "team.list":
 		return s.teamManager.List(), nil
 	case "team.create_template":

@@ -71,7 +71,7 @@ func TestCLICompleterMatchesPythonSlashCommandBehavior(t *testing.T) {
 			t.Fatalf("slash completion should replace stripped command text, got %#v", completion)
 		}
 	}
-	want := []string{"/save", "/s", "/skill", "/smoke"}
+	want := []string{"/save", "/s", "/skill", "/storage", "/smoke"}
 	if len(names) != len(want) {
 		t.Fatalf("slash completion count mismatch: got %#v want %#v", names, want)
 	}
