@@ -96,6 +96,12 @@ foreach ($path in @($launcher, $backend, $endpoint)) {
     }
 }
 
+$embeddingRoot = Join-Path $AppRoot "models\memory"
+if (Test-Path $embeddingRoot) {
+    Remove-Item -LiteralPath $embeddingRoot -Recurse -Force
+    Write-Host "Removed $embeddingRoot"
+}
+
 if (-not $KeepResources -and (Test-Path $AppRoot)) {
     Remove-Item -LiteralPath $AppRoot -Recurse -Force
     Write-Host "Removed $AppRoot"

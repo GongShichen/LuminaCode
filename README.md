@@ -37,6 +37,55 @@ The backend listens on `127.0.0.1`, requires an auth token, supports multiple
 sessions, and serializes submits within each session. Headless paths are handled
 by `lumina-backend`.
 
+## Long-Term Memory
+
+Cross-session memory lives in one local SQLite store:
+
+```text
+~/.lumina/memory/lumina-memory.sqlite
+```
+
+- Ingestion advances with a persistent message cursor and writes episodes,
+  evidence spans, facts, entities, temporal versions, relations, and provenance.
+- Every query runs BM25, local vector, entity, temporal, Session, and graph
+  retrieval. Results are fused with RRF, deduplicated with MMR, and packed into
+  a small sourced evidence packet.
+- User, project, Team, agent-type, and Team-agent scopes are isolated. Retrieved
+  evidence is transient context and never enters the visible transcript.
+- Facts retain valid-time and observed-time history, so updates supersede old
+  values without deleting their sources.
+
+`make install` downloads `multilingual-e5-small` from ModelScope into
+`~/.lumina/models/memory/`; `make uninstall` removes it. Use `/Memory`,
+`/MemorySearch`, `/MemoryForget`, `/MemoryExport`, and `/MemoryImport` for local
+governance.
+
+### LongMemEval
+
+Lumina scored **61.6% (308/500)** on the 500-question oracle set. The same saved
+answers were judged five times with the official LongMemEval prompt and
+`deepseek-v4-pro`; every run and every per-case label agreed (mean 61.6%,
+standard deviation 0). This is not an official GPT-4o leaderboard score.
+
+Published LongMemEval accuracy, sorted for orientation:
+
+| System | Accuracy | Reported evaluation |
+|---|---:|---|
+| Mem0 Platform | 94.8% | Mem0 current benchmark, Top 50 |
+| LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
+| Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
+| Mem0 | 62.6% | GPT-4o-mini controlled baseline |
+| **LuminaCode** | **61.6%** | DeepSeek Judge, five identical runs |
+| Zep | 58.6% | GPT-4o-mini controlled baseline |
+| A-Mem | 55.0% | GPT-4o-mini controlled baseline |
+| MemOS | 51.2% | GPT-4o-mini controlled baseline |
+
+Sources: [LongMemEval](https://github.com/xiaowu0162/longmemeval),
+[Mem0 benchmark](https://github.com/mem0ai/memory-benchmarks), and the
+[LiCoMemory paper](https://aclanthology.org/2026.findings-acl.1835/). Reader,
+retrieval depth, and judge differ across reports, so this table is not a strict
+apples-to-apples leaderboard.
+
 ## Agent Team
 
 Agent Team mode runs a task through isolated specialist agents. Each member has
@@ -204,6 +253,24 @@ lumina \
 
 `--api-type`: `anthropic`, `openai_compatible`, or `auto`.
 
+An optional global fallback can use a different endpoint and model:
+
+```json
+{
+  "fallback_api_enabled": true,
+  "fallback_api_key": "...",
+  "fallback_api_base_url": "https://api.example.com/anthropic",
+  "fallback_api_model": "fallback-model",
+  "fallback_api_type": "anthropic"
+}
+```
+
+After the primary client's retries are exhausted, Lumina switches only for
+429, 5xx, timeout, EOF, and transport failures. It does not hide invalid keys,
+invalid requests, or model configuration errors, and never switches after the
+primary stream has produced visible output or a tool call. Config changes are
+hot-read at the next turn.
+
 `--max-tokens` is the local context-window size used for accounting and the 80%
 compression threshold. LuminaCode does not force provider-side completion
 `max_tokens`. Runtime config is hot-read before each agent turn.
@@ -272,8 +339,6 @@ Project runtime data:
 ```
 
 - `CONFIG/trusted_mcp.json`
-- `agent-memory/`
-- `agent-memory-local/`
 - `background/tool-results/`
 
 Project-authored resources:

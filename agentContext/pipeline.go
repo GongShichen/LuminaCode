@@ -3,6 +3,7 @@ package agentContext
 import (
 	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/llmclient"
 	"context"
 	"fmt"
 	"log/slog"
@@ -291,15 +292,7 @@ func (p *ContextPipeline) autoCompact(
 	ctx context.Context,
 	messages []map[string]any,
 ) (string, error) {
-	client, err := api.CreateLLMClient(
-		p.Config.APIKey,
-		p.Config.APIBaseURL,
-		p.Config.APIModel,
-		500,
-		nil,
-		api.DefaultRetryConfigPtr(),
-		p.Config.APIType,
-	)
+	client, err := llmclient.Create(p.Config, p.Config.APIModel, 500, nil, api.DefaultRetryConfigPtr())
 	if err != nil {
 		slog.Warn("L4 auto compact failed", "error", err)
 		return "", err
@@ -539,7 +532,7 @@ func isTransientContextMessage(message map[string]any) bool {
 		return true
 	}
 	switch source, _ := metadata["source"].(string); source {
-	case "skill_inline", "skill_listing", "skill_recovery", "memory_index", "memory_recall", "task_notification":
+	case "skill_inline", "skill_listing", "skill_recovery", "memory_recall", "task_notification":
 		return true
 	default:
 		return false

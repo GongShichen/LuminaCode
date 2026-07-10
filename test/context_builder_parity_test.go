@@ -146,7 +146,7 @@ func TestContextBuilderSystemPromptAndSubagentSections(t *testing.T) {
 	for _, section := range subSections {
 		names[section.Name] = true
 	}
-	for _, name := range []string{"subagent-identity", "instruction-priority", "trust-and-external-context", "working-style", "git-context", "agent-memory", "subagent-execution-constraints"} {
+	for _, name := range []string{"subagent-identity", "instruction-priority", "trust-and-external-context", "working-style", "git-context", "role-memory", "subagent-execution-constraints"} {
 		if !names[name] {
 			t.Fatalf("missing subagent section %s in %#v", name, names)
 		}
@@ -207,25 +207,25 @@ func TestInitialContextIncludesSessionHistoryRecallWhenEnabled(t *testing.T) {
 func TestBuildMemorySectionDescribesGeneralAgentMemoryRules(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.NewConfig()
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &dir
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = filepath.Join(dir, "lumina-memory.sqlite")
 
 	got := agentContext.BuildMemorySection(&cfg)
 	for _, want := range []string{
-		"persistent memory system at `" + dir + "`",
-		"`MEMORY.md` is the entrypoint index",
-		"The current `MEMORY.md` index",
-		"standalone `.md` files with YAML frontmatter",
-		"keep `MEMORY.md` in sync",
-		"Content already present in LUMINA.md or AGENTS.md",
-		"Temporary repository structure",
-		"current conversation, current task, or current tool output",
+		"## Long-Term Memory",
+		"local SQLite store at `" + cfg.LongTermMemoryStore + "`",
+		"You do not read or write this file directly",
+		"**user** - Cross-project user preferences",
+		"**project** - Durable project decisions",
+		"**agent_type** - Reusable experience",
+		"**feedback** user corrections",
+		"only matters for the current turn",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("memory section missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "\""+dir+"\"") || strings.Contains(got, "standalone .md files") {
-		t.Fatalf("memory section should keep markdown path/list formatting:\n%s", got)
+	if strings.Contains(got, "MEMORY.md") || strings.Contains(got, "standalone `.md` files") {
+		t.Fatalf("memory section should not describe legacy Markdown memory:\n%s", got)
 	}
 }

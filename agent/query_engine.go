@@ -166,8 +166,12 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				agentID = strings.TrimSpace(sessionID[1])
 			}
 			q.CoreEngine.AgentID = agentID
+			if strings.TrimSpace(q.CoreEngine.AgentType) == "" {
+				q.CoreEngine.AgentType = agentID
+			}
 		}
 		state.Messages = StripTransientContextMessages(state.Messages)
+		state.MemoryQueryText = strings.TrimSpace(userPrompt)
 		q.buildOrRefreshSystemPrompt(state)
 		normalizedPrompt := userPrompt
 		if strings.HasPrefix(userPrompt, "/") {
@@ -222,7 +226,7 @@ func (q *QueryEngine) buildOrRefreshSystemPrompt(state *AgentState) {
 	cfg := q.Config
 	cfg.CWD = skills.ResolveSkillContextCWD(q.Config.CWD, nil)
 	memorySection := ""
-	if q.Config.AutoMemoryEnabled && q.Config.AutoMemoryDirectory != nil && *q.Config.AutoMemoryDirectory != "" {
+	if q.Config.LongTermMemoryEnabled {
 		memorySection = agentContext.BuildMemorySection(&q.Config)
 	}
 	if prompt, err := agentContext.BuildSystemPromptWithConfig(cfg, memorySection); err == nil && strings.TrimSpace(prompt) != "" {

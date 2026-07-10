@@ -17,6 +17,15 @@ import (
 	coretools "LuminaCode/tools"
 )
 
+func taskToolsTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	cfg := config.NewConfig()
+	cfg.LongTermMemoryEnabled = false
+	cfg.MemoryQueryExpansionEnabled = false
+	cfg.SessionDir = t.TempDir()
+	return cfg
+}
+
 func TestTaskToolsSerializePreviewAndRawErrors(t *testing.T) {
 	runtime := agent.NewAgentTaskRuntime()
 	record := runtime.RegisterForegroundTask("task-1", "", "main", "worker", "desc", "general-purpose")
@@ -226,7 +235,7 @@ func TestReusableWorkerPreservesSessionAcrossMessages(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -315,7 +324,7 @@ func TestBackgroundWorkerUsesPythonScopedExecutionContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -375,7 +384,7 @@ func TestBackgroundWorkerOutlivesParentContextLikePython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -407,7 +416,7 @@ func TestStopTaskMatchesPythonStatusSpecificNotifications(t *testing.T) {
 		writeOpenAIStream(w, "previous result", 1, 2)
 	}))
 	defer server.Close()
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -452,7 +461,7 @@ func TestShutdownStopsIdleReusableWorkers(t *testing.T) {
 		writeOpenAIStream(w, "idle result", 1, 2)
 	}))
 	defer server.Close()
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -480,7 +489,7 @@ func TestReusableWorkerExpiresAfterIdleTTLLikePython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -521,7 +530,7 @@ func TestNonReusableWorkerTerminalRecordCleanupTTLMatchesPython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -550,7 +559,7 @@ func TestStopRunningWorkerIsNotOverwrittenByCompletion(t *testing.T) {
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
-	cfg := config.NewConfig()
+	cfg := taskToolsTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"

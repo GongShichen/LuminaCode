@@ -33,8 +33,6 @@ func main() {
 	}
 	cfg := config.NewConfig()
 	cfg.Yolo = true
-	cfg.AutoMemoryEnabled = false
-	cfg.AutoMemoryDirectory = nil
 	if *cwd != "" {
 		abs, err := filepath.Abs(*cwd)
 		if err != nil {

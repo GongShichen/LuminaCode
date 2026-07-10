@@ -12,10 +12,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"LuminaCode/agent"
-	"LuminaCode/memory"
+	"LuminaCode/longmemory"
 	"LuminaCode/skills"
 )
 
@@ -105,7 +104,6 @@ func TestCoreQueryLoopInlineSkillIntegerLikeEffortSetsThinkingBudgetLikePython(t
 	cfg.APIModel = "claude-test"
 	cfg.APIType = "anthropic"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -234,11 +232,10 @@ Lumina identity.
 	if err := os.WriteFile(filepath.Join(systemDir, "system-prompt.md"), []byte(template), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	memDir := filepath.Join(dir, ".Lumina", "memory")
 	cfg := isolatedConfig(t)
 	cfg.CWD = dir
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &memDir
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
 	cfg.SkillsEnabled = false
 	engine := agent.NewQueryEngine(&cfg)
 	state := agent.NewAgentState()
@@ -248,22 +245,29 @@ Lumina identity.
 	}
 
 	if !strings.Contains(state.SystemPrompt, "Lumina identity.") ||
-		!strings.Contains(state.SystemPrompt, "## Persistent Memory") ||
-		!strings.Contains(state.SystemPrompt, memDir) ||
+		!strings.Contains(state.SystemPrompt, "## Long-Term Memory") ||
+		!strings.Contains(state.SystemPrompt, "local SQLite store") ||
 		strings.Contains(state.SystemPrompt, "stale prompt") {
-		t.Fatalf("system prompt was not refreshed like Python:\n%s", state.SystemPrompt)
+		t.Fatalf("system prompt was not refreshed with long-term memory section:\n%s", state.SystemPrompt)
 	}
 }
 
 func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *testing.T) {
 	dir := t.TempDir()
-	memDir := filepath.Join(dir, "memory")
-	store := memory.NewMemoryStore(memDir)
-	if _, err := store.SaveEntry(&memory.MemoryEntry{
-		Name:        "Repo Note",
-		Description: "Important repo note",
-		Content:     "Remember the blue switch.",
-		Metadata:    map[string]any{"type": "project"},
+	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:  longmemory.ScopeProject,
+		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		MemoryType: longmemory.TypeProject,
+		Title:      "Repo Note",
+		Summary:    "Important repo note",
+		Content:    "Remember the blue switch.",
+		Importance: 0.9,
+		Confidence: 0.9,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -280,16 +284,8 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 			t.Fatalf("invalid request JSON: %v body=%s", err, bodyBytes)
 		}
 		count := requestCount.Add(1)
-		if count == 1 {
-			if body["stream"] != false {
-				t.Fatalf("first request should be Python-style recall Complete call, got %#v", body)
-			}
-			if _, ok := body["max_tokens"]; ok {
-				t.Fatalf("recall Complete request should omit max_tokens, got %#v", body)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"content":[{"type":"text","text":"[\"repo-note.md\"]"}]}`)
-			return
+		if count != 1 {
+			t.Fatalf("long-term memory recall should be local; unexpected extra model request %#v", body)
 		}
 		mainBody = body
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -306,9 +302,8 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	cfg.APIModel = "claude-test"
 	cfg.APIType = "anthropic"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &memDir
-	cfg.MemoryRecallPrefetchTimeoutSeconds = 1
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = store.Path()
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
@@ -322,8 +317,8 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	for range engine.QueryLoop(context.Background(), &state) {
 	}
 
-	if requestCount.Load() < 2 {
-		t.Fatalf("expected recall and main model requests, got %d", requestCount.Load())
+	if requestCount.Load() != 1 {
+		t.Fatalf("expected one main model request, got %d", requestCount.Load())
 	}
 	mainJSON, _ := json.Marshal(mainBody["messages"])
 	if !strings.Contains(string(mainJSON), "Remember the blue switch.") {
@@ -331,107 +326,43 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	}
 }
 
-func TestCoreQueryLoopSlowMemoryRecallDoesNotBlockFirstRequestLikePython(t *testing.T) {
-	dir := t.TempDir()
-	memDir := filepath.Join(dir, "memory")
-	store := memory.NewMemoryStore(memDir)
-	if _, err := store.SaveEntry(&memory.MemoryEntry{
-		Name:        "Slow Note",
-		Description: "Slow recall note",
-		Content:     "This slow memory should not reach the first request.",
-		Metadata:    map[string]any{"type": "project"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	mainBodyCh := make(chan map[string]any, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var body map[string]any
-		if err := json.Unmarshal(bodyBytes, &body); err != nil {
-			t.Fatalf("invalid request JSON: %v body=%s", err, bodyBytes)
-		}
-		if stream, _ := body["stream"].(bool); !stream {
-			time.Sleep(150 * time.Millisecond)
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"[\"slow-note.md\"]"}}]}`)
-			return
-		}
-		select {
-		case mainBodyCh <- body:
-		default:
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"id\":\"msg-main\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	defer server.Close()
-
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
-	cfg.APIKey = "test-key"
-	cfg.APIBaseURL = server.URL
-	cfg.APIModel = "custom-router-model"
-	cfg.APIType = "openai_compatible"
-	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &memDir
-	cfg.MemoryRecallPrefetchTimeoutSeconds = 0.02
-	cfg.MCPEnabled = false
-	cfg.SkillsEnabled = false
-
-	engine := agent.NewCoreExecutionEngine(&cfg)
-	state := agent.NewAgentState()
-	state.SystemPrompt = "system"
-	state.LastQuery = "what should I remember?"
-	state.Messages = []map[string]any{
-		{"role": "user", "content": []map[string]any{{"type": "text", "text": state.LastQuery}}},
-	}
-	for range engine.QueryLoop(context.Background(), &state) {
-	}
-
-	select {
-	case mainBody := <-mainBodyCh:
-		mainJSON, _ := json.Marshal(mainBody["messages"])
-		if strings.Contains(string(mainJSON), "This slow memory should not reach the first request.") {
-			t.Fatalf("slow recall should not block and inject before first request, body=%s", mainJSON)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("main request was blocked by slow memory recall")
-	}
-}
-
 func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing.T) {
 	dir := t.TempDir()
-	memDir := filepath.Join(dir, "memory")
 	target := filepath.Join(dir, "source.txt")
 	if err := os.WriteFile(target, []byte("hello from test"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := memory.NewMemoryStore(memDir)
-	if _, err := store.SaveEntry(&memory.MemoryEntry{
-		Name:        "initial",
-		Description: "Initial preference memory.",
-		Content:     "Initial memory body.",
-		Metadata:    map[string]any{"type": "feedback"},
+	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:  longmemory.ScopeProject,
+		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		MemoryType: longmemory.TypeFeedback,
+		Title:      "initial",
+		Summary:    "Initial preference memory.",
+		Content:    "Initial memory body. continue",
+		Importance: 0.9,
+		Confidence: 0.9,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SaveEntry(&memory.MemoryEntry{
-		Name:        "followup",
-		Description: "Follow-up memory after reading files.",
-		Content:     "Follow-up memory body.",
-		Metadata:    map[string]any{"type": "reference"},
+	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:  longmemory.ScopeProject,
+		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		MemoryType: longmemory.TypeReference,
+		Title:      "followup",
+		Summary:    "Follow-up memory after reading source.txt.",
+		Content:    "Follow-up memory body for source.txt.",
+		Importance: 0.9,
+		Confidence: 0.9,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	var completeCalls atomic.Int32
 	var streamCalls atomic.Int32
-	var secondRecallPrompt string
 	var secondStreamBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -443,19 +374,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 			t.Fatalf("invalid request JSON: %v body=%s", err, bodyBytes)
 		}
 		if stream, _ := body["stream"].(bool); !stream {
-			call := completeCalls.Add(1)
-			messages, _ := body["messages"].([]any)
-			if call == 2 && len(messages) > 0 {
-				user, _ := messages[len(messages)-1].(map[string]any)
-				secondRecallPrompt = fmt.Sprint(user["content"])
-			}
-			w.Header().Set("Content-Type", "application/json")
-			if call == 1 {
-				fmt.Fprint(w, `{"choices":[{"message":{"content":"[\"initial.md\"]"}}]}`)
-				return
-			}
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"[\"initial.md\", \"followup.md\"]"}}]}`)
-			return
+			t.Fatalf("long-term memory recall should be local, got unexpected completion request %#v", body)
 		}
 
 		call := streamCalls.Add(1)
@@ -480,9 +399,8 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	cfg.APIModel = "custom-router-model"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 5000
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &memDir
-	cfg.MemoryRecallPrefetchTimeoutSeconds = 1
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = store.Path()
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
@@ -496,15 +414,12 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	for range engine.QueryLoop(context.Background(), &state) {
 	}
 
-	if streamCalls.Load() != 2 || completeCalls.Load() != 2 {
-		t.Fatalf("expected two stream calls and two recall calls like Python, stream=%d complete=%d", streamCalls.Load(), completeCalls.Load())
-	}
-	if !strings.Contains(secondRecallPrompt, "Already shown") || !strings.Contains(secondRecallPrompt, "initial.md") {
-		t.Fatalf("followup recall prompt should exclude already surfaced memory like Python, prompt=%q", secondRecallPrompt)
+	if streamCalls.Load() != 2 {
+		t.Fatalf("expected two stream calls, got %d", streamCalls.Load())
 	}
 	bodyJSON, _ := json.Marshal(secondStreamBody["messages"])
 	bodyText := string(bodyJSON)
-	if strings.Count(bodyText, "Initial memory body.") != 1 || strings.Count(bodyText, "Follow-up memory body.") != 1 {
+	if strings.Count(bodyText, "Initial memory body.") != 1 || strings.Count(bodyText, "Follow-up memory body") != 1 {
 		t.Fatalf("second stream should contain initial and followup memories exactly once, body=%s", bodyText)
 	}
 	if !strings.Contains(bodyText, `"role":"tool"`) || !strings.Contains(bodyText, `"tool_call_id":"tool-read-1"`) {

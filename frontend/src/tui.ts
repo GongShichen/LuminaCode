@@ -35,7 +35,7 @@ export class LuminaTui {
   private history: string[] = [];
   private historyIndex = -1;
   private historyDraft = "";
-  private menuMode: "slash" | "skill" | "resume" | "team" | null = null;
+  private menuMode: "slash" | "skill" | "resume" | "team" | "memory" | null = null;
   private inputBuffer = "";
   private inputCursor = 0;
   private inputScroll = 0;
@@ -76,6 +76,7 @@ export class LuminaTui {
   private teamGateVerdicts: any = {};
   private teamStreamingText = new Map<string, string>();
   private pendingPrompt: "new-team-name" | null = null;
+  private memoryItems: any[] = [];
 
   constructor(private rpc: RpcClient, private options: LaunchOptions) {
     const widgets = createTuiWidgets(tuiTheme);
@@ -498,6 +499,56 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
+    if (lower === "/memory") {
+      await this.showMemoryList();
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memorysearch")) {
+      await this.searchMemory(text.replace(/^\/memorysearch/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryforget")) {
+      await this.forgetMemory(text.replace(/^\/memoryforget/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryapprove")) {
+      await this.simpleMemoryAction("memory.approve", "memory.approve", text.replace(/^\/memoryapprove/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryrestore")) {
+      await this.simpleMemoryAction("memory.restore", "memory.restore", text.replace(/^\/memoryrestore/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryprioritize")) {
+      await this.prioritizeMemory(text.replace(/^\/memoryprioritize/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memorydeprioritize")) {
+      await this.simpleMemoryAction("memory.deprioritize", "memory.deprioritize", text.replace(/^\/memorydeprioritize/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memorysupersede")) {
+      await this.supersedeMemory(text.replace(/^\/memorysupersede/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryexport")) {
+      await this.exportMemory(text.replace(/^\/memoryexport/i, "").trim());
+      this.setInput("");
+      return;
+    }
+    if (lower.startsWith("/memoryimport")) {
+      await this.importMemory(text.replace(/^\/memoryimport/i, "").trim());
+      this.setInput("");
+      return;
+    }
     if (lower === "/pin" || lower === "/unpin") {
       const meta = await this.rpc.call("session.pin", { session_id: this.sessionID, pinned: lower === "/pin" });
       this.taskLines.push(`session ${meta?.session_id || this.sessionID}: ${meta?.pinned ? "pinned" : "unpinned"}`);
@@ -711,6 +762,11 @@ export class LuminaTui {
       this.setInput("");
       return;
     }
+    if (this.menuMode === "memory") {
+      const memoryID = this.menu.getItem(index)?.getText().trim().split(/\s+/)[0];
+      if (memoryID) await this.showMemoryDetail(memoryID);
+      return;
+    }
     const selected = this.menu.getItem(index)?.getText().trim().split(/\s+/)[0];
     if (!selected) return;
     const lower = selected.toLowerCase();
@@ -789,6 +845,226 @@ export class LuminaTui {
     }
     if (actions.length > 12) this.taskLines.push(`cleanup: ... ${actions.length - 12} more`);
     this.renderTasks(true);
+  }
+
+  private async showMemoryList(): Promise<void> {
+    try {
+      const result = await this.rpc.call("memory.list", { session_id: this.sessionID, include_inactive: true, limit: 12 });
+      this.showMemoryMenu("memory", result?.items);
+    } catch (err) {
+      this.taskLines.push(`memory: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async searchMemory(query: string): Promise<void> {
+    if (!query) {
+      this.taskLines.push("memory.search: query required");
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      const result = await this.rpc.call("memory.search", { session_id: this.sessionID, query, limit: 12 });
+      this.showMemoryMenu(`memory.search: ${query}`, result?.items);
+    } catch (err) {
+      this.taskLines.push(`memory.search: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async forgetMemory(args: string): Promise<void> {
+    const parts = args.split(/\s+/).filter(Boolean);
+    const memoryID = parts.find((part) => part !== "--hard") || "";
+    const hard = parts.includes("--hard");
+    if (!memoryID) {
+      this.taskLines.push("memory.forget: memory_id required");
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      await this.rpc.call("memory.delete", { memory_id: memoryID, hard });
+      this.taskLines.push(`memory.forget: ${hard ? "hard deleted" : "deleted"} ${memoryID}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`memory.forget: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async simpleMemoryAction(method: string, label: string, args: string): Promise<void> {
+    const memoryID = args.split(/\s+/).filter(Boolean)[0] || "";
+    if (!memoryID) {
+      this.taskLines.push(`${label}: memory_id required`);
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      await this.rpc.call(method, { memory_id: memoryID });
+      this.taskLines.push(`${label}: ${memoryID}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`${label}: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async prioritizeMemory(args: string): Promise<void> {
+    const parts = args.split(/\s+/).filter(Boolean);
+    const memoryID = parts[0] || "";
+    const importance = Number(parts[1] || "1");
+    if (!memoryID) {
+      this.taskLines.push("memory.prioritize: memory_id required");
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      await this.rpc.call("memory.prioritize", { memory_id: memoryID, importance: Number.isFinite(importance) ? importance : 1 });
+      this.taskLines.push(`memory.prioritize: ${memoryID}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`memory.prioritize: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async supersedeMemory(args: string): Promise<void> {
+    const parts = args.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) {
+      this.taskLines.push("memory.supersede: old_memory_id new_memory_id required");
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      await this.rpc.call("memory.supersede", { old_memory_id: parts[0], new_memory_id: parts[1] });
+      this.taskLines.push(`memory.supersede: ${parts[0]} -> ${parts[1]}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`memory.supersede: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async exportMemory(outDir: string): Promise<void> {
+    try {
+      const result = await this.rpc.call("memory.export", { format: "markdown", out_dir: outDir });
+      this.taskLines.push(`memory.export: ${result?.path || "done"}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`memory.export: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async importMemory(path: string): Promise<void> {
+    if (!path) {
+      this.taskLines.push("memory.import: path required");
+      this.renderTasks(true);
+      return;
+    }
+    try {
+      const result = await this.rpc.call("memory.import", { path });
+      this.taskLines.push(`memory.import: imported ${result?.imported || 0}`);
+      this.renderTasks(true);
+    } catch (err) {
+      this.taskLines.push(`memory.import: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private pushMemoryItems(prefix: string, items: any): void {
+    const list = Array.isArray(items) ? items : [];
+    this.taskLines.push(`${prefix}: ${list.length} item(s)`);
+    for (const item of list.slice(0, 12)) {
+      const id = item?.memory_id || "unknown";
+      const scope = `${item?.scope_type || "?"}/${item?.scope_key || "?"}`;
+      const typ = item?.memory_type || "?";
+      const status = item?.status || "?";
+      const title = item?.title || item?.summary || "";
+      this.taskLines.push(`memory: ${id} [${status}] ${scope} ${typ} - ${title}`);
+    }
+    this.renderTasks(true);
+  }
+
+  private showMemoryMenu(prefix: string, items: any): void {
+    const list = Array.isArray(items) ? items : [];
+    this.memoryItems = list;
+    if (list.length === 0) {
+      this.taskLines.push(`${prefix}: no memories`);
+      this.renderTasks(true);
+      return;
+    }
+    this.taskLines.push(`${prefix}: ${list.length} item(s), Enter 查看详情`);
+    this.renderTasks(true);
+    this.menuMode = "memory";
+    this.menu.setItems(list.map((item) => {
+      const id = String(item?.memory_id || "unknown");
+      const status = String(item?.status || "?");
+      const scope = `${item?.scope_type || "?"}/${item?.scope_key || "?"}`;
+      const typ = String(item?.memory_type || "?");
+      const title = escapeBlessedTags(String(item?.title || item?.summary || ""));
+      return `${id}  [${status}] ${scope} ${typ}  ${title}`;
+    }));
+    this.menu.select(0);
+    this.menu.show();
+    this.menu.focus();
+    this.requestRender(true);
+  }
+
+  private async showMemoryDetail(memoryID: string): Promise<void> {
+    try {
+      const item = await this.rpc.call("memory.get", { memory_id: memoryID });
+      const lines = [
+        `{${tuiTheme.brand}-fg}${escapeBlessedTags(item?.title || memoryID)}{/${tuiTheme.brand}-fg}`,
+        "",
+        `ID: ${item?.memory_id || memoryID}`,
+        `Status: ${item?.status || "?"}`,
+        `Scope: ${item?.scope_type || "?"}/${item?.scope_key || "?"}`,
+        `Type: ${item?.memory_type || "?"}`,
+        `Importance: ${item?.importance ?? "?"}  Confidence: ${item?.confidence ?? "?"}`,
+        `Source session: ${item?.source_session_id || "-"}`,
+        `Source agent: ${item?.source_agent_id || "-"}`,
+        `Updated: ${item?.updated_at || "-"}`,
+        `Valid until: ${item?.valid_until || "-"}`,
+        "",
+        `{${tuiTheme.muted}-fg}[a] approve  [r] restore  [x] archive  [d] delete  [h] hard delete  [p] prioritize  [l] deprioritize  [esc] close{/${tuiTheme.muted}-fg}`,
+        "",
+        escapeBlessedTags(item?.summary || ""),
+        "",
+        escapeBlessedTags(item?.content || ""),
+      ];
+      this.modal.setContent(lines.join("\n"));
+      this.modal.scrollTo(0);
+      this.modal.show();
+      this.modal.focus();
+      this.requestRender(true);
+      const run = (fn: () => Promise<void>) => void fn();
+      this.setModalHandlers({
+        a: () => run(() => this.applyMemoryModalAction("memory.approve", memoryID)),
+        r: () => run(() => this.applyMemoryModalAction("memory.restore", memoryID)),
+        x: () => run(() => this.applyMemoryModalAction("memory.archive", memoryID)),
+        d: () => run(() => this.applyMemoryModalAction("memory.delete", memoryID)),
+        h: () => run(() => this.applyMemoryModalAction("memory.delete", memoryID, { hard: true })),
+        p: () => run(() => this.applyMemoryModalAction("memory.prioritize", memoryID, { importance: 1 })),
+        l: () => run(() => this.applyMemoryModalAction("memory.deprioritize", memoryID)),
+        escape: () => this.closeModal(),
+      });
+    } catch (err) {
+      this.taskLines.push(`memory.detail: ${String(err)}`);
+      this.renderTasks(true);
+    }
+  }
+
+  private async applyMemoryModalAction(method: string, memoryID: string, extra: Record<string, any> = {}): Promise<void> {
+    try {
+      await this.rpc.call(method, { memory_id: memoryID, ...extra });
+      this.closeModal();
+      this.taskLines.push(`${method}: ${memoryID}`);
+      this.renderTasks(true);
+      await this.showMemoryList();
+    } catch (err) {
+      this.taskLines.push(`${method}: ${String(err)}`);
+      this.renderTasks(true);
+    }
   }
 
   private async showSessions(): Promise<void> {

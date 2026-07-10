@@ -20,19 +20,24 @@ const projectInstructionFilename = "LUMINA.md"
 
 var projectInstructionFilenames = []string{projectInstructionFilename, "AGENTS.md"}
 
-const memorySectionTemplate = "## Persistent Memory\n\n" +
-	"You have access to a persistent memory system at `{memory_dir}`. This directory already exists. `MEMORY.md` is the entrypoint index; standalone Markdown files hold full memory content.\n\n" +
-	"The current `MEMORY.md` index is provided separately as hidden user context. Relevant full memories may also be recalled automatically when useful. Save information only when it has cross-session value: create or update standalone `.md` files with YAML frontmatter, then keep `MEMORY.md` in sync.\n\n" +
-	"### Good memory candidates\n" +
-	"- **user** - The user's identity, durable preferences, and stable background knowledge.\n" +
-	"- **feedback** - Corrections or confirmations about how you should behave; include **Why:** and **How to apply:**.\n" +
-	"- **project** - Stable decisions, long-running goals, and deadlines converted to absolute dates.\n" +
-	"- **reference** - Stable entrypoints for external systems, issues, dashboards, or documents.\n\n" +
-	"### Do not save\n" +
-	"- Temporary repository structure, file paths, one-off analysis conclusions, or short-term debugging details\n" +
-	"- Git history or current diffs; read git or the filesystem when needed\n" +
-	"- Content already present in LUMINA.md or AGENTS.md\n" +
-	"- Details that only apply to the current conversation, current task, or current tool output"
+const memorySectionTemplate = "## Long-Term Memory\n\n" +
+	"LuminaCode maintains cross-session long-term memory in a local SQLite store at `{memory_store}`. You do not read or write this file directly; the runtime recalls relevant memories and writes new memories through the structured memory pipeline.\n\n" +
+	"Relevant long-term memories may be injected as hidden user context. Treat them as durable hints, not as fresh evidence. If a memory mentions file paths, commands, project behavior, or implementation details, verify the current repository state before relying on it.\n\n" +
+	"### Memory scopes\n" +
+	"- **user** - Cross-project user preferences and stable background.\n" +
+	"- **project** - Durable project decisions, architecture rules, and long-running TODOs for this project root.\n" +
+	"- **team** - Reusable Team-level collaboration rules and outcomes.\n" +
+	"- **agent_type** - Reusable experience for a role such as frontend, backend, research, QA, or reviewer.\n" +
+	"- **team_agent** - Private long-term memory for one role inside one Team.\n\n" +
+	"### Memory types\n" +
+	"- **semantic** facts and durable knowledge.\n" +
+	"- **episodic** lessons from previous tasks.\n" +
+	"- **procedural** durable behavior rules.\n" +
+	"- **preference** user preferences.\n" +
+	"- **feedback** user corrections.\n" +
+	"- **project** project-specific decisions.\n" +
+	"- **reference** stable external references.\n\n" +
+	"Save only information with clear cross-session value. Do not save temporary debugging details, current diffs, transient tool output, or anything that only matters for the current turn."
 
 const sessionMemorySection = "## Session History Recall\n\n" +
 	"This session maintains a local SQLite commit log that summarizes conversation intervals. It is not a replacement for the full context; use it only when history may have been compressed or when you are unsure about earlier details. " +
@@ -784,7 +789,7 @@ func BuildSubagentPromptSections(agentName, description, cwd string, maxTurns in
 		))
 	}
 	if strings.TrimSpace(agentMemory) != "" {
-		sections = append(sections, PromptSection{"agent-memory", strings.TrimSpace(agentMemory), true})
+		sections = append(sections, PromptSection{"role-memory", strings.TrimSpace(agentMemory), true})
 	}
 	sections = append(sections, BuildSubagentExecutionConstraintsSection(maxTurns))
 	return sections, nil
@@ -880,13 +885,12 @@ func BuildMemorySection(cfg *config.Config) string {
 	if cfg == nil {
 		cfg = config.GetConfigPtr()
 	}
-	if !cfg.AutoMemoryEnabled {
+	if !cfg.LongTermMemoryEnabled {
 		return ""
 	}
-
-	memoryDir := cfg.AutoMemoryDirectory
-	if memoryDir == nil {
+	memoryStore := strings.TrimSpace(cfg.LongTermMemoryStore)
+	if memoryStore == "" {
 		return ""
 	}
-	return strings.Replace(memorySectionTemplate, "{memory_dir}", *memoryDir, -1)
+	return strings.ReplaceAll(memorySectionTemplate, "{memory_store}", memoryStore)
 }

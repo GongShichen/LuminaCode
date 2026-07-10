@@ -1,6 +1,7 @@
 APP_NAME ?= lumina
 BACKEND_NAME ?= lumina-backend
 GO ?= go
+CGO_ENABLED ?= 1
 NPM ?= npm
 BUILD_DIR ?= tmp
 INSTALL_DIR ?= $(shell os=$$(uname -s); if [ "$$os" = "Darwin" ] && [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then printf /opt/homebrew/bin; elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then printf /usr/local/bin; else printf '%s/.local/bin' "$$HOME"; fi)
@@ -31,7 +32,7 @@ help:
 
 build:
 	@mkdir -p "$(BUILD_DIR)"
-	$(GO) build -o "$(BACKEND_BUILD_PATH)" .
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o "$(BACKEND_BUILD_PATH)" .
 	$(NPM) --prefix frontend install
 	$(NPM) --prefix frontend run build
 	@set -eu; \
@@ -124,6 +125,12 @@ install: build
 		arxiv_status="configure failed"; \
 		echo "Warning: arXiv MCP setup failed. Run ./scripts/setup-arxiv-mcp.sh install manually."; \
 	fi; \
+	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh install; then \
+		embedding_status="installed"; \
+	else \
+		embedding_status="install failed"; \
+		echo "Warning: memory embedding setup failed. Run ./scripts/setup-memory-embedding.sh install manually."; \
+	fi; \
 	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then \
 		path_line='export PATH="$$HOME/.local/bin:$$PATH"'; \
 		path_marker='$$HOME/.local/bin'; \
@@ -158,6 +165,7 @@ install: build
 	echo "Installed resources to $(APP_ROOT)"; \
 	echo "SearxNG WebSearch: $$searxng_status"; \
 	echo "arXiv MCP: $$arxiv_status"; \
+	echo "Memory embedding: $$embedding_status"; \
 	echo "To start local SearxNG: ./setup-searxng.sh install"; \
 	if [ -n "$$preserved_config" ]; then \
 		echo "Preserved existing $(APP_ROOT)/CONFIG/defaults.json"; \
@@ -251,6 +259,15 @@ doctor:
 	else \
 		printf 'arXiv MCP:    not installed\n'; \
 	fi; \
+	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh status >/dev/null 2>&1; then \
+		if [ -x "$(BACKEND_INSTALL_PATH)" ] && LUMINA_RESOURCE_ROOT="$(APP_ROOT)" "$(BACKEND_INSTALL_PATH)" memory doctor >/dev/null 2>&1; then \
+			printf 'Embedding:    installed, verified, inference ready\n'; \
+		else \
+			printf 'Embedding:    files verified; inference check failed\n'; \
+		fi; \
+	else \
+		printf 'Embedding:    missing or invalid\n'; \
+	fi; \
 	if command -v "$(APP_NAME)" >/dev/null 2>&1; then \
 		printf 'Command:      %s\n' "$$(command -v "$(APP_NAME)")"; \
 	else \
@@ -284,6 +301,9 @@ uninstall:
 		else \
 			echo "Warning: failed to uninstall managed SearxNG; remove it manually with setup-searxng.sh uninstall."; \
 		fi; \
+	fi
+	@if [ -x "./scripts/setup-memory-embedding.sh" ]; then \
+		LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh uninstall || true; \
 	fi
 	@rm -f "$(INSTALL_PATH)"
 	@rm -f "$(BACKEND_INSTALL_PATH)"

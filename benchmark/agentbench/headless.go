@@ -12,19 +12,22 @@ import (
 type HeadlessAgentRunner struct{}
 
 func (HeadlessAgentRunner) Run(ctx context.Context, cfg config.Config, prompt string, sessionID string) AgentRunResult {
+	return (HeadlessAgentRunner{}).RunAt(ctx, cfg, prompt, sessionID, time.Time{})
+}
+
+func (HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prompt string, sessionID string, queryTime time.Time) AgentRunResult {
 	start := time.Now()
 	timeline := []TimelineEvent{
 		newTimelineEvent(start, start, "first_model_request", nil),
 	}
 	cfg.Yolo = true
-	cfg.AutoMemoryEnabled = false
-	cfg.AutoMemoryDirectory = nil
 	previousConfig := config.GetConfig()
 	config.SetConfig(cfg)
 	defer config.SetConfig(previousConfig)
 	engine := agent.NewQueryEngine(&cfg)
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
+	state.MemoryQueryTime = queryTime
 	if cfg.Yolo && state.PermissionState != nil {
 		state.PermissionState.YoloMode = true
 	}
@@ -59,10 +62,17 @@ func (HeadlessAgentRunner) Run(ctx context.Context, cfg config.Config, prompt st
 			engine.ResolveSkillPermission(true)
 			engine.ResolvePermission(agent.PermissionOnce, event.Content)
 		case "error":
+			if recovered, _ := event.Metadata["recovered"].(bool); recovered {
+				result.TransientErrors = append(result.TransientErrors, event.Content)
+				continue
+			}
 			result.ErrorType = event.Content
 		case "done":
 			timeline = append(timeline, newTimelineEvent(start, time.Now(), "final_answer", nil))
 		}
+	}
+	if result.ErrorType == "" && ctx.Err() != nil {
+		result.ErrorType = "agent_timeout: " + ctx.Err().Error()
 	}
 	result.FinalText = final.String()
 	result.InputTokens, result.OutputTokens = state.TokenTotals()

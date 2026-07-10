@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/config"
+	"LuminaCode/longmemory"
 	coretools "LuminaCode/tools"
 )
 
@@ -25,6 +25,15 @@ type searchInput struct {
 
 type searchTool struct {
 	coretools.BaseTool
+}
+
+func subAgentTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	cfg := config.NewConfig()
+	cfg.LongTermMemoryEnabled = false
+	cfg.MemoryQueryExpansionEnabled = false
+	cfg.SessionDir = t.TempDir()
+	return cfg
 }
 
 func newSearchTool() *searchTool {
@@ -70,7 +79,7 @@ func TestSubAgentExecutesToolAndContinuesConversation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -97,7 +106,7 @@ func TestSubAgentExecutesToolAndContinuesConversation(t *testing.T) {
 }
 
 func TestSubAgentAbortCheckReturnsAbortText(t *testing.T) {
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1:1"
 	cfg.APIModel = "gpt-5"
@@ -117,7 +126,7 @@ func TestSubAgentAbortCheckReturnsAbortText(t *testing.T) {
 }
 
 func TestSubAgentDeadlineReturnsPartialProgressInsteadOfToolError(t *testing.T) {
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1:1"
 	cfg.APIModel = "gpt-5"
@@ -178,7 +187,7 @@ func TestSubAgentRunAsksModelToFinalizeAfterTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -205,7 +214,7 @@ func TestSubAgentRunAsksModelToFinalizeAfterTimeout(t *testing.T) {
 }
 
 func TestSubAgentSessionStateDefaultsMatchPython(t *testing.T) {
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1:1"
 	cfg.APIModel = "gpt-5"
@@ -248,7 +257,7 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
@@ -288,23 +297,41 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 
 func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	dir := t.TempDir()
-	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
-	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+	memoryPath := filepath.Join(dir, "lumina-memory.sqlite")
+	store, err := longmemory.Open(context.Background(), memoryPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeDir, "MEMORY.md"), []byte("# Index\n\n- useful memory\n"), 0o644); err != nil {
+	defer store.Close()
+	projectRoot := longmemory.ResolveProjectRoot(dir)
+	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:  longmemory.ScopeAgentType,
+		ScopeKey:   longmemory.AgentTypeScopeKey(projectRoot, "explore"),
+		MemoryType: longmemory.TypeProcedural,
+		Title:      "Search discipline",
+		Content:    "Prefer read-only repository exploration before suggesting edits.",
+		Summary:    "Read-only repository exploration first.",
+		Tags:       []string{"subagent", "explore"},
+		Importance: 0.8,
+		Confidence: 0.9,
+		Status:     longmemory.StatusActive,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.CWD = dir
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
-	cfg.AutoMemoryEnabled = true
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = memoryPath
 	registry := coretools.NewToolRegistry(newLargeReadTool())
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
 	sub := agent.NewSubAgent(cfg, registry, def, nil, "", "Explore", coretools.ExecutionContext{})
-	session := sub.CreateSessionState("inspect")
+	session := sub.CreateSessionState("repository exploration")
 	prompt := session.SystemPrompt
+	if projectRoot == "" {
+		t.Fatal("expected resolved project root")
+	}
 	for _, expected := range []string{
 		"You are a Explore sub-agent. Read-only search agent.",
 		"You have 7 turns to complete the task.",
@@ -314,6 +341,12 @@ func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("subagent system prompt missing %q:\n%s", expected, prompt)
 		}
+	}
+	if len(session.Messages) < 2 || fmt.Sprint(session.Messages[0]) == "" {
+		t.Fatalf("expected recalled memory context before user task, got %#v", session.Messages)
+	}
+	if !strings.Contains(fmt.Sprint(session.Messages[0]), "Prefer read-only repository exploration before suggesting edits.") {
+		t.Fatalf("expected long-term memory in hidden context message, got %#v", session.Messages[0])
 	}
 	if strings.Contains(prompt, "\n\nSub-agent: Explore\n") {
 		t.Fatalf("subagent prompt should use section builder, got legacy prompt:\n%s", prompt)
@@ -341,7 +374,7 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -367,57 +400,76 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 
 func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testing.T) {
 	dir := t.TempDir()
-	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
-	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeDir, "MEMORY.md"), []byte("- [Repo Note](repo-note.md) - Useful repo note\n"), 0o644); err != nil {
+	defer store.Close()
+	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:     longmemory.ScopeAgentType,
+		ScopeKey:      longmemory.AgentTypeScopeKey(dir, "Explore"),
+		MemoryType:    longmemory.TypeReference,
+		Title:         "Repo Note",
+		Content:       "Use this repo note.",
+		Importance:    0.9,
+		Confidence:    0.9,
+		SourceAgentID: "Explore",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeDir, "repo-note.md"), []byte("---\nname: Repo Note\ndescription: Useful repo note\nmetadata:\n  type: reference\n---\n\nUse this repo note.\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/chat/completions" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"choices":[{"message":{"content":"[\"project--repo-note.md\"]"}}]}`)
-	}))
-	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.CWD = dir
-	cfg.APIKey = "test-key"
-	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
-	cfg.AutoMemoryEnabled = true
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = store.Path()
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
 	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "Explore", coretools.ExecutionContext{})
 
 	session := sub.CreateSessionState("inspect repo")
-	if _, ok := session.SurfacedMemoryIDs["project--repo-note.md"]; !ok {
-		t.Fatalf("expected initial agent-memory recall id to be surfaced like Python, got %#v", session.SurfacedMemoryIDs)
+	if _, ok := session.SurfacedMemoryIDs[entry.MemoryID]; !ok {
+		t.Fatalf("expected initial long-term agent memory id to be surfaced, got %#v", session.SurfacedMemoryIDs)
 	}
 }
 
 func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	dir := t.TempDir()
-	scopeDir := filepath.Join(config.ProjectRuntimeDir(dir), "agent-memory", "explore")
-	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeDir, "MEMORY.md"), []byte("- [Search Note](search-note.md) - Search followup note\n"), 0o644); err != nil {
+	defer store.Close()
+	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:     longmemory.ScopeProject,
+		ScopeKey:      longmemory.ProjectScopeKey(dir),
+		MemoryType:    longmemory.TypeReference,
+		Title:         "Workspace Note",
+		Content:       "Use this workspace-level memory.",
+		Importance:    0.9,
+		Confidence:    0.9,
+		SourceAgentID: "Explore",
+	})
+	if err != nil || entry == nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(scopeDir, "search-note.md"), []byte("---\nname: Search Note\ndescription: Search followup note\nmetadata:\n  type: reference\n---\n\nUse this search-triggered memory.\n"), 0o644); err != nil {
+	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
+		ScopeType:     longmemory.ScopeAgentType,
+		ScopeKey:      longmemory.AgentTypeScopeKey(dir, "Explore"),
+		MemoryType:    longmemory.TypeReference,
+		Title:         "Search Note",
+		Summary:       "Search followup note",
+		Content:       "Use this search-triggered memory for inspect workspace and repo queries.",
+		Importance:    0.9,
+		Confidence:    0.9,
+		SourceAgentID: "Explore",
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	var completeCalls atomic.Int32
 	var streamCalls atomic.Int32
-	var secondStreamSawMemory atomic.Bool
+	var streamSawMemory atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -431,14 +483,7 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 			t.Fatalf("invalid request JSON: %v body=%s", err, bodyBytes)
 		}
 		if body["stream"] == false {
-			call := completeCalls.Add(1)
-			w.Header().Set("Content-Type", "application/json")
-			if call == 1 {
-				fmt.Fprint(w, `{"choices":[{"message":{"content":"[]"}}]}`)
-				return
-			}
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"[\"project--search-note.md\"]"}}]}`)
-			return
+			t.Fatalf("long-term subagent recall should be local, got unexpected completion request %#v", body)
 		}
 
 		call := streamCalls.Add(1)
@@ -449,8 +494,8 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			return
 		}
-		if strings.Contains(string(bodyBytes), "Use this search-triggered memory.") {
-			secondStreamSawMemory.Store(true)
+		if strings.Contains(string(bodyBytes), "workspace-level memory") || strings.Contains(string(bodyBytes), "search-triggered memory") {
+			streamSawMemory.Store(true)
 		}
 		fmt.Fprint(w, "data: {\"id\":\"msg-2\",\"choices\":[{\"delta\":{\"content\":\"final after search memory\"}}]}\n\n")
 		fmt.Fprint(w, "data: {\"id\":\"msg-2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6}}\n\n")
@@ -458,7 +503,7 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
+	cfg := subAgentTestConfig(t)
 	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
@@ -466,21 +511,19 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
-	cfg.AutoMemoryEnabled = true
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = store.Path()
 	def := agent.AgentDef{Name: "Explore", Description: "Search agent.", MaxTurns: 5}
 	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(newSearchTool()), def, nil, "", "Explore", coretools.ExecutionContext{})
 
-	result, err := sub.Run(context.Background(), "inspect with search")
+	result, err := sub.Run(context.Background(), "inspect workspace")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result != "final after search memory" {
 		t.Fatalf("unexpected result: %q", result)
 	}
-	if completeCalls.Load() < 2 {
-		t.Fatalf("expected followup agent-memory selector call after search, got %d", completeCalls.Load())
-	}
-	if !secondStreamSawMemory.Load() {
-		t.Fatalf("second stream request did not include recalled agent memory")
+	if !streamSawMemory.Load() {
+		t.Fatalf("stream requests did not include recalled long-term memory")
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,8 +18,8 @@ import (
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
+	"LuminaCode/longmemory"
 	"LuminaCode/maintenance"
-	"LuminaCode/memory"
 	"LuminaCode/session"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
@@ -37,12 +38,267 @@ func main() {
 	}
 }
 
+func runMemoryCLI(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lumina-backend memory <list|search|get|delete|archive|approve|restore|prioritize|deprioritize|supersede|export|import|used|doctor>")
+	}
+	cfg := config.NewConfig()
+	if !cfg.LongTermMemoryEnabled {
+		return fmt.Errorf("long-term memory is disabled")
+	}
+	ctx := context.Background()
+	store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch args[0] {
+	case "list":
+		flags := flag.NewFlagSet("memory list", flag.ContinueOnError)
+		includeInactive := flags.Bool("all", false, "include inactive memories")
+		includeExpired := flags.Bool("expired", false, "include expired memories")
+		limit := flags.Int("limit", 50, "max items")
+		scopeType := flags.String("scope-type", "", "filter by scope type")
+		scopeKey := flags.String("scope-key", "", "filter by scope key")
+		memoryType := flags.String("type", "", "filter by memory type")
+		tag := flags.String("tag", "", "filter by tag")
+		createdAfter := flags.String("created-after", "", "filter by created_at lower bound, RFC3339 or YYYY-MM-DD")
+		createdBefore := flags.String("created-before", "", "filter by created_at upper bound, RFC3339 or YYYY-MM-DD")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		opts := memoryCLIOptions(*limit, *includeInactive, *includeExpired, *scopeType, *scopeKey, *memoryType, *tag, *createdAfter, *createdBefore)
+		items, err := store.List(ctx, opts)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, items)
+	case "search":
+		flags := flag.NewFlagSet("memory search", flag.ContinueOnError)
+		limit := flags.Int("limit", cfg.MemoryRecallMaxItems, "max items")
+		includeInactive := flags.Bool("all", false, "include inactive memories")
+		includeExpired := flags.Bool("expired", false, "include expired memories")
+		scopeType := flags.String("scope-type", "", "filter by scope type")
+		scopeKey := flags.String("scope-key", "", "filter by scope key")
+		memoryType := flags.String("type", "", "filter by memory type")
+		tag := flags.String("tag", "", "filter by tag")
+		createdAfter := flags.String("created-after", "", "filter by created_at lower bound, RFC3339 or YYYY-MM-DD")
+		createdBefore := flags.String("created-before", "", "filter by created_at upper bound, RFC3339 or YYYY-MM-DD")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query := strings.TrimSpace(strings.Join(flags.Args(), " "))
+		opts := memoryCLIOptions(*limit, *includeInactive, *includeExpired, *scopeType, *scopeKey, *memoryType, *tag, *createdAfter, *createdBefore)
+		opts.Query = query
+		if len(opts.Scopes) == 0 {
+			opts.Scopes = longmemory.RuntimeScopes(cfg.CWD, "main", "", "")
+		}
+		opts.MaxCandidates = cfg.MemoryFTSCandidates
+		opts.ContextMaxRunes = cfg.MemoryContextMaxTokens * 4
+		items, err := store.Search(ctx, opts)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, items)
+	case "get":
+		if len(args) < 2 {
+			return fmt.Errorf("memory get requires memory_id")
+		}
+		entry, err := store.Get(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, entry)
+	case "delete":
+		flags := flag.NewFlagSet("memory delete", flag.ContinueOnError)
+		hard := flags.Bool("hard", false, "physically delete the memory")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() == 0 {
+			return fmt.Errorf("memory delete requires memory_id")
+		}
+		return store.Delete(ctx, flags.Arg(0), *hard)
+	case "archive":
+		if len(args) < 2 {
+			return fmt.Errorf("memory archive requires memory_id")
+		}
+		return store.SetStatus(ctx, args[1], longmemory.StatusArchived)
+	case "approve":
+		if len(args) < 2 {
+			return fmt.Errorf("memory approve requires memory_id")
+		}
+		return store.Approve(ctx, args[1])
+	case "restore":
+		if len(args) < 2 {
+			return fmt.Errorf("memory restore requires memory_id")
+		}
+		return store.Restore(ctx, args[1])
+	case "prioritize":
+		flags := flag.NewFlagSet("memory prioritize", flag.ContinueOnError)
+		importance := flags.Float64("importance", 1, "importance 0..1")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() == 0 {
+			return fmt.Errorf("memory prioritize requires memory_id")
+		}
+		return store.UpdateImportance(ctx, flags.Arg(0), *importance)
+	case "deprioritize":
+		if len(args) < 2 {
+			return fmt.Errorf("memory deprioritize requires memory_id")
+		}
+		return store.Deprioritize(ctx, args[1])
+	case "supersede":
+		flags := flag.NewFlagSet("memory supersede", flag.ContinueOnError)
+		newID := flags.String("new", "", "existing replacement memory_id")
+		candidatePath := flags.String("candidate", "", "JSON/JSONL/Markdown candidate file containing replacement memory")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() == 0 {
+			return fmt.Errorf("memory supersede requires old memory_id")
+		}
+		oldID := flags.Arg(0)
+		if *candidatePath != "" {
+			before, err := store.List(ctx, longmemory.SearchOptions{Limit: 100000, IncludeInactive: true, IncludeExpired: true})
+			if err != nil {
+				return err
+			}
+			seen := map[string]struct{}{}
+			for _, entry := range before {
+				seen[entry.MemoryID] = struct{}{}
+			}
+			if _, err := backend.ImportMemoryCandidates(ctx, store, *candidatePath, nil); err != nil {
+				return err
+			}
+			after, err := store.List(ctx, longmemory.SearchOptions{Limit: 100000, IncludeInactive: true, IncludeExpired: true})
+			if err != nil {
+				return err
+			}
+			var replacement string
+			for _, entry := range after {
+				if _, ok := seen[entry.MemoryID]; !ok {
+					replacement = entry.MemoryID
+					break
+				}
+			}
+			if replacement == "" {
+				return fmt.Errorf("candidate import did not create a replacement memory")
+			}
+			return store.Supersede(ctx, oldID, replacement)
+		}
+		if *newID == "" {
+			return fmt.Errorf("memory supersede requires --new or --candidate")
+		}
+		return store.Supersede(ctx, oldID, *newID)
+	case "export":
+		flags := flag.NewFlagSet("memory export", flag.ContinueOnError)
+		format := flags.String("format", "markdown", "export format")
+		out := flags.String("out", "", "output directory")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.ToLower(*format) != "markdown" {
+			return fmt.Errorf("unsupported memory export format: %s", *format)
+		}
+		dir, err := longmemory.ExportMarkdown(ctx, store, *out)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, dir)
+		return nil
+	case "import":
+		if len(args) < 2 {
+			return fmt.Errorf("memory import requires an explicit JSON/JSONL/Markdown file or directory path")
+		}
+		n, err := backend.ImportMemoryCandidates(ctx, store, args[1], nil)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "imported %d memories\n", n)
+		return nil
+	case "used":
+		flags := flag.NewFlagSet("memory used", flag.ContinueOnError)
+		limit := flags.Int("limit", 100, "max records")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		records, err := store.ListUsed(ctx, *limit)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, records)
+	case "doctor":
+		if !cfg.MemoryEmbeddingEnabled {
+			return fmt.Errorf("memory embedding is disabled")
+		}
+		embedder, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+		if err != nil {
+			return err
+		}
+		vectors, err := embedder.Embed(ctx, []string{"LuminaCode memory embedding self check"}, longmemory.EmbeddingQuery)
+		if err != nil {
+			return err
+		}
+		dimensions := 0
+		if len(vectors) > 0 {
+			dimensions = len(vectors[0])
+		}
+		if len(vectors) != 1 || dimensions != embedder.Dimensions() {
+			return fmt.Errorf("memory embedding self check returned shape %d x %d", len(vectors), dimensions)
+		}
+		return writeJSON(os.Stdout, map[string]any{"status": "ready", "model": embedder.Model(),
+			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir})
+	default:
+		return fmt.Errorf("unknown memory command: %s", args[0])
+	}
+}
+
+func memoryCLIOptions(limit int, includeInactive, includeExpired bool, scopeType, scopeKey, memoryType, tag, createdAfter, createdBefore string) longmemory.SearchOptions {
+	opts := longmemory.SearchOptions{Limit: limit, IncludeInactive: includeInactive, IncludeExpired: includeExpired}
+	if strings.TrimSpace(scopeType) != "" && strings.TrimSpace(scopeKey) != "" {
+		opts.Scopes = []longmemory.Scope{{Type: longmemory.ScopeType(scopeType), Key: scopeKey}}
+	}
+	if strings.TrimSpace(memoryType) != "" {
+		opts.Types = []longmemory.MemoryType{longmemory.MemoryType(memoryType)}
+	}
+	if strings.TrimSpace(tag) != "" {
+		opts.Tags = []string{tag}
+	}
+	opts.CreatedAfter = parseMemoryCLITime(createdAfter)
+	opts.CreatedBefore = parseMemoryCLITime(createdBefore)
+	return opts
+}
+
+func parseMemoryCLITime(text string) time.Time {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, text); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func writeJSON(w io.Writer, value any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(value)
+}
+
 func run(args []string) error {
 	if len(args) > 0 && args[0] == "daemon" {
 		return backend.RunDaemonCLI(args[1:])
 	}
 	if len(args) > 0 && args[0] == "shutdown" {
 		return backend.RunShutdownCLI(args[1:])
+	}
+	if len(args) > 0 && args[0] == "memory" {
+		return runMemoryCLI(args[1:])
 	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -58,7 +314,7 @@ func run(args []string) error {
 	cwd := flags.String("cwd", "", "Working directory.")
 	verbose := flags.Bool("verbose", false, "Enable debug output.")
 	verboseShort := flags.Bool("v", false, "Enable debug output.")
-	bare := flags.Bool("bare", false, "Disable auto-memory and other persistent features.")
+	bare := flags.Bool("bare", false, "Disable long-term memory and other persistent features.")
 	harnessMode := flags.String("harness-mode", "", "Benchmark harness mode. Supported: terminal-bench.")
 	listFlag := flags.Bool("list", false, "List saved session files and exit.")
 	storageFlag := flags.Bool("storage", false, "Show session storage usage and exit.")
@@ -106,17 +362,19 @@ func run(args []string) error {
 		cfg.CWD = abs
 	}
 	if *bare {
-		cfg.AutoMemoryEnabled = false
-		cfg.AutoMemoryDirectory = nil
+		cfg.LongTermMemoryEnabled = false
 	}
 	if *harnessMode != "" {
 		cfg.HarnessMode = strings.TrimSpace(*harnessMode)
 		config.PinFields(&cfg, "harness_mode")
 	}
 	config.ApplyHarnessDefaults(&cfg)
-	if !memory.IsAutoMemoryEnabled(cfg.AutoMemoryEnabled, *bare, false) {
-		cfg.AutoMemoryEnabled = false
-		cfg.AutoMemoryDirectory = nil
+	if cfg.LongTermMemoryEnabled {
+		store, err := longmemory.Open(context.Background(), cfg.LongTermMemoryStore)
+		if err != nil {
+			return fmt.Errorf("open long-term memory store: %w", err)
+		}
+		_ = store.Close()
 	}
 
 	store := session.NewStore(cfg.SessionDir)
@@ -136,17 +394,8 @@ func run(args []string) error {
 		return fmt.Errorf("interactive Go TUI has been removed. Use the TypeScript frontend command 'lumina', or run 'lumina-backend -p <prompt>' for headless mode")
 	}
 
-	if cfg.AutoMemoryEnabled {
-		memDir := memory.ResolveMemoryDirectory(cfg.CWD, cfg.AutoMemoryDirectory)
-		if memDir != "" {
-			memory.EnsureMemoryDirectory(memDir)
-			memory.RunCleanup(memDir, nil, memory.DefaultMaxMemories, time.Time{})
-			_, _ = memory.WriteMemoryIndex(memDir)
-			cfg.AutoMemoryDirectory = &memDir
-			if verboseEnabled {
-				fmt.Printf("[debug] Memory:  %s\n", memDir)
-			}
-		}
+	if verboseEnabled && cfg.LongTermMemoryEnabled {
+		fmt.Printf("[debug] Long-term memory:  %s\n", cfg.LongTermMemoryStore)
 	}
 
 	if cfg.APIKey == "" {

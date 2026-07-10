@@ -28,6 +28,9 @@ func RunSuite(ctx context.Context, options RunnerOptions) (Report, error) {
 	if IsOfficialSuite(options.Suite) {
 		return RunOfficialSuite(ctx, options)
 	}
+	if isMemoryBenchmarkSuite(options.Suite) {
+		return RunMemoryBenchmarkSuite(ctx, options)
+	}
 	cases, err := LoadCases(options.Suite, options.CasesPath, options.Limit)
 	if err != nil {
 		return Report{}, err
@@ -90,9 +93,6 @@ func normalizeOptions(options RunnerOptions) RunnerOptions {
 	if options.ArtifactsDir == "" {
 		options.ArtifactsDir = filepath.Join(options.RootDir, "artifacts")
 	}
-	if options.TimeoutSeconds <= 0 {
-		options.TimeoutSeconds = DefaultCaseTimeout
-	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
@@ -104,8 +104,6 @@ func normalizeOptions(options RunnerOptions) RunnerOptions {
 		options.Config.CWD = cwd
 	}
 	options.Config.Yolo = true
-	options.Config.AutoMemoryEnabled = false
-	options.Config.AutoMemoryDirectory = nil
 	return options
 }
 
@@ -116,7 +114,7 @@ func runCase(ctx context.Context, c CaseSpec, options RunnerOptions) CaseResult 
 	if timeout <= 0 {
 		timeout = options.TimeoutSeconds
 	}
-	caseCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	caseCtx, cancel := contextWithOptionalTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	artifactDir := filepath.Join(options.ArtifactsDir, sanitizeCaseID(c.ID))
@@ -291,6 +289,9 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		BenchmarkSuiteBreakdown: map[string]float64{},
 	}
 	var durations, ttft, firstTool, firstTest, inputTokens, outputTokens, patchRates, testRates []float64
+	var retrievedCounts, evidenceRecalls, evidenceMRRs, sourceRecalls, memoryTokenEstimates, memoryTokenRatios []float64
+	var subtaskAnswerRates, memoryUpdateRates, previousSubtaskHitRates, retrievalDurations, staleUseRates []float64
+	var evidenceMetricCases, evidenceHitCases int
 	var failing []TopFailingCase
 	byBenchmarkTotal := map[string]int{}
 	byBenchmarkResolved := map[string]int{}
@@ -310,6 +311,44 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		patchRates = append(patchRates, result.PatchApplyRate)
 		testRates = append(testRates, result.TestPassRate)
 		summary.TotalToolCalls += result.ToolCalls
+		if result.MemoryMetrics != nil {
+			m := result.MemoryMetrics
+			retrievedCounts = append(retrievedCounts, float64(m.RetrievedCount))
+			if m.EvidenceTotal > 0 {
+				evidenceMetricCases++
+				if m.EvidenceHit {
+					evidenceHitCases++
+				}
+				evidenceRecalls = append(evidenceRecalls, m.EvidenceRecallAtK)
+				evidenceMRRs = append(evidenceMRRs, m.EvidenceMRR)
+			}
+			if m.GoldSourceSessionCount > 0 {
+				sourceRecalls = append(sourceRecalls, m.SourceSessionRecall)
+			}
+			if m.MemoryTokenEstimate > 0 {
+				memoryTokenEstimates = append(memoryTokenEstimates, float64(m.MemoryTokenEstimate))
+			}
+			if m.MemoryTokenRatio > 0 {
+				memoryTokenRatios = append(memoryTokenRatios, m.MemoryTokenRatio)
+			}
+			if m.RetrievalRuns > 0 {
+				retrievalDurations = append(retrievalDurations, float64(m.RetrievalDurationMS)/float64(m.RetrievalRuns))
+			}
+			staleUseRates = append(staleUseRates, m.StaleUseRate)
+			if m.SubtaskTotal > 0 {
+				subtaskAnswerRates = append(subtaskAnswerRates, m.SubtaskAnswerRate)
+				memoryUpdateRates = append(memoryUpdateRates, m.MemoryUpdateSuccessRate)
+			}
+			if m.SubtaskTotal > 1 {
+				previousSubtaskHitRates = append(previousSubtaskHitRates, m.PreviousSubtaskHitRate)
+			}
+			if m.RetrievalErrorType != "" {
+				if summary.Memory.RetrievalErrorCategories == nil {
+					summary.Memory.RetrievalErrorCategories = map[string]int{}
+				}
+				summary.Memory.RetrievalErrorCategories[m.RetrievalErrorType]++
+			}
+		}
 		byBenchmarkTotal[result.Case.Benchmark]++
 		if result.Resolved {
 			summary.ResolvedCases++
@@ -337,6 +376,22 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 	summary.OutputTokens = latencySummary(outputTokens)
 	summary.AveragePatchApplyRate = Average(patchRates)
 	summary.AverageTestPassRate = Average(testRates)
+	summary.Memory.AverageRetrievedCount = Average(retrievedCounts)
+	if evidenceMetricCases > 0 {
+		summary.Memory.EvidenceCaseCount = evidenceMetricCases
+		summary.Memory.EvidenceHitCases = evidenceHitCases
+		summary.Memory.EvidenceHitRate = float64(evidenceHitCases) / float64(evidenceMetricCases)
+	}
+	summary.Memory.AverageEvidenceRecallAtK = Average(evidenceRecalls)
+	summary.Memory.AverageEvidenceMRR = Average(evidenceMRRs)
+	summary.Memory.AverageSourceSessionRecall = Average(sourceRecalls)
+	summary.Memory.AverageMemoryTokenEstimate = Average(memoryTokenEstimates)
+	summary.Memory.AverageMemoryTokenRatio = Average(memoryTokenRatios)
+	summary.Memory.AverageRetrievalDurationMS = Average(retrievalDurations)
+	summary.Memory.AverageStaleUseRate = Average(staleUseRates)
+	summary.Memory.AverageSubtaskAnswerRate = Average(subtaskAnswerRates)
+	summary.Memory.AverageMemoryUpdateSuccessRate = Average(memoryUpdateRates)
+	summary.Memory.AveragePreviousSubtaskHitRate = Average(previousSubtaskHitRates)
 	for benchmark, total := range byBenchmarkTotal {
 		if total > 0 {
 			summary.BenchmarkSuiteBreakdown[benchmark] = float64(byBenchmarkResolved[benchmark]) / float64(total)

@@ -28,6 +28,51 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 
 后端只监听 `127.0.0.1`，连接必须携带 auth token；支持多个 session，同一个 session 内串行 submit。Headless 路径由 `lumina-backend` 处理。
 
+## 长期记忆
+
+跨 Session 记忆保存在本地 SQLite：
+
+```text
+~/.lumina/memory/lumina-memory.sqlite
+```
+
+- 写入使用持久化 message cursor，保存 episode、证据片段、事实、实体、时间
+  版本、关系和来源。
+- 每次查询固定运行 BM25、本地向量、实体、时间、Session 和图检索，再用
+  RRF 融合、MMR 去重，组装为较小的带来源证据包。
+- user、project、Team、agent type 和 Team agent scope 相互隔离。召回内容是
+  临时上下文，不进入可见 transcript。
+- 事实同时保留有效时间和观测时间；新事实会替代旧版本，但不会删除历史来源。
+
+`make install` 会从 ModelScope 安装 `multilingual-e5-small` 到
+`~/.lumina/models/memory/`，`make uninstall` 会一并删除。使用 `/Memory`、
+`/MemorySearch`、`/MemoryForget`、`/MemoryExport`、`/MemoryImport` 管理记忆。
+
+### LongMemEval
+
+Lumina 在 500 题 oracle 数据集上的成绩为 **61.6%（308/500）**。同一批答案
+使用 LongMemEval 官方判分 prompt 和 `deepseek-v4-pro` 独立判分 5 次，5 次
+总分与每题标签完全一致（均值 61.6%，标准差 0）。这不是官方 GPT-4o
+leaderboard 成绩。
+
+公开 LongMemEval 成绩按分数排序如下，仅用于定位：
+
+| 系统 | 准确率 | 公开评测设置 |
+|---|---:|---|
+| Mem0 Platform | 94.8% | Mem0 当前 benchmark，Top 50 |
+| LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
+| Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
+| Mem0 | 62.6% | GPT-4o-mini 同设置 baseline |
+| **LuminaCode** | **61.6%** | DeepSeek Judge，5 次结果一致 |
+| Zep | 58.6% | GPT-4o-mini 同设置 baseline |
+| A-Mem | 55.0% | GPT-4o-mini 同设置 baseline |
+| MemOS | 51.2% | GPT-4o-mini 同设置 baseline |
+
+来源：[LongMemEval](https://github.com/xiaowu0162/longmemeval)、
+[Mem0 benchmark](https://github.com/mem0ai/memory-benchmarks)、
+[LiCoMemory 论文](https://aclanthology.org/2026.findings-acl.1835/)。不同报告的
+reader、检索深度和 judge 不完全一致，因此这不是严格同口径排行榜。
+
 ## Agent Team
 
 Agent Team 模式让一组互相隔离的专家 Agent 协作完成任务。每个成员都有独立 prompt、skills、上下文、任务状态和 A2A inbox/outbox，同时复用同一套 backend runtime 和工具系统。
@@ -82,7 +127,7 @@ Runtime 要点：
 
 ### Team 配置文件
 
-最小 `team.yaml` 结构：
+`team.yaml` 示例结构：
 
 ```yaml
 name: my-team
@@ -184,6 +229,22 @@ lumina \
 
 `api-type`：`anthropic`、`openai_compatible`、`auto`。
 
+可以为所有运行链路配置独立的 fallback：
+
+```json
+{
+  "fallback_api_enabled": true,
+  "fallback_api_key": "...",
+  "fallback_api_base_url": "https://api.example.com/anthropic",
+  "fallback_api_model": "fallback-model",
+  "fallback_api_type": "anthropic"
+}
+```
+
+主模型重试耗尽后，只在 429、5xx、timeout、EOF 和网络错误时切换。无效
+Key、错误参数和模型配置错误不会被掩盖；主模型已经输出文本或 tool call
+后也不会切换，避免重复输出和重复执行。配置会在下一轮热加载。
+
 `--max-tokens` 是本地上下文窗口长度，用于统计和 80% 压缩阈值。API 请求不会强制携带供应商侧 completion `max_tokens`。runtime 配置会在每轮 Agent 请求前热读取。
 
 ## 项目说明文件
@@ -248,8 +309,6 @@ Skill 上下文会注入本轮模型请求，但不进入可见对话。
 ```
 
 - `CONFIG/trusted_mcp.json`
-- `agent-memory/`
-- `agent-memory-local/`
 - `background/tool-results/`
 
 项目内用户资源：

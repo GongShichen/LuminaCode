@@ -64,6 +64,9 @@ $skills = Join-Path $AppRoot "SKILLS"
 $defaults = Join-Path $AppRoot "CONFIG\defaults.json"
 $mcpConfig = Join-Path $AppRoot "CONFIG\mcp.json"
 $arxivPython = Join-Path $AppRoot "mcp\arxiv-mcp\.venv\Scripts\python.exe"
+$embeddingModel = Join-Path $AppRoot "models\memory\multilingual-e5-small\model.onnx"
+$embeddingTokenizer = Join-Path $AppRoot "models\memory\multilingual-e5-small\tokenizer.json"
+$embeddingRuntime = Join-Path $AppRoot "models\memory\multilingual-e5-small\runtime\onnxruntime.dll"
 $endpoint = Join-Path $HOME ".lumina\run\backend.json"
 $command = Get-Command lumina -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -103,4 +106,13 @@ if (Test-Path $defaults) {
     Status-Line "WebSearch" "not configured"
 }
 Status-Line "arXiv MCP" ($(if ((Test-Path $arxivPython) -and (Test-Path $mcpConfig)) { "installed" } else { "not installed" }))
+Status-Line "Embedding" ($(if ((Test-Path $embeddingModel) -and (Test-Path $embeddingTokenizer) -and (Test-Path $embeddingRuntime)) { "installed" } else { "missing" }))
+if (Test-Path $backend) {
+    try {
+        & $backend memory doctor | Out-Null
+        Status-Line "Embedding test" "inference ready"
+    } catch {
+        Status-Line "Embedding test" "failed: $($_.Exception.Message)"
+    }
+}
 Status-Line "Endpoint" ($(if (Test-Path $endpoint) { $endpoint } else { "not running" }))

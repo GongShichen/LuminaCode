@@ -13,7 +13,7 @@ var profiles = map[string]VariantOverride{
 		ConfigOverrides: map[string]any{
 			"disable_memory_recall":        true,
 			"disable_memory_extraction":    true,
-			"disable_memory_index":         true,
+			"disable_memory_store":         true,
 			"disable_memory_effectiveness": true,
 		},
 	},

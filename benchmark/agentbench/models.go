@@ -15,6 +15,8 @@ const (
 	SuiteSWEBenchVerified       = "swebench_verified"
 	SuiteSWEBenchVerifiedSubset = "swebench_verified_subset"
 	SuiteTerminalBenchSmoke     = "terminal_bench_smoke"
+	SuiteLongMemEval            = "longmemeval"
+	SuiteMemoryArena            = "memoryarena"
 	DefaultCaseTimeout          = 900
 	ReportPrefix                = "agent-benchmark-"
 )
@@ -53,6 +55,7 @@ type AgentRunResult struct {
 	Events          []agent.StreamEvent `json:"events"`
 	FinalText       string              `json:"final_text,omitempty"`
 	ErrorType       string              `json:"error_type,omitempty"`
+	TransientErrors []string            `json:"transient_errors,omitempty"`
 	InputTokens     int                 `json:"input_tokens"`
 	OutputTokens    int                 `json:"output_tokens"`
 	ToolCalls       int                 `json:"tool_calls"`
@@ -86,6 +89,51 @@ type CaseResult struct {
 	ExpectedArtifact  string          `json:"expected_artifact,omitempty"`
 	ExpectedSatisfied bool            `json:"expected_satisfied"`
 	Timeline          []TimelineEvent `json:"timeline,omitempty"`
+	ExpectedAnswer    any             `json:"expected_answer,omitempty"`
+	Hypothesis        string          `json:"hypothesis,omitempty"`
+	MemoryHits        []string        `json:"memory_hits,omitempty"`
+	MemoryHitDetails  []MemoryHit     `json:"memory_hit_details,omitempty"`
+	MemoryMetrics     *MemoryMetrics  `json:"memory_metrics,omitempty"`
+	MemoryStorePath   string          `json:"memory_store_path,omitempty"`
+	AnswerMatch       bool            `json:"answer_match"`
+}
+
+type MemoryHit struct {
+	Rank            int      `json:"rank"`
+	MemoryID        string   `json:"memory_id"`
+	Title           string   `json:"title"`
+	SourceSessionID string   `json:"source_session_id,omitempty"`
+	Tags            []string `json:"tags,omitempty"`
+	Evidence        bool     `json:"evidence"`
+	Stale           bool     `json:"stale"`
+}
+
+type MemoryMetrics struct {
+	RetrievedCount            int      `json:"retrieved_count"`
+	EvidenceTotal             int      `json:"evidence_total,omitempty"`
+	EvidenceHitCount          int      `json:"evidence_hit_count,omitempty"`
+	EvidenceHit               bool     `json:"evidence_hit"`
+	EvidenceRecallAtK         float64  `json:"evidence_recall_at_k,omitempty"`
+	FirstEvidenceRank         *int     `json:"first_evidence_rank,omitempty"`
+	EvidenceMRR               float64  `json:"evidence_mrr,omitempty"`
+	GoldSourceSessionCount    int      `json:"gold_source_session_count,omitempty"`
+	GoldSourceSessionHitCount int      `json:"gold_source_session_hit_count,omitempty"`
+	SourceSessionRecall       float64  `json:"source_session_recall,omitempty"`
+	MemoryTokenEstimate       int      `json:"memory_token_estimate,omitempty"`
+	MemoryTokenRatio          float64  `json:"memory_token_ratio,omitempty"`
+	RetrievalRuns             int      `json:"retrieval_runs,omitempty"`
+	RetrievalDurationMS       int64    `json:"retrieval_duration_ms,omitempty"`
+	StaleUseCount             int      `json:"stale_use_count,omitempty"`
+	StaleUseRate              float64  `json:"stale_use_rate,omitempty"`
+	RetrievalErrorType        string   `json:"retrieval_error_type,omitempty"`
+	SubtaskTotal              int      `json:"subtask_total,omitempty"`
+	SubtaskAnswered           int      `json:"subtask_answered,omitempty"`
+	SubtaskAnswerRate         float64  `json:"subtask_answer_rate,omitempty"`
+	MemoryUpdateCount         int      `json:"memory_update_count,omitempty"`
+	MemoryUpdateSuccessRate   float64  `json:"memory_update_success_rate,omitempty"`
+	PreviousSubtaskHitCount   int      `json:"previous_subtask_hit_count,omitempty"`
+	PreviousSubtaskHitRate    float64  `json:"previous_subtask_hit_rate,omitempty"`
+	RecallWarnings            []string `json:"recall_warnings,omitempty"`
 }
 
 type LatencySummary struct {
@@ -113,6 +161,25 @@ type SuiteSummary struct {
 	AverageTestPassRate     float64            `json:"average_test_pass_rate"`
 	TotalToolCalls          int                `json:"total_tool_calls"`
 	BenchmarkSuiteBreakdown map[string]float64 `json:"benchmark_suite_breakdown,omitempty"`
+	Memory                  MemorySummary      `json:"memory,omitempty"`
+}
+
+type MemorySummary struct {
+	EvidenceCaseCount              int            `json:"evidence_case_count,omitempty"`
+	EvidenceHitCases               int            `json:"evidence_hit_cases,omitempty"`
+	AverageRetrievedCount          float64        `json:"average_retrieved_count,omitempty"`
+	EvidenceHitRate                float64        `json:"evidence_hit_rate,omitempty"`
+	AverageEvidenceRecallAtK       float64        `json:"average_evidence_recall_at_k,omitempty"`
+	AverageEvidenceMRR             float64        `json:"average_evidence_mrr,omitempty"`
+	AverageSourceSessionRecall     float64        `json:"average_source_session_recall,omitempty"`
+	AverageMemoryTokenEstimate     float64        `json:"average_memory_token_estimate,omitempty"`
+	AverageMemoryTokenRatio        float64        `json:"average_memory_token_ratio,omitempty"`
+	AverageRetrievalDurationMS     float64        `json:"average_retrieval_duration_ms,omitempty"`
+	AverageStaleUseRate            float64        `json:"average_stale_use_rate,omitempty"`
+	AverageSubtaskAnswerRate       float64        `json:"average_subtask_answer_rate,omitempty"`
+	AverageMemoryUpdateSuccessRate float64        `json:"average_memory_update_success_rate,omitempty"`
+	AveragePreviousSubtaskHitRate  float64        `json:"average_previous_subtask_hit_rate,omitempty"`
+	RetrievalErrorCategories       map[string]int `json:"retrieval_error_categories,omitempty"`
 }
 
 type TopFailingCase struct {
@@ -187,6 +254,8 @@ type RunnerOptions struct {
 	ArtifactsDir       string
 	BenchmarkDir       string
 	TimeoutSeconds     int
+	CaseParallel       int
+	NoResume           bool
 	Config             config.Config
 	AgentRunner        AgentRunner
 	HarnessCmd         string

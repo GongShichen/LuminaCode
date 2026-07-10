@@ -44,7 +44,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "session_memory_max_commits": 33,
   "session_memory_max_messages": 444,
   "session_memory_vacuum_after_eviction": true,
-  "auto_memory_directory": ".Lumina/memory",
+  "long_term_memory_store": ".Lumina/memory/lumina-memory.sqlite",
   "extraction_model": "extract-model",
   "skills_dir": ".Lumina/PROJECT_SKILLS",
   "bundled_skills_dir": ".Lumina/SKILLS",
@@ -93,8 +93,8 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 		!cfg.SessionMemoryVacuumAfterEviction {
 		t.Fatalf("session memory defaults/env were not applied: %#v", cfg)
 	}
-	if cfg.AutoMemoryDirectory == nil || *cfg.AutoMemoryDirectory != filepath.Join(dir, ".Lumina", "memory") {
-		t.Fatalf("auto memory directory was not resolved from defaults: %#v", cfg.AutoMemoryDirectory)
+	if cfg.LongTermMemoryStore != filepath.Join(dir, ".Lumina", "memory", "lumina-memory.sqlite") {
+		t.Fatalf("long-term memory store was not resolved from defaults: %#v", cfg.LongTermMemoryStore)
 	}
 	if cfg.ExtractionModel == nil || *cfg.ExtractionModel != "extract-model" {
 		t.Fatalf("extraction model was not applied: %#v", cfg.ExtractionModel)
@@ -287,8 +287,6 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 	current := config.NewConfigForCWD(workDir)
 	current.CWD = filepath.Join(workDir, "runtime-cwd")
 	current.Yolo = true
-	current.AutoMemoryEnabled = false
-	current.AutoMemoryDirectory = nil
 
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-two",
@@ -303,7 +301,7 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 	if reloaded.APIKey != "key-two" || reloaded.APIBaseURL != "https://two.example" || reloaded.APIModel != "model-two" || reloaded.APIType != "openai_compatible" || reloaded.APIMaxTokens != 2000 {
 		t.Fatalf("dynamic API defaults were not reloaded: %#v", reloaded)
 	}
-	if reloaded.CWD != current.CWD || !reloaded.Yolo || reloaded.AutoMemoryEnabled {
+	if reloaded.CWD != current.CWD || !reloaded.Yolo {
 		t.Fatalf("runtime fields should be preserved: %#v", reloaded)
 	}
 }

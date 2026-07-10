@@ -96,7 +96,6 @@ func TestCoordinatorRecoversFromUnauthorizedToolAndKeepsNotificationsScopedLikeP
 	cfg.APIModel = "custom-router-model"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 1000
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
@@ -159,7 +158,6 @@ func TestSubagentStubbornUnauthorizedToolExitsAtLowMaxTurnsLikePython(t *testing
 	cfg.APIModel = "custom-router-model"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 1000
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 

@@ -18,6 +18,7 @@ import (
 
 	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/llmclient"
 
 	_ "modernc.org/sqlite"
 )
@@ -415,7 +416,7 @@ func (s *Store) summarize(ctx context.Context, startTurn, endTurn int, previews 
 	user := fmt.Sprintf("Summarize session turns %d-%d. This is one commit covering the whole interval, not separate summaries per turn.\n\n%s", startTurn, endTurn, joined)
 	complete := s.complete
 	if complete == nil {
-		client, err := api.CreateLLMClient(s.cfg.APIKey, s.cfg.APIBaseURL, s.summaryModel(), s.cfg.SessionMemorySummaryMaxTokens, nil, api.DefaultRetryConfigPtr(), s.cfg.APIType)
+		client, err := llmclient.Create(s.cfg, s.summaryModel(), s.cfg.SessionMemorySummaryMaxTokens, nil, api.DefaultRetryConfigPtr())
 		if err != nil {
 			return "", "", nil, err
 		}
@@ -768,7 +769,7 @@ func isTransientMessage(msg map[string]any) bool {
 		return true
 	}
 	switch stringValue(metadata["source"]) {
-	case "skill_inline", "skill_listing", "skill_recovery", "memory_index", "memory_recall", "task_notification":
+	case "skill_inline", "skill_listing", "skill_recovery", "memory_recall", "task_notification":
 		return true
 	default:
 		return false

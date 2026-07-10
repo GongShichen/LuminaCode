@@ -35,7 +35,7 @@ func TestStripTransientContextMessagesRemovesSkillMemoryAndTaskContext(t *testin
 	messages := []map[string]any{
 		{"role": "user", "content": "real user"},
 		{"role": "user", "content": "skill", "metadata": map[string]any{"source": "skill_listing"}},
-		memory.BuildMetaUserMessage("memory index", memory.MemoryIndexSource),
+		memory.BuildMetaUserMessage("memory index", "memory_index"),
 		memory.BuildMetaUserMessage("memory recall", memory.MemoryRecallSource),
 		{"role": "user", "content": "task done", "metadata": map[string]any{"source": "task_notification"}},
 		{"role": "assistant", "content": "real assistant"},
@@ -197,7 +197,6 @@ func TestCoreQueryLoopOutputTokenEscalationOmitsRequestMaxTokens(t *testing.T) {
 	cfg.APIModel = "custom-router-model"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 32
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -309,7 +308,6 @@ func TestCoreQueryLoopTruncatedToolUseExecutesBeforeNextModelTurnLikePython(t *t
 	cfg.APIModel = "claude-sonnet-4"
 	cfg.APIType = "anthropic"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -430,7 +428,6 @@ func TestCoreQueryLoopFatalStreamErrorEventDoesNotRetryLikePython(t *testing.T) 
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -469,7 +466,6 @@ func TestCoreQueryLoopNonFatalStreamErrorWithoutToolCallsRetriesUntilSuccessLike
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -510,7 +506,6 @@ func TestCoreQueryLoopParentTurnLimitUsesConfigValueLikePython(t *testing.T) {
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 256
 	cfg.MaxParentTurns = 1
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -797,7 +792,6 @@ func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *tes
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 1000
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -855,7 +849,6 @@ func TestCoreQueryLoopProjectsL3RegionsForRequestWithoutRewritingStateLikePython
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 1000
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
@@ -929,7 +922,6 @@ func TestCoreQueryLoopInjectsPendingTaskNotificationsLikePython(t *testing.T) {
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
-	cfg.AutoMemoryEnabled = false
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
@@ -1190,51 +1182,32 @@ func TestVisibleToolResultIDsMatchesPython(t *testing.T) {
 	}
 }
 
-func TestQueryLoopRefreshesMemoryIndexContextBeforeRequest(t *testing.T) {
+func TestQueryLoopStripsLegacyMemoryIndexContextBeforeRequest(t *testing.T) {
 	dir := t.TempDir()
-	memDir := filepath.Join(dir, "memory")
-	if err := os.MkdirAll(memDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(memDir, "MEMORY.md"), []byte("- [Fresh](fresh.md) - Fresh index\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	cfg := config.NewConfig()
 	cfg.CWD = dir
-	cfg.AutoMemoryEnabled = true
-	cfg.AutoMemoryDirectory = &memDir
+	cfg.LongTermMemoryEnabled = true
+	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
 	cfg.APIKey = ""
 	cfg.APIBaseURL = ""
 	engine := agent.NewCoreExecutionEngine(&cfg)
 	state := agent.NewAgentState()
 	state.Messages = []map[string]any{
-		memory.BuildMetaUserMessage("old index", memory.MemoryIndexSource),
+		memory.BuildMetaUserMessage("old index", "memory_index"),
 		{"role": "user", "content": "current task"},
 	}
 
 	for range engine.QueryLoop(context.Background(), &state) {
 	}
 
-	var memoryIndexMessages []map[string]any
 	for _, message := range state.Messages {
 		metadata, _ := message["metadata"].(map[string]any)
-		if metadata[memory.MemoryMetaKey] == true && metadata["source"] == memory.MemoryIndexSource {
-			memoryIndexMessages = append(memoryIndexMessages, message)
+		if metadata[memory.MemoryMetaKey] == true && metadata["source"] == "memory_index" {
+			t.Fatalf("legacy memory index context should be stripped, got %#v", state.Messages)
 		}
 	}
-	if len(memoryIndexMessages) != 1 {
-		t.Fatalf("expected stale index replaced with one fresh injection, got %#v", state.Messages)
-	}
-	metadata, ok := memoryIndexMessages[0]["metadata"].(map[string]any)
-	if !ok || metadata[memory.MemoryMetaKey] != true || metadata["source"] != memory.MemoryIndexSource {
-		t.Fatalf("unexpected injected memory index metadata: %#v", memoryIndexMessages[0]["metadata"])
-	}
-	text := memoryIndexMessages[0]["content"].([]map[string]any)[0]["text"].(string)
-	if strings.Contains(text, "old index") || !strings.Contains(text, "Fresh index") {
-		t.Fatalf("memory index was not refreshed: %q", text)
-	}
 	if state.Messages[len(state.Messages)-1]["content"] != "current task" {
-		t.Fatalf("fresh memory index should remain before current task: %#v", state.Messages)
+		t.Fatalf("current task should remain last: %#v", state.Messages)
 	}
 }
 
@@ -1278,7 +1251,6 @@ Inline output: !` + "`printf shell-ok`" + `
 	cfg.APIBaseURL = server.URL
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
-	cfg.AutoMemoryEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"

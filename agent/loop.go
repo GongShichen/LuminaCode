@@ -93,6 +93,10 @@ type CoreExecutionEngine struct {
 	cacheEditState     RuntimeCacheEditState
 	SessionID          string
 	AgentID            string
+	AgentType          string
+	TeamName           string
+	TeamSessionID      string
+	TeamAgentID        string
 	sessionMemory      *sessionmemory.Manager
 	StateObserver      func(*AgentState)
 }
@@ -478,7 +482,8 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 	}
 
-	state.Messages = memory.StripMemoryContextMessages(state.Messages, memory.MemoryIndexSource)
+	e.applyMemoryRuntimeIdentity(state)
+	state.Messages = memory.StripMemoryContextMessages(state.Messages, "")
 	if e.extraction != nil && e.extraction.HasPendingResult() {
 		if result := e.extraction.ConsumeResult(); result != "" && len(state.Messages) > 0 {
 			insertBeforeCurrentUserMessage(state, map[string]any{
@@ -487,13 +492,6 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				"isMeta":  true,
 			})
 		}
-	}
-	if e.Config.AutoMemoryEnabled && e.Config.AutoMemoryDirectory != nil && *e.Config.AutoMemoryDirectory != "" {
-		memoryDir := *e.Config.AutoMemoryDirectory
-		if !filepath.IsAbs(memoryDir) {
-			memoryDir = filepath.Join(e.Config.CWD, memoryDir)
-		}
-		InjectMemoryIndexContext(state, memoryDir)
 	}
 	cancelRecallPrefetch := e.prefetchMemoryRecall(ctx, state)
 	if cancelRecallPrefetch != nil {
@@ -623,7 +621,9 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
 					return
 				}
-				sendStream(ctx, out, NewStreamEvent("error", "API error (recovered): "+msg, api.ErrorMetadata(result.Err)))
+				metadata := api.ErrorMetadata(result.Err)
+				metadata["recovered"] = true
+				sendStream(ctx, out, NewStreamEvent("error", "API error (recovered): "+msg, metadata))
 				turn.StreamHadError = true
 				break
 			}
@@ -698,18 +698,16 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		if len(turn.ToolCalls) == 0 {
 			e.RecordSessionMemory(ctx, state, false)
 			if e.extraction != nil &&
-				e.Config.AutoMemoryEnabled &&
-				e.Config.AutoMemoryDirectory != nil &&
+				e.Config.LongTermMemoryEnabled &&
+				e.Config.MemoryBackgroundExtractionEnabled &&
 				state.LastQuery != "" {
-				memoryDir := *e.Config.AutoMemoryDirectory
-				if memoryDir != "" {
-					if !filepath.IsAbs(memoryDir) {
-						memoryDir = filepath.Join(e.Config.CWD, memoryDir)
-					}
-					if info, err := os.Stat(memoryDir); err == nil && info.IsDir() {
-						e.extraction.Schedule(ctx, state, memoryDir)
-					}
-				}
+				e.extraction.Config = e.Config
+				e.extraction.SourceSessionID = e.SessionID
+				e.extraction.SourceAgentID = e.memoryAgentType()
+				e.extraction.SourceTeamSessionID = e.TeamSessionID
+				e.extraction.SourceTeamName = e.TeamName
+				e.extraction.SourceTeamAgentID = e.TeamAgentID
+				e.extraction.Schedule(ctx, state, "")
 			}
 			e.LastState = state
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
@@ -760,20 +758,21 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 }
 
 func (e *CoreExecutionEngine) prefetchMemoryRecall(ctx context.Context, state *AgentState) context.CancelFunc {
-	if state == nil || !e.Config.AutoMemoryEnabled || e.Config.AutoMemoryDirectory == nil || *e.Config.AutoMemoryDirectory == "" || state.LastQuery == "" {
+	if state == nil || state.LastQuery == "" {
 		return nil
 	}
-	timeout := time.Duration(e.Config.MemoryRecallPrefetchTimeoutSeconds * float64(time.Second))
-	if timeout <= 0 {
-		timeout = 250 * time.Millisecond
+	if !e.Config.LongTermMemoryEnabled {
+		return nil
 	}
 	recallCtx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan []MemoryRecall, 1)
 	go func() {
-		resultCh <- RunMemoryRecallWithConfig(recallCtx, e.Config, state, state.LastQuery, e.recallClientFactory(), nil)
+		query := state.MemoryQueryText
+		if strings.TrimSpace(query) == "" {
+			query = state.LastQuery
+		}
+		resultCh <- RunMemoryRecallWithRuntime(recallCtx, e.Config, state, query, e.expansionClientFactory())
 	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case recalled := <-resultCh:
 		cancel()
@@ -781,8 +780,6 @@ func (e *CoreExecutionEngine) prefetchMemoryRecall(ctx context.Context, state *A
 			InjectRecalledMemories(state, recalled)
 		}
 		return nil
-	case <-timer.C:
-		return cancel
 	case <-ctx.Done():
 		return cancel
 	}
@@ -848,6 +845,14 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 		if IsOutputTruncatedStopReason(reason) {
 			turn.OutputTruncated = true
 		}
+	case "model_fallback":
+		metadata := map[string]any{
+			"primary_model":  event["primary_model"],
+			"fallback_model": event["fallback_model"],
+			"reason":         event["reason"],
+		}
+		ev := NewStreamEvent("model_fallback", stringFromAny(event["fallback_model"]), metadata)
+		return StreamAction{Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
 	case "error":
 		msg := stringFromAny(event["message"])
 		metadata := map[string]any{}
@@ -878,6 +883,8 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 			e.LastState = state
 			return StreamAction{Return: true, Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
 		}
+		metadata["recovered"] = true
+		ev.Metadata = metadata
 		return StreamAction{Break: true, Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
 	}
 	return StreamAction{ConsecutiveAPIErrors: consecutiveAPIErrors}
@@ -930,13 +937,11 @@ func (e *CoreExecutionEngine) executeAndCommitTools(ctx context.Context, state *
 			"is_error":    slot.IsError,
 		}))
 	}
-	toolObservations := CollectToolObservations(executor, toolResults)
 	CommitToolResultsTurn(state, toolResults, executor)
 	if pending, ok := executor.Context["_pending_skill_messages"].([]map[string]any); ok && len(pending) > 0 {
 		state.Messages = append(state.Messages, pending...)
 		executor.Context["_pending_skill_messages"] = []map[string]any{}
 	}
-	AppendFreshRecalledMemoriesWithConfig(ctx, e.Config, state, toolObservations, e.recallClientFactory())
 }
 
 func (e *CoreExecutionEngine) requestSkillShellPermission(ctx context.Context, executor *StreamingToolExecutor, req skills.SkillShellPermissionRequest) bool {
@@ -989,68 +994,16 @@ func (e *CoreExecutionEngine) BuildClient(maxTokens int, model string, thinkingB
 	if model == "" {
 		model = e.Config.APIModel
 	}
-	return api.CreateLLMClient(e.Config.APIKey, e.Config.APIBaseURL, model, maxTokens, thinkingBudgetTokens, api.DefaultRetryConfigPtr(), e.Config.APIType)
+	return CreateConfiguredLLMClient(e.Config, model, maxTokens, thinkingBudgetTokens, api.DefaultRetryConfigPtr())
 }
 
-func (e *CoreExecutionEngine) recallClientFactory() memory.ClientFactory {
-	return func(ctx context.Context) (memory.CompletionClient, error) {
-		client, err := e.BuildClient(256, "", nil)
-		if err != nil {
-			return nil, err
-		}
-		return apiMemoryClient{client: client}, nil
+func (e *CoreExecutionEngine) expansionClientFactory() MemoryExpansionClientFactory {
+	return func(ctx context.Context, model string) (api.LLMClient, error) {
+		return e.BuildClient(1024, model, nil)
 	}
 }
 
 func (e *CoreExecutionEngine) PostToolUse(tc coretools.ToolCall, state *AgentState) {
-	if state == nil || !e.Config.AutoMemoryEnabled || e.Config.AutoMemoryDirectory == nil || *e.Config.AutoMemoryDirectory == "" {
-		return
-	}
-	if tc.Name != "write_file" && tc.Name != "edit_file" {
-		return
-	}
-	filePath := stringFromAny(tc.Input["file_path"])
-	if filePath == "" {
-		return
-	}
-	resolvedFile, ok := resolveToolPathForHook(filePath, e.Config.CWD)
-	if !ok {
-		return
-	}
-	memoryDir := *e.Config.AutoMemoryDirectory
-	if !filepath.IsAbs(memoryDir) {
-		memoryDir = filepath.Join(e.Config.CWD, memoryDir)
-	}
-	resolvedMemoryDir, ok := resolveToolPathForHook(memoryDir, e.Config.CWD)
-	if !ok {
-		return
-	}
-	if resolvedFile == resolvedMemoryDir || isPathInside(resolvedFile, resolvedMemoryDir) {
-		state.MemoryWritesSinceExtraction = true
-		_, _ = memory.WriteMemoryIndex(resolvedMemoryDir)
-	}
-}
-
-func resolveToolPathForHook(path, cwd string) (string, bool) {
-	if path == "" {
-		return "", false
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	return filepath.Clean(abs), true
-}
-
-func isPathInside(path, parent string) bool {
-	rel, err := filepath.Rel(parent, path)
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (e *CoreExecutionEngine) BuildMessages(state *AgentState) []map[string]any {
@@ -1327,12 +1280,34 @@ func (e *CoreExecutionEngine) sessionMemoryAgentID() string {
 	return strings.TrimSpace(e.AgentID)
 }
 
+func (e *CoreExecutionEngine) memoryAgentType() string {
+	if e == nil {
+		return "main"
+	}
+	if strings.TrimSpace(e.AgentType) != "" {
+		return strings.TrimSpace(e.AgentType)
+	}
+	return e.sessionMemoryAgentID()
+}
+
+func (e *CoreExecutionEngine) applyMemoryRuntimeIdentity(state *AgentState) {
+	if e == nil || state == nil {
+		return
+	}
+	state.MemorySessionID = strings.TrimSpace(e.SessionID)
+	state.MemoryAgentID = e.sessionMemoryAgentID()
+	state.MemoryAgentType = e.memoryAgentType()
+	state.MemoryTeamName = strings.TrimSpace(e.TeamName)
+	state.MemoryTeamSessionID = strings.TrimSpace(e.TeamSessionID)
+	state.MemoryTeamAgentID = strings.TrimSpace(e.TeamAgentID)
+}
+
 func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *AgentState) {
 	if state == nil {
 		return
 	}
 	memorySection := ""
-	if e.Config.AutoMemoryEnabled && e.Config.AutoMemoryDirectory != nil && *e.Config.AutoMemoryDirectory != "" {
+	if e.Config.LongTermMemoryEnabled {
 		memorySection = agentContext.BuildMemorySection(&e.Config)
 	}
 	if prompt, err := agentContext.BuildSystemPromptWithConfig(e.Config, memorySection); err == nil && strings.TrimSpace(prompt) != "" {

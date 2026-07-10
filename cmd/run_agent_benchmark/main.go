@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	suite := flag.String("suite", agentbench.SuiteAiderPolyglotSmoke, "Benchmark suite: terminal_bench, tau_bench, swebench_verified, aider_polyglot_smoke, swebench_verified_subset, terminal_bench_smoke.")
+	suite := flag.String("suite", agentbench.SuiteAiderPolyglotSmoke, "Benchmark suite: terminal_bench, tau_bench, swebench_verified, aider_polyglot_smoke, swebench_verified_subset, terminal_bench_smoke, longmemeval, memoryarena.")
 	casesPath := flag.String("cases", "", "Optional JSON/JSONL case manifest path.")
 	caseID := flag.String("case", "", "Optional upstream case/task identifier. Debug mode only; passed to official harness via LUMINA_BENCHMARK_CASE.")
 	limit := flag.Int("limit", 0, "Optional case limit.")
@@ -23,7 +23,9 @@ func main() {
 	outputDir := flag.String("output-dir", "", "Report directory. Defaults to <root>/reports.")
 	workDir := flag.String("work-dir", "", "Case working directory. Defaults to <root>/work.")
 	artifactsDir := flag.String("artifacts-dir", "", "Artifact directory. Defaults to <root>/artifacts.")
-	timeout := flag.Int("timeout", agentbench.DefaultCaseTimeout, "Default per-case timeout in seconds.")
+	timeout := flag.Int("timeout", agentbench.DefaultCaseTimeout, "Default per-case timeout in seconds. Use 0 for no limit.")
+	caseParallel := flag.Int("case-parallel", 1, "Number of benchmark cases to run concurrently. Case-internal steps remain serial.")
+	resume := flag.Bool("resume", true, "Resume from the suite checkpoint and skip completed cases.")
 	keep := flag.Int("keep", 8, "How many timestamped report pairs to retain.")
 	harnessCmd := flag.String("harness-cmd", "", "Official benchmark harness command for terminal_bench, tau_bench, or swebench_verified.")
 	swebenchHarnessCmd := flag.String("swebench-harness-cmd", "", "Legacy SWE-bench harness command. Prefer -harness-cmd.")
@@ -32,8 +34,6 @@ func main() {
 
 	cfg := config.NewConfig()
 	cfg.Yolo = true
-	cfg.AutoMemoryEnabled = false
-	cfg.AutoMemoryDirectory = nil
 	if cfg.APIKey == "" || cfg.APIBaseURL == "" || cfg.APIModel == "" {
 		fmt.Fprintln(os.Stderr, "agent benchmark requires API key, base URL, and model configuration")
 		os.Exit(2)
@@ -60,6 +60,8 @@ func main() {
 		ArtifactsDir:       expandHome(*artifactsDir),
 		BenchmarkDir:       expandHome(*benchmarkDir),
 		TimeoutSeconds:     *timeout,
+		CaseParallel:       *caseParallel,
+		NoResume:           !*resume,
 		Config:             cfg,
 		HarnessCmd:         *harnessCmd,
 		SWEBenchHarnessCmd: *swebenchHarnessCmd,

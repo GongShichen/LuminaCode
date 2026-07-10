@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-const defaultLLMHTTPTimeout = 5 * time.Minute
 const defaultLLMStreamIdleTimeout = 3 * time.Minute
 
 type streamIdleTimeoutContextKey struct{}
@@ -195,7 +194,7 @@ func NewLLMClientBase(
 		MaxTokens:            maxTokens,
 		ThinkingBudgetTokens: thinkingBudgetTokens,
 		RetryConfig:          cfg,
-		HTTPClient:           &http.Client{Timeout: defaultLLMHTTPTimeout},
+		HTTPClient:           &http.Client{},
 	}, nil
 }
 
@@ -437,7 +436,7 @@ func (c *AnthropicClient) streamAnthropic(
 
 		resp, err := doRawJSONRequest(ctx, c.HTTPClient, http.MethodPost, url, headers, body)
 		if err != nil {
-			out <- EventResult{Err: err}
+			out <- EventResult{Err: retryableTransportError(ctx, err)}
 			return
 		}
 		defer func(Body io.ReadCloser) {
@@ -718,7 +717,7 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 
 		resp, err := doRawJSONRequest(ctx, c.HTTPClient, http.MethodPost, url, headers, body)
 		if err != nil {
-			out <- EventResult{Err: err}
+			out <- EventResult{Err: retryableTransportError(ctx, err)}
 			return
 		}
 		defer func(Body io.ReadCloser) {

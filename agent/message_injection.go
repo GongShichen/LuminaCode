@@ -16,16 +16,6 @@ func InjectRecalledMemories(state *AgentState, recalled []MemoryRecall) {
 	}
 }
 
-func InjectMemoryIndexContext(state *AgentState, memoryDir string) {
-	if state == nil || memoryDir == "" {
-		return
-	}
-	message := memory.BuildMemoryIndexMessage(memoryDir)
-	if message != nil {
-		InsertBeforeCurrentUserMessage(state, message)
-	}
-}
-
 func InsertBeforeCurrentUserMessage(state *AgentState, message map[string]any) {
 	if state == nil {
 		return

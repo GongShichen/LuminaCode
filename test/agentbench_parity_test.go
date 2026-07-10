@@ -2,10 +2,13 @@ package test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +36,20 @@ func TestAgentBenchLoadCasesJSONAndLimit(t *testing.T) {
 	}
 	if cases[0].TimeoutSeconds != agentbench.DefaultCaseTimeout {
 		t.Fatalf("default timeout not applied: %#v", cases[0])
+	}
+}
+
+func TestMemoryBenchmarkMetricsDoNotDependOnSessionNamePrefixes(t *testing.T) {
+	sourcePath := filepath.Join("..", "benchmark", "agentbench", "memory_bench.go")
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, forbidden := range []string{"countMemoriesBySourcePrefix", `HasPrefix(hit.SourceSessionID`, `"memoryarena-"`} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("memory benchmark metrics must use exact persisted provenance, found %q", forbidden)
+		}
 	}
 }
 
@@ -155,6 +172,74 @@ func TestAgentBenchRunSuiteWithFakeAgentWritesArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(mdPath); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHeadlessAgentRetriesInitialEOFInsideAPIClient(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support hijacking")
+			}
+			connection, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = connection.Close()
+			return
+		}
+		writeOpenAIStream(w, "recovered after eof", 3, 4)
+	}))
+	defer server.Close()
+
+	cfg := config.NewConfigForCWD(t.TempDir())
+	cfg.APIType = "openai_compatible"
+	cfg.APIBaseURL = server.URL
+	cfg.APIKey = "test-key"
+	cfg.APIModel = "custom-router-model"
+	cfg.APIMaxTokens = 256
+	cfg.MCPEnabled = false
+	cfg.SkillsEnabled = false
+	cfg.LongTermMemoryEnabled = false
+	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model", "api_max_tokens", "mcp_enabled", "skills_enabled", "long_term_memory_enabled")
+	result := agentbench.HeadlessAgentRunner{}.Run(context.Background(), cfg, "hello", "headless-eof")
+	if calls.Load() != 2 {
+		t.Fatalf("expected transport retry inside API client, calls=%d", calls.Load())
+	}
+	if result.ErrorType != "" || len(result.TransientErrors) != 0 || !strings.Contains(result.FinalText, "recovered after eof") {
+		t.Fatalf("initial EOF leaked into final result: %#v", result)
+	}
+}
+
+func TestHeadlessAgentDoesNotTreatRecoveredOuterRetryAsFinalError(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "temporary router failure", http.StatusBadRequest)
+			return
+		}
+		writeOpenAIStream(w, "outer retry recovered", 3, 4)
+	}))
+	defer server.Close()
+
+	cfg := config.NewConfigForCWD(t.TempDir())
+	cfg.APIType = "openai_compatible"
+	cfg.APIBaseURL = server.URL
+	cfg.APIKey = "test-key"
+	cfg.APIModel = "custom-router-model"
+	cfg.APIMaxTokens = 256
+	cfg.MCPEnabled = false
+	cfg.SkillsEnabled = false
+	cfg.LongTermMemoryEnabled = false
+	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model", "api_max_tokens", "mcp_enabled", "skills_enabled", "long_term_memory_enabled")
+	result := agentbench.HeadlessAgentRunner{}.Run(context.Background(), cfg, "hello", "headless-outer-retry")
+	if calls.Load() != 2 {
+		t.Fatalf("expected outer agent retry, calls=%d", calls.Load())
+	}
+	if result.ErrorType != "" || len(result.TransientErrors) != 1 || !strings.Contains(result.FinalText, "outer retry recovered") {
+		t.Fatalf("recovered outer retry was classified as final failure: %#v", result)
 	}
 }
 

@@ -7,10 +7,12 @@ import (
 )
 
 func HarnessSystemPromptAppendix(mode string) string {
-	if !config.IsTerminalBenchHarnessMode(mode) {
+	switch {
+	case config.IsTerminalBenchHarnessMode(mode):
+		return strings.TrimSpace(terminalBenchHarnessPromptAppendix)
+	default:
 		return ""
 	}
-	return strings.TrimSpace(terminalBenchHarnessPromptAppendix)
 }
 
 func appendHarnessSystemPrompt(prompt, mode string) string {

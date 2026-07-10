@@ -5,6 +5,7 @@ import (
 	"LuminaCode/tools/file"
 	"bytes"
 	"encoding/json"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 )
@@ -44,8 +45,18 @@ type AgentState struct {
 	UserTurnCount               int  `json:"user_turn_count"`
 	LastExtractionUserTurn      int  `json:"last_extraction_user_turn"`
 	MemoryWritesSinceExtraction bool `json:"memory_writes_since_extraction"`
+	MemoryExtractionCursor      int  `json:"memory_extraction_cursor"`
 
-	LastQuery string `json:"last_query"`
+	LastQuery       string    `json:"last_query"`
+	MemoryQueryText string    `json:"memory_query_text,omitempty"`
+	MemoryQueryTime time.Time `json:"memory_query_time,omitempty"`
+
+	MemorySessionID     string `json:"memory_session_id,omitempty"`
+	MemoryAgentID       string `json:"memory_agent_id,omitempty"`
+	MemoryAgentType     string `json:"memory_agent_type,omitempty"`
+	MemoryTeamName      string `json:"memory_team_name,omitempty"`
+	MemoryTeamSessionID string `json:"memory_team_session_id,omitempty"`
+	MemoryTeamAgentID   string `json:"memory_team_agent_id,omitempty"`
 }
 
 func NewAgentState() AgentState {
@@ -83,7 +94,16 @@ func NewAgentState() AgentState {
 		LastExtractionUserTurn:      0,
 		MemoryWritesSinceExtraction: false,
 
-		LastQuery: "",
+		LastQuery:       "",
+		MemoryQueryText: "",
+		MemoryQueryTime: time.Time{},
+
+		MemorySessionID:     "",
+		MemoryAgentID:       "",
+		MemoryAgentType:     "",
+		MemoryTeamName:      "",
+		MemoryTeamSessionID: "",
+		MemoryTeamAgentID:   "",
 	}
 }
 

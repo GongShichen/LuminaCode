@@ -272,6 +272,11 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 		cfg.MaxParentTurns = spec.MaxTurnsPerTask
 	}
 	engine := agent.NewQueryEngine(&cfg)
+	engine.CoreEngine.AgentID = spec.Name
+	engine.CoreEngine.AgentType = spec.Name
+	engine.CoreEngine.TeamName = s.Spec.Name
+	engine.CoreEngine.TeamSessionID = s.ID
+	engine.CoreEngine.TeamAgentID = spec.Name
 	allow := teamToolAllowlist(spec.Tools)
 	engine.CoreEngine.Registry = engine.CoreEngine.Registry.FilteredCopy(allow, ordinarySubagentToolDenylist(), false, false)
 	engine.CoreEngine.Registry.Register(NewGetTeamContextTool(s, spec.Name))

@@ -186,7 +186,7 @@ func TestSessionMemorySkipsTransientMessages(t *testing.T) {
 	}
 	defer store.Close()
 	messages := append([]map[string]any{
-		{"role": "user", "content": []map[string]any{{"type": "text", "text": "memory index"}}, "metadata": map[string]any{"source": "memory_index", "lumina_memory_context": true}},
+		{"role": "user", "content": []map[string]any{{"type": "text", "text": "long-term memory recall"}}, "metadata": map[string]any{"source": "memory_recall", "lumina_memory_context": true}},
 		{"role": "user", "content": []map[string]any{{"type": "text", "text": "[Compaction handoff summary]\nold"}}},
 	}, sessionMemoryMessages(1)...)
 	if err := store.IngestMessages(context.Background(), messages); err != nil {
@@ -200,7 +200,7 @@ func TestSessionMemorySkipsTransientMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, msg := range detail.Messages {
-		if strings.Contains(msg.TextPreview, "memory index") || strings.Contains(msg.TextPreview, "handoff") {
+		if strings.Contains(msg.TextPreview, "long-term memory recall") || strings.Contains(msg.TextPreview, "handoff") {
 			t.Fatalf("transient/compaction message leaked into session memory: %#v", detail.Messages)
 		}
 	}

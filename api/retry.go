@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -104,6 +107,36 @@ func (e RetryableError) Error() string {
 
 func NewRetryableError(message string) error {
 	return RetryableError{Message: message}
+}
+
+func retryableTransportError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return NewRetryableError(err.Error())
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return NewRetryableError(err.Error())
+	}
+	lower := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"connection reset by peer",
+		"connection refused",
+		"broken pipe",
+		"server closed idle connection",
+		"tls handshake timeout",
+		"unexpected eof",
+	} {
+		if strings.Contains(lower, fragment) {
+			return NewRetryableError(err.Error())
+		}
+	}
+	return err
 }
 
 type APIStatusError struct {
@@ -273,6 +306,7 @@ func RetryWithBackoff(
 			),
 			"status_code": statusCodeFromError(lastErr),
 			"raw_error":   rawBodyFromError(lastErr),
+			"retryable":   true,
 		})
 	}()
 

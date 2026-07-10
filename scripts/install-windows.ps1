@@ -232,6 +232,11 @@ Write-Host "App root:    $AppRoot"
 Assert-Command go
 Assert-Command node
 Assert-Command npm
+$cCompilerName = $(if ($env:CC) { $env:CC } else { "gcc" })
+if (-not (Get-Command $cCompilerName -ErrorAction SilentlyContinue)) {
+    throw "A C compiler is required for local memory embeddings. Install MinGW-w64 gcc or set CC to a compatible compiler before running the installer."
+}
+$env:CGO_ENABLED = "1"
 
 if ($ConfigureApi) {
     if (-not $ApiKey) {
@@ -299,6 +304,12 @@ try {
         & (Join-Path $repoRoot "scripts\setup-arxiv-mcp-windows.ps1") -AppRoot $AppRoot
     } catch {
         Write-Warning "arXiv MCP setup failed: $($_.Exception.Message). Run scripts\setup-arxiv-mcp-windows.ps1 manually."
+    }
+
+    try {
+        & (Join-Path $repoRoot "scripts\setup-memory-embedding-windows.ps1") -Action install -AppRoot $AppRoot
+    } catch {
+        Write-Warning "Memory embedding setup failed: $($_.Exception.Message). Run scripts\setup-memory-embedding-windows.ps1 manually."
     }
 
     $pathUpdated = $false

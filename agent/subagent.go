@@ -9,6 +9,7 @@ import (
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/longmemory"
 	"LuminaCode/memory"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
@@ -24,7 +25,6 @@ const (
 )
 
 var truncatedStopReasons = stringSet("max_tokens", "length", "token_limit")
-var subagentReadLikeToolNames = stringSet("read_file", "grep_search", "glob_match", "search", "tool_search")
 
 type SubAgentSessionState struct {
 	Messages               []map[string]any
@@ -123,7 +123,7 @@ func (s *SubAgent) createSessionState(ctx context.Context, prompt string) *SubAg
 	return &SubAgentSessionState{
 		Messages:          messages,
 		SystemPrompt:      s.buildSystemPrompt(),
-		SurfacedMemoryIDs: memory.RecalledMemoryIDs(messages, "agent_memory_recall"),
+		SurfacedMemoryIDs: memory.RecalledMemoryIDs(messages),
 		ScopeID:           stringFromContext(s.ExtraContext, "scope_id", ""),
 		CurrentTaskID:     stringFromContext(s.ExtraContext, "current_task_id", ""),
 		AbortCheck:        abortCheck,
@@ -175,7 +175,7 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 		if runtime.ModelOverride != nil && *runtime.ModelOverride != "" {
 			model = *runtime.ModelOverride
 		}
-		client, err := api.CreateLLMClient(s.Config.APIKey, s.Config.APIBaseURL, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr(), s.Config.APIType)
+		client, err := CreateConfiguredLLMClient(s.Config, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr())
 		if err != nil {
 			return SubAgentRequestResult{
 				FinalText:         "Sub-agent API call failed: " + err.Error(),
@@ -312,7 +312,6 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 				messages = append(messages, pending...)
 				execCtx["_pending_skill_messages"] = []map[string]any{}
 			}
-			sessionState.SurfacedMemoryIDs, messages = s.appendFreshAgentMemories(ctx, messages, prompt, observations, sessionState.SurfacedMemoryIDs)
 			sessionState.Messages = messages
 		}
 	}
@@ -372,7 +371,7 @@ func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessi
 	if model == "" {
 		model = s.Config.APIModel
 	}
-	client, err := api.CreateLLMClient(s.Config.APIKey, s.Config.APIBaseURL, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr(), s.Config.APIType)
+	client, err := CreateConfiguredLLMClient(s.Config, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr())
 	if err != nil {
 		return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
 	}
@@ -482,8 +481,8 @@ func (s *SubAgent) buildSystemPrompt() string {
 	}
 	gitContext := agentContext.GetGitContext(cwd, 3.0, true)
 	agentMemory := ""
-	if s.Config.AutoMemoryEnabled {
-		agentMemory = memory.BuildAgentMemoryPrompt(s.AgentType, s.resolveProjectRoot())
+	if s.Config.LongTermMemoryEnabled {
+		agentMemory = s.longTermAgentMemoryBehavior()
 	}
 	sections, err := agentContext.BuildSubagentPromptSections(s.Definition.Name, s.Definition.Description, cwd, s.MaxTurns, gitContext, agentMemory)
 	if err == nil {
@@ -498,16 +497,111 @@ func (s *SubAgent) buildSystemPrompt() string {
 
 func (s *SubAgent) buildInitialMessages(ctx context.Context, prompt string) []map[string]any {
 	var messages []map[string]any
-	if s.Config.AutoMemoryEnabled {
-		projectRoot := s.resolveProjectRoot()
-		messages = append(messages, memory.BuildAgentMemoryContextMessages(s.AgentType, projectRoot)...)
-		recalled := memory.RecallAgentMemoriesForQuery(ctx, s.AgentType, projectRoot, prompt, s.recallClientFactory(), nil, nil)
-		if msg := memory.BuildRecalledAgentMemoriesMessage(recalled, "agent_memory_recall"); msg != nil {
+	if s.Config.LongTermMemoryEnabled {
+		packet, _ := s.recallLongTermAgentEvidence(ctx, prompt, nil)
+		if msg := longmemory.BuildEvidenceContextMessage(packet); msg != nil {
 			messages = append(messages, msg)
 		}
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}}})
 	return messages
+}
+
+func (s *SubAgent) longTermAgentMemoryBehavior() string {
+	agentType := strings.TrimSpace(s.AgentType)
+	if agentType == "" {
+		agentType = strings.TrimSpace(s.Definition.Name)
+	}
+	if agentType == "" {
+		agentType = "subagent"
+	}
+	return fmt.Sprintf("## Role Long-Term Memory\n\nAgent-type memory: `%s`.\n\nThis sub-agent may receive long-term memories for user, project, and agent_type scopes. Treat recalled memories as durable hints and verify current project files before relying on code or path claims. Do not write memory files directly; durable memories are extracted by LuminaCode's structured memory runtime.", agentType)
+}
+
+func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string, surfaced map[string]struct{}) (longmemory.EvidencePacket, []string) {
+	if !s.Config.LongTermMemoryEnabled || strings.TrimSpace(query) == "" {
+		return longmemory.EvidencePacket{}, nil
+	}
+	store, err := longmemory.Open(ctx, s.Config.LongTermMemoryStore)
+	if err != nil {
+		return longmemory.EvidencePacket{}, nil
+	}
+	defer store.Close()
+	agentType := strings.TrimSpace(s.AgentType)
+	if agentType == "" {
+		agentType = strings.TrimSpace(s.Definition.Name)
+	}
+	teamID, _ := s.ExtraContext["team_session_id"].(string)
+	teamAgentID, _ := s.ExtraContext["team_agent_id"].(string)
+	teamName, _ := s.ExtraContext["team_name"].(string)
+	scopes := longmemory.RuntimeScopes(s.Config.CWD, agentType, teamName, teamAgentID)
+	limit := s.Config.MemoryRecallMaxItems
+	if limit <= 0 {
+		limit = 8
+	}
+	memoryQuery := longmemory.MemoryQuery{Text: strings.TrimSpace(query), Timestamp: time.Now().UTC(), Scopes: scopes,
+		SessionID: s.sessionIDForMemoryUse(), TeamSessionID: teamID, AgentID: agentType}
+	catalog, catalogErr := store.InspectCatalog(ctx, scopes)
+	expansion, expansionModel, expansionError := expandMemoryQuery(ctx, s.Config, memoryQuery, catalog,
+		func(ctx context.Context, model string) (api.LLMClient, error) {
+			return CreateConfiguredLLMClient(s.Config, model, 1024, nil, api.DefaultRetryConfigPtr())
+		})
+	if catalogErr != nil {
+		if expansionError != "" {
+			expansionError += "; "
+		}
+		expansionError += "inspect memory catalog: " + catalogErr.Error()
+	}
+	var embedder longmemory.Embedder
+	if s.Config.MemoryEmbeddingEnabled {
+		if local, embedErr := longmemory.SharedLocalEmbedder(s.Config.MemoryEmbeddingModel, s.Config.MemoryEmbeddingModelDir); embedErr == nil {
+			embedder = local
+		}
+	}
+	result, err := store.SearchAllChannels(ctx, memoryQuery, expansion, embedder, longmemory.HybridSearchOptions{
+		FTSCandidates:       s.Config.MemoryFTSCandidates,
+		VectorCandidates:    s.Config.MemoryVectorCandidates,
+		GraphCandidates:     s.Config.MemoryGraphCandidates,
+		GraphMaxHops:        s.Config.MemoryGraphMaxHops,
+		RRFK:                s.Config.MemoryRRFK,
+		MMRLambda:           s.Config.MemoryMMRLambda,
+		MaxItems:            limit,
+		CoreContextTokens:   s.Config.MemoryCoreContextTokens,
+		TargetContextTokens: s.Config.MemoryContextTargetTokens,
+		MaxContextTokens:    s.Config.MemoryContextMaxTokens,
+		LocalTimeout:        time.Duration(s.Config.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
+		SessionID:           s.sessionIDForMemoryUse(),
+		TeamSessionID:       teamID,
+		AgentID:             agentType,
+		ExcludeIDs:          surfaced,
+		ExpansionModel:      expansionModel,
+		ExpansionError:      expansionError,
+	})
+	if err != nil {
+		return longmemory.EvidencePacket{}, nil
+	}
+	ids := make([]string, 0, len(result.Packet.Evidence))
+	for _, evidence := range result.Packet.Evidence {
+		ids = append(ids, evidence.MemoryID)
+	}
+	_ = store.RecordUsed(ctx, longmemory.UsedRecord{
+		SessionID:     s.sessionIDForMemoryUse(),
+		TeamSessionID: teamID,
+		AgentID:       agentType,
+		Query:         query,
+		MemoryIDs:     ids,
+	})
+	return result.Packet, ids
+}
+
+func (s *SubAgent) sessionIDForMemoryUse() string {
+	if value, _ := s.ExtraContext["_session_id"].(string); value != "" {
+		return value
+	}
+	if value, _ := s.ExtraContext["session_id"].(string); value != "" {
+		return value
+	}
+	return ""
 }
 
 func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
@@ -545,110 +639,8 @@ func (s *SubAgent) drainPendingNotifications(sessionState *SubAgentSessionState)
 	}
 }
 
-func (s *SubAgent) appendFreshAgentMemories(ctx context.Context, messages []map[string]any, taskPrompt string, toolObservations []map[string]any, surfaced map[string]struct{}) (map[string]struct{}, []map[string]any) {
-	if !s.Config.AutoMemoryEnabled || !s.shouldTriggerAgentMemoryRecall(toolObservations) {
-		return surfaced, messages
-	}
-	recallQuery := s.buildAgentMemoryRecallQuery(taskPrompt, toolObservations)
-	if recallQuery == "" {
-		return surfaced, messages
-	}
-	updated := map[string]struct{}{}
-	for key := range surfaced {
-		updated[key] = struct{}{}
-	}
-	recalled := memory.RecallAgentMemoriesForQuery(ctx, s.AgentType, s.resolveProjectRoot(), recallQuery, s.recallClientFactory(), GetRecentToolNames(messages), updated)
-	msg := memory.BuildRecalledAgentMemoriesMessage(recalled, "agent_memory_recall")
-	if msg == nil {
-		return surfaced, messages
-	}
-	messages = append(messages, msg)
-	for _, item := range recalled {
-		id := item.RecallID
-		if id == "" {
-			id = item.Filename
-		}
-		if strings.HasSuffix(id, ".md") {
-			updated[id] = struct{}{}
-		}
-	}
-	return updated, messages
-}
-
-func (s *SubAgent) shouldTriggerAgentMemoryRecall(toolObservations []map[string]any) bool {
-	if len(toolObservations) == 0 {
-		return false
-	}
-	for _, observation := range toolObservations {
-		if result, ok := observation["result"].(coretools.ToolResult); ok && result.IsError {
-			return true
-		}
-		if IsReadLikeObservationWithNames(observation, subagentReadLikeToolNames) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *SubAgent) buildAgentMemoryRecallQuery(taskPrompt string, toolObservations []map[string]any) string {
-	var errors []string
-	var observations []string
-	for _, observation := range toolObservations {
-		call, ok := observation["call"].(coretools.ToolCall)
-		if !ok {
-			continue
-		}
-		content := ClipRecallText(stringFromAny(observation["content"]))
-		details := FormatToolInputForRecall(call.Input)
-		label := call.Name
-		if details != "" {
-			label += " (" + details + ")"
-		}
-		line := "- " + label + ": " + content
-		if result, ok := observation["result"].(coretools.ToolResult); ok && result.IsError {
-			errors = append(errors, line)
-		} else if IsReadLikeObservationWithNames(observation, subagentReadLikeToolNames) {
-			observations = append(observations, line)
-		}
-	}
-	parts := []string{"Task: " + taskPrompt}
-	if len(errors) > 0 {
-		parts = append(parts, "", "Recent tool errors:")
-		parts = append(parts, limitStringList(errors, 3)...)
-	} else if len(observations) > 0 {
-		parts = append(parts, "", "Recent observations:")
-		parts = append(parts, limitStringList(observations, 3)...)
-	}
-	return strings.Join(parts, "\n")
-}
-
-type apiMemoryClient struct {
-	client api.LLMClient
-}
-
-func (c apiMemoryClient) Complete(ctx context.Context, systemPrompt string, messages []map[string]any, maxTokens int) (string, error) {
-	return c.client.Complete(ctx, systemPrompt, messages, api.CompleteOptions{MaxTokens: maxTokens})
-}
-
-func (s *SubAgent) recallClientFactory() memory.ClientFactory {
-	return func(ctx context.Context) (memory.CompletionClient, error) {
-		client, err := api.CreateLLMClient(s.Config.APIKey, s.Config.APIBaseURL, s.Model, 256, nil, api.DefaultRetryConfigPtr(), s.Config.APIType)
-		if err != nil {
-			return nil, err
-		}
-		return apiMemoryClient{client: client}, nil
-	}
-}
-
 func (s *SubAgent) resolveProjectRoot() string {
-	return memory.ResolveAgentMemoryProjectRoot(s.Config.CWD)
-}
-
-func limitStringList(values []string, limit int) []string {
-	if len(values) <= limit {
-		return values
-	}
-	return values[:limit]
+	return longmemory.ResolveProjectRoot(s.Config.CWD)
 }
 
 func prepareSubagentAPIMessages(messages []map[string]any) []map[string]any {

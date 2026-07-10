@@ -379,7 +379,7 @@ func TestContextPipelineAutoCompactClientCreationFailureIncrementsCircuitLikePyt
 func TestCompactionReplacementHistoryKeepsRealUserRequestsOnly(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "user", "content": "first real request"},
-		{"role": "user", "content": "memory index", "isMeta": true, "metadata": map[string]any{"source": "memory_index", "lumina_memory_context": true}},
+		{"role": "user", "content": "long-term memory recall", "isMeta": true, "metadata": map[string]any{"source": "memory_recall", "lumina_memory_context": true}},
 		{"role": "assistant", "content": []map[string]any{{"type": "text", "text": "thinking done"}}},
 		{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "call-1", "content": "tool output"}}},
 		{"role": "user", "content": "second real request"},

@@ -45,24 +45,29 @@ func PruneOldReports(outputDir string, keep int) error {
 	if err != nil {
 		return err
 	}
-	var reports []string
+	reportsByPrefix := map[string][]string{}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		if isBenchmarkReportFile(name) {
-			reports = append(reports, name)
+			prefix := benchmarkReportPrefix(name)
+			if prefix != "" {
+				reportsByPrefix[prefix] = append(reportsByPrefix[prefix], name)
+			}
 		}
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(reports)))
 	keepFiles := keep * 2
-	if len(reports) <= keepFiles {
-		return nil
-	}
-	for _, name := range reports[keepFiles:] {
-		if err := os.Remove(filepath.Join(outputDir, name)); err != nil {
-			return err
+	for _, reports := range reportsByPrefix {
+		sort.Sort(sort.Reverse(sort.StringSlice(reports)))
+		if len(reports) <= keepFiles {
+			continue
+		}
+		for _, name := range reports[keepFiles:] {
+			if err := os.Remove(filepath.Join(outputDir, name)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -107,11 +112,44 @@ func RenderMarkdown(report Report) string {
 	fmt.Fprintf(&b, "| Token p90/p95 input | %s / %s |\n", fmtFloat(report.Summary.InputTokens.P90), fmtFloat(report.Summary.InputTokens.P95))
 	fmt.Fprintf(&b, "| Token p90/p95 output | %s / %s |\n", fmtFloat(report.Summary.OutputTokens.P90), fmtFloat(report.Summary.OutputTokens.P95))
 	fmt.Fprintf(&b, "| Tool calls | %d |\n", report.Summary.TotalToolCalls)
+	if hasMemorySummary(report.Summary.Memory) {
+		fmt.Fprintf(&b, "\n## Memory Metrics\n\n")
+		fmt.Fprintf(&b, "| Metric | Value |\n| --- | ---: |\n")
+		fmt.Fprintf(&b, "| Avg recalled memories | %.2f |\n", report.Summary.Memory.AverageRetrievedCount)
+		if report.Summary.Memory.EvidenceCaseCount > 0 {
+			fmt.Fprintf(&b, "| Evidence cases | %d |\n", report.Summary.Memory.EvidenceCaseCount)
+			fmt.Fprintf(&b, "| Evidence hit cases | %d |\n", report.Summary.Memory.EvidenceHitCases)
+			fmt.Fprintf(&b, "| Evidence hit rate | %.2f%% |\n", report.Summary.Memory.EvidenceHitRate*100)
+			fmt.Fprintf(&b, "| Avg evidence recall@k | %.2f%% |\n", report.Summary.Memory.AverageEvidenceRecallAtK*100)
+			fmt.Fprintf(&b, "| Avg evidence MRR | %.3f |\n", report.Summary.Memory.AverageEvidenceMRR)
+			fmt.Fprintf(&b, "| Avg source-session recall | %.2f%% |\n", report.Summary.Memory.AverageSourceSessionRecall*100)
+		}
+		fmt.Fprintf(&b, "| Avg memory token estimate | %.0f |\n", report.Summary.Memory.AverageMemoryTokenEstimate)
+		fmt.Fprintf(&b, "| Avg memory/input token ratio | %.2f%% |\n", report.Summary.Memory.AverageMemoryTokenRatio*100)
+		fmt.Fprintf(&b, "| Avg retrieval latency | %.2f ms |\n", report.Summary.Memory.AverageRetrievalDurationMS)
+		fmt.Fprintf(&b, "| Avg stale-use rate | %.2f%% |\n", report.Summary.Memory.AverageStaleUseRate*100)
+		if report.Summary.Memory.AverageSubtaskAnswerRate > 0 || report.Summary.Memory.AverageMemoryUpdateSuccessRate > 0 || report.Summary.Memory.AveragePreviousSubtaskHitRate > 0 {
+			fmt.Fprintf(&b, "| Avg subtask answer rate | %.2f%% |\n", report.Summary.Memory.AverageSubtaskAnswerRate*100)
+			fmt.Fprintf(&b, "| Avg memory update success | %.2f%% |\n", report.Summary.Memory.AverageMemoryUpdateSuccessRate*100)
+			fmt.Fprintf(&b, "| Avg previous-subtask hit rate | %.2f%% |\n", report.Summary.Memory.AveragePreviousSubtaskHitRate*100)
+		}
+		if len(report.Summary.Memory.RetrievalErrorCategories) > 0 {
+			fmt.Fprintf(&b, "\n### Retrieval Error Categories\n\n")
+			keys := make([]string, 0, len(report.Summary.Memory.RetrievalErrorCategories))
+			for key := range report.Summary.Memory.RetrievalErrorCategories {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				fmt.Fprintf(&b, "- `%s`: %d\n", key, report.Summary.Memory.RetrievalErrorCategories[key])
+			}
+		}
+	}
 	fmt.Fprintf(&b, "\n## Cases\n\n")
-	fmt.Fprintf(&b, "| Case | Resolved | Duration | TTFT | First tool | First test | Tokens | Error |\n")
-	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
+	fmt.Fprintf(&b, "| Case | Resolved | Duration | TTFT | First tool | First test | Tokens | Recalled | Recall error | Error |\n")
+	fmt.Fprintf(&b, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n")
 	for _, result := range report.Results {
-		fmt.Fprintf(&b, "| `%s` | %t | %.2fs | %s | %s | %s | %d/%d | %s |\n",
+		fmt.Fprintf(&b, "| `%s` | %t | %.2fs | %s | %s | %s | %d/%d | %s | %s | %s |\n",
 			result.Case.ID,
 			result.Resolved,
 			result.DurationSeconds,
@@ -120,6 +158,8 @@ func RenderMarkdown(report Report) string {
 			fmtFloat(result.FirstTestMS),
 			result.InputTokens,
 			result.OutputTokens,
+			fmtMemoryRetrieved(result.MemoryMetrics),
+			fmtMemoryRetrievalError(result.MemoryMetrics),
 			emptyDash(result.ErrorType),
 		)
 	}
@@ -195,6 +235,10 @@ func suiteReportBaseName(suite string, now time.Time) string {
 		return "terminal-bench-smoke-" + stamp
 	case SuiteAiderPolyglotSmoke:
 		return "aider-polyglot-smoke-" + stamp
+	case SuiteLongMemEval:
+		return "longmemeval-" + stamp
+	case SuiteMemoryArena:
+		return "memoryarena-" + stamp
 	default:
 		return ReportPrefix + stamp
 	}
@@ -204,6 +248,10 @@ func isBenchmarkReportFile(name string) bool {
 	if !(strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".md")) {
 		return false
 	}
+	return benchmarkReportPrefix(name) != ""
+}
+
+func benchmarkReportPrefix(name string) string {
 	for _, prefix := range []string{
 		ReportPrefix,
 		"terminal-bench-",
@@ -212,12 +260,14 @@ func isBenchmarkReportFile(name string) bool {
 		"swebench-verified-subset-",
 		"terminal-bench-smoke-",
 		"aider-polyglot-smoke-",
+		"longmemeval-",
+		"memoryarena-",
 	} {
 		if strings.HasPrefix(name, prefix) {
-			return true
+			return prefix
 		}
 	}
-	return false
+	return ""
 }
 
 func fmtFloat(value *float64) string {
@@ -225,6 +275,37 @@ func fmtFloat(value *float64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.2f", *value)
+}
+
+func hasMemorySummary(summary MemorySummary) bool {
+	return summary.AverageRetrievedCount > 0 ||
+		summary.EvidenceCaseCount > 0 ||
+		summary.EvidenceHitRate > 0 ||
+		summary.AverageEvidenceRecallAtK > 0 ||
+		summary.AverageEvidenceMRR > 0 ||
+		summary.AverageSourceSessionRecall > 0 ||
+		summary.AverageMemoryTokenEstimate > 0 ||
+		summary.AverageMemoryTokenRatio > 0 ||
+		summary.AverageRetrievalDurationMS > 0 ||
+		summary.AverageStaleUseRate > 0 ||
+		summary.AverageSubtaskAnswerRate > 0 ||
+		summary.AverageMemoryUpdateSuccessRate > 0 ||
+		summary.AveragePreviousSubtaskHitRate > 0 ||
+		len(summary.RetrievalErrorCategories) > 0
+}
+
+func fmtMemoryRetrieved(metrics *MemoryMetrics) string {
+	if metrics == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", metrics.RetrievedCount)
+}
+
+func fmtMemoryRetrievalError(metrics *MemoryMetrics) string {
+	if metrics == nil || strings.TrimSpace(metrics.RetrievalErrorType) == "" {
+		return "-"
+	}
+	return "`" + metrics.RetrievalErrorType + "`"
 }
 
 func emptyDash(value string) string {

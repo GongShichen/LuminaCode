@@ -16,7 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"LuminaCode/agent"
+	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/llmclient"
+	"LuminaCode/longmemory"
 	luminateam "LuminaCode/team"
 
 	"github.com/gorilla/websocket"
@@ -64,6 +68,13 @@ func RunDaemonCLI(args []string) error {
 		return err
 	}
 	cfg := config.GetConfig()
+	if cfg.LongTermMemoryEnabled {
+		store, err := longmemory.Open(context.Background(), cfg.LongTermMemoryStore)
+		if err != nil {
+			return fmt.Errorf("open long-term memory store: %w", err)
+		}
+		_ = store.Close()
+	}
 	return Serve(context.Background(), DaemonOptions{
 		Host:         *host,
 		Port:         *port,
@@ -213,12 +224,60 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 		_ = server.httpSrv.Shutdown(context.Background())
 	}()
 	go server.startIdleHeartbeat(ctx)
+	go server.startMemoryMaintenance(ctx)
 	fmt.Fprintf(os.Stderr, "lumina-backend daemon listening on %s:%d\n", opts.Host, actualPort)
 	err = server.httpSrv.Serve(listener)
 	if err == http.ErrServerClosed {
 		return nil
 	}
 	return err
+}
+
+func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
+	run := func() {
+		cfg := config.GetConfig()
+		if !cfg.LongTermMemoryEnabled || !cfg.MemoryEmbeddingEnabled {
+			return
+		}
+		embedder, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
+			return
+		}
+		store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance store: %v\n", err)
+			return
+		}
+		defer store.Close()
+		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "consolidation", "migration_backfill"}, 32)
+		if result, err := store.RunMaintenance(ctx, embedder, 32); err != nil {
+			for _, job := range jobs {
+				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
+			}
+			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance failed: %v\n", err)
+		} else if result.Embedded+result.Enriched+result.Archived > 0 {
+			for _, job := range jobs {
+				_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
+			}
+			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %s\n", result.String())
+		} else {
+			for _, job := range jobs {
+				_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
+			}
+		}
+	}
+	run()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 func (s *DaemonServer) startManagedServices() {
@@ -766,6 +825,322 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			return nil, toRPCError("team_detail_not_found", err)
 		}
 		return detail, nil
+	case "memory.list":
+		var p struct {
+			SessionID       string                `json:"session_id"`
+			ScopeType       longmemory.ScopeType  `json:"scope_type"`
+			ScopeKey        string                `json:"scope_key"`
+			MemoryType      longmemory.MemoryType `json:"memory_type"`
+			Status          longmemory.Status     `json:"status"`
+			Tags            []string              `json:"tags"`
+			Limit           int                   `json:"limit"`
+			IncludeInactive bool                  `json:"include_inactive"`
+			IncludeExpired  bool                  `json:"include_expired"`
+			CreatedAfter    string                `json:"created_after"`
+			CreatedBefore   string                `json:"created_before"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		opts := longmemory.SearchOptions{Tags: p.Tags, Limit: p.Limit, IncludeInactive: p.IncludeInactive || p.Status != "", IncludeExpired: p.IncludeExpired}
+		opts.CreatedAfter = parseMemoryFilterTime(p.CreatedAfter)
+		opts.CreatedBefore = parseMemoryFilterTime(p.CreatedBefore)
+		if p.ScopeType != "" && strings.TrimSpace(p.ScopeKey) != "" {
+			opts.Scopes = []longmemory.Scope{{Type: p.ScopeType, Key: p.ScopeKey}}
+		}
+		if p.MemoryType != "" {
+			opts.Types = []longmemory.MemoryType{p.MemoryType}
+		}
+		entries, err := store.List(ctx, opts)
+		if err != nil {
+			return nil, toRPCError("memory_list_failed", err)
+		}
+		if p.Status != "" {
+			entries = filterMemoryStatus(entries, p.Status)
+		}
+		return map[string]any{"items": entries}, nil
+	case "memory.search":
+		var p struct {
+			SessionID string             `json:"session_id"`
+			Query     string             `json:"query"`
+			Scopes    []longmemory.Scope `json:"scopes"`
+			Limit     int                `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		scopes := p.Scopes
+		if len(scopes) == 0 {
+			scopes = s.defaultMemoryScopes(p.SessionID)
+		}
+		cfg := config.GetConfig()
+		var embedder longmemory.Embedder
+		if cfg.MemoryEmbeddingEnabled {
+			if local, embedErr := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir); embedErr == nil {
+				embedder = local
+			}
+		}
+		limit := p.Limit
+		if limit <= 0 {
+			limit = cfg.MemoryRecallMaxItems
+		}
+		query := longmemory.MemoryQuery{Text: strings.TrimSpace(p.Query), Timestamp: time.Now().UTC(),
+			Scopes: scopes, SessionID: p.SessionID, AgentID: "main"}
+		catalog, catalogErr := store.InspectCatalog(ctx, scopes)
+		expansion, expansionModel, expansionError := agent.ExpandMemoryQuery(ctx, cfg, query, catalog,
+			func(ctx context.Context, model string) (api.LLMClient, error) {
+				return llmclient.Create(cfg, model, 1024, nil, api.DefaultRetryConfigPtr())
+			})
+		if catalogErr != nil {
+			if expansionError != "" {
+				expansionError += "; "
+			}
+			expansionError += "inspect memory catalog: " + catalogErr.Error()
+		}
+		hybrid, err := store.SearchAllChannels(ctx, query, expansion, embedder, longmemory.HybridSearchOptions{
+			FTSCandidates: cfg.MemoryFTSCandidates, VectorCandidates: cfg.MemoryVectorCandidates,
+			GraphCandidates: cfg.MemoryGraphCandidates, GraphMaxHops: cfg.MemoryGraphMaxHops,
+			RRFK: cfg.MemoryRRFK, MMRLambda: cfg.MemoryMMRLambda, MaxItems: limit,
+			CoreContextTokens: cfg.MemoryCoreContextTokens, TargetContextTokens: cfg.MemoryContextTargetTokens,
+			MaxContextTokens: cfg.MemoryContextMaxTokens, LocalTimeout: time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
+			SessionID: p.SessionID, AgentID: "main",
+			ExpansionModel: expansionModel, ExpansionError: expansionError,
+		})
+		if err != nil {
+			return nil, toRPCError("memory_search_failed", err)
+		}
+		entries, err := store.GetMany(ctx, hybrid.Run.InjectedIDs)
+		if err != nil {
+			return nil, toRPCError("memory_search_entries_failed", err)
+		}
+		return map[string]any{"items": entries, "evidence_packet": hybrid.Packet, "retrieval_trace": hybrid.Trace}, nil
+	case "memory.facts":
+		var p struct {
+			SessionID string             `json:"session_id"`
+			Scopes    []longmemory.Scope `json:"scopes"`
+			Entities  []string           `json:"entities"`
+			At        string             `json:"at"`
+			Limit     int                `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if len(p.Scopes) == 0 {
+			p.Scopes = s.defaultMemoryScopes(p.SessionID)
+		}
+		facts, err := store.ResolveFactsAt(ctx, p.Scopes, p.Entities, parseMemoryFilterTime(p.At), p.Limit)
+		if err != nil {
+			return nil, toRPCError("memory_facts_failed", err)
+		}
+		return map[string]any{"items": facts}, nil
+	case "memory.retrieval_traces":
+		var p struct {
+			Limit int `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		traces, err := store.ListRetrievalTraces(ctx, p.Limit)
+		if err != nil {
+			return nil, toRPCError("memory_retrieval_trace_failed", err)
+		}
+		return map[string]any{"items": traces}, nil
+	case "memory.get":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		entry, err := store.Get(ctx, p.MemoryID)
+		if err != nil {
+			return nil, toRPCError("memory_not_found", err)
+		}
+		return entry, nil
+	case "memory.create", "memory.update":
+		var candidate longmemory.Candidate
+		decodeParams(req.Params, &candidate)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		entry, err := store.Upsert(ctx, candidate)
+		if err != nil {
+			return nil, toRPCError("memory_upsert_failed", err)
+		}
+		return entry, nil
+	case "memory.delete":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+			Hard     bool   `json:"hard"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.Delete(ctx, p.MemoryID, p.Hard); err != nil {
+			return nil, toRPCError("memory_delete_failed", err)
+		}
+		return map[string]any{"deleted": true, "hard": p.Hard}, nil
+	case "memory.archive":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.SetStatus(ctx, p.MemoryID, longmemory.StatusArchived); err != nil {
+			return nil, toRPCError("memory_archive_failed", err)
+		}
+		return map[string]any{"archived": true}, nil
+	case "memory.approve":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.Approve(ctx, p.MemoryID); err != nil {
+			return nil, toRPCError("memory_approve_failed", err)
+		}
+		return map[string]any{"approved": true}, nil
+	case "memory.restore":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.Restore(ctx, p.MemoryID); err != nil {
+			return nil, toRPCError("memory_restore_failed", err)
+		}
+		return map[string]any{"restored": true}, nil
+	case "memory.prioritize":
+		var p struct {
+			MemoryID   string  `json:"memory_id"`
+			Importance float64 `json:"importance"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.UpdateImportance(ctx, p.MemoryID, p.Importance); err != nil {
+			return nil, toRPCError("memory_prioritize_failed", err)
+		}
+		return map[string]any{"prioritized": true, "importance": p.Importance}, nil
+	case "memory.deprioritize":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if err := store.Deprioritize(ctx, p.MemoryID); err != nil {
+			return nil, toRPCError("memory_deprioritize_failed", err)
+		}
+		return map[string]any{"deprioritized": true, "importance": 0}, nil
+	case "memory.supersede":
+		var p struct {
+			OldMemoryID string               `json:"old_memory_id"`
+			NewMemoryID string               `json:"new_memory_id"`
+			Candidate   longmemory.Candidate `json:"candidate"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		if p.Candidate.Title != "" || p.Candidate.Content != "" || p.Candidate.Summary != "" {
+			entry, err := store.SupersedeWith(ctx, p.OldMemoryID, p.Candidate)
+			if err != nil {
+				return nil, toRPCError("memory_supersede_failed", err)
+			}
+			return map[string]any{"superseded": true, "new_memory": entry}, nil
+		}
+		if err := store.Supersede(ctx, p.OldMemoryID, p.NewMemoryID); err != nil {
+			return nil, toRPCError("memory_supersede_failed", err)
+		}
+		return map[string]any{"superseded": true, "new_memory_id": p.NewMemoryID}, nil
+	case "memory.export":
+		var p struct {
+			Format string `json:"format"`
+			OutDir string `json:"out_dir"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		dir, err := longmemory.ExportMarkdown(ctx, store, p.OutDir)
+		if err != nil {
+			return nil, toRPCError("memory_export_failed", err)
+		}
+		return map[string]any{"format": "markdown", "path": dir}, nil
+	case "memory.import":
+		var p struct {
+			Path       string                 `json:"path"`
+			Candidates []longmemory.Candidate `json:"candidates"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		count, err := ImportMemoryCandidates(ctx, store, p.Path, p.Candidates)
+		if err != nil {
+			return nil, toRPCError("memory_import_failed", err)
+		}
+		return map[string]any{"imported": count}, nil
+	case "memory.used":
+		var p struct {
+			Limit int `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		records, err := store.ListUsed(ctx, p.Limit)
+		if err != nil {
+			return nil, toRPCError("memory_used_failed", err)
+		}
+		return map[string]any{"items": records}, nil
 	case "slash.list":
 		controller, rpcErr := s.optionalController(req.Params)
 		if rpcErr != nil || controller == nil {
@@ -826,6 +1201,195 @@ func (s *DaemonServer) controllerFromParams(raw json.RawMessage) (*SessionContro
 		return nil, &RPCError{Code: "session_id_required", Message: "session_id is required"}
 	}
 	return controller, nil
+}
+
+func (s *DaemonServer) openMemoryStore(ctx context.Context) (*longmemory.Store, error) {
+	if !s.opts.Config.LongTermMemoryEnabled {
+		return nil, fmt.Errorf("long-term memory is disabled")
+	}
+	return longmemory.Open(ctx, s.opts.Config.LongTermMemoryStore)
+}
+
+func (s *DaemonServer) defaultMemoryScopes(sessionID string) []longmemory.Scope {
+	cfg := s.opts.Config
+	if strings.TrimSpace(sessionID) != "" {
+		if controller, err := s.manager.Get(sessionID); err == nil && controller != nil {
+			cfg = controller.RuntimeConfig()
+		}
+	}
+	return longmemory.RuntimeScopes(cfg.CWD, "main", "", "")
+}
+
+func filterMemoryStatus(entries []longmemory.Entry, status longmemory.Status) []longmemory.Entry {
+	if status == "" {
+		return entries
+	}
+	filtered := make([]longmemory.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Status == status {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func parseMemoryFilterTime(text string) time.Time {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, text); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func ImportMemoryCandidates(ctx context.Context, store *longmemory.Store, path string, candidates []longmemory.Candidate) (int, error) {
+	count := 0
+	for _, candidate := range candidates {
+		if _, err := store.Upsert(ctx, candidate); err != nil {
+			return count, err
+		}
+		count++
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return count, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return count, err
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return count, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".md") {
+				continue
+			}
+			n, err := ImportMemoryCandidates(ctx, store, filepath.Join(path, entry.Name()), nil)
+			if err != nil {
+				return count, err
+			}
+			count += n
+		}
+		return count, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return count, err
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		var list []longmemory.Candidate
+		if err := json.Unmarshal(data, &list); err != nil {
+			var wrapper struct {
+				Memories   []longmemory.Candidate `json:"memories"`
+				Candidates []longmemory.Candidate `json:"candidates"`
+			}
+			if wrapErr := json.Unmarshal(data, &wrapper); wrapErr != nil {
+				return count, err
+			}
+			list = append(wrapper.Memories, wrapper.Candidates...)
+		}
+		for _, candidate := range list {
+			if _, err := store.Upsert(ctx, candidate); err != nil {
+				return count, err
+			}
+			count++
+		}
+	case ".jsonl":
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var candidate longmemory.Candidate
+			if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+				return count, err
+			}
+			if _, err := store.Upsert(ctx, candidate); err != nil {
+				return count, err
+			}
+			count++
+		}
+	case ".md":
+		candidate := parseMemoryMarkdown(data)
+		if _, err := store.Upsert(ctx, candidate); err != nil {
+			return count, err
+		}
+		count++
+	default:
+		return count, fmt.Errorf("unsupported memory import file: %s", path)
+	}
+	return count, nil
+}
+
+func parseMemoryMarkdown(data []byte) longmemory.Candidate {
+	text := string(data)
+	frontmatter := map[string]string{}
+	body := text
+	if strings.HasPrefix(text, "---\n") {
+		rest := strings.TrimPrefix(text, "---\n")
+		if idx := strings.Index(rest, "\n---"); idx >= 0 {
+			raw := rest[:idx]
+			body = strings.TrimSpace(rest[idx+4:])
+			for _, line := range strings.Split(raw, "\n") {
+				key, value, ok := strings.Cut(line, ":")
+				if ok {
+					frontmatter[strings.TrimSpace(key)] = strings.TrimSpace(value)
+				}
+			}
+		}
+	}
+	title := frontmatter["title"]
+	if title == "" {
+		for _, line := range strings.Split(body, "\n") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			if line != "" {
+				title = line
+				break
+			}
+		}
+	}
+	scopeType := longmemory.ScopeType(frontmatter["scope_type"])
+	scopeKey := frontmatter["scope_key"]
+	memoryType := longmemory.MemoryType(frontmatter["memory_type"])
+	return longmemory.Candidate{
+		MemoryID:      frontmatter["memory_id"],
+		ScopeType:     scopeType,
+		ScopeKey:      scopeKey,
+		MemoryType:    memoryType,
+		Status:        longmemory.Status(frontmatter["status"]),
+		Title:         title,
+		Content:       strings.TrimSpace(body),
+		Summary:       frontmatter["summary"],
+		Tags:          splitMemoryCSV(frontmatter["tags"]),
+		Entities:      splitMemoryCSV(frontmatter["entities"]),
+		SourceAgentID: frontmatter["source_agent_id"],
+	}
+}
+
+func splitMemoryCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s *DaemonServer) optionalController(raw json.RawMessage) (*SessionController, *RPCError) {

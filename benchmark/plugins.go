@@ -66,7 +66,7 @@ func (MemoryBenchmarkPlugin) RunSuite(_ context.Context, variant *VariantOverrid
 		scorecard.QualityMeanF1AtK = 0
 		scorecard.StabilityRepeatConsistencyRate = 0
 	}
-	if variantEnabled(variant, "disable_memory_index") {
+	if variantEnabled(variant, "disable_memory_store") {
 		scorecard.IndexMeanCoverageRate = 0
 	}
 	if variantEnabled(variant, "disable_memory_extraction") {
