@@ -122,9 +122,24 @@ func (m *BackgroundManager) StartBackground(
 	return m.StartBackgroundWithOptionalTimeout(command, description, cwd, &timeout)
 }
 
+func (m *BackgroundManager) StartBackgroundArgv(
+	command, description string, argv []string, cwd string,
+	timeout time.Duration) (*BackgroundTask, error) {
+	return m.StartBackgroundWithOptionalTimeoutArgv(command, description, argv, cwd, &timeout)
+}
+
 func (m *BackgroundManager) StartBackgroundWithOptionalTimeout(
 	command, description, cwd string,
 	timeout *time.Duration) (*BackgroundTask, error) {
+	return m.StartBackgroundWithOptionalTimeoutArgv(command, description, ShellArgv(command, ""), cwd, timeout)
+}
+
+func (m *BackgroundManager) StartBackgroundWithOptionalTimeoutArgv(
+	command, description string, argv []string, cwd string,
+	timeout *time.Duration) (*BackgroundTask, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("cannot start background task with empty argv")
+	}
 	m.mu.Lock()
 	if m.activeCountLocked() >= maxBackgroundTasks {
 		count := m.activeCountLocked()
@@ -160,7 +175,7 @@ func (m *BackgroundManager) StartBackgroundWithOptionalTimeout(
 		ctx, cancel = context.WithCancel(ctx)
 	}
 	done := make(chan struct{})
-	cmd := shellCommand(ctx, command)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	if cwd == "" {
 		cwd = "."
 	}

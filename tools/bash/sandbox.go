@@ -3,7 +3,10 @@ package bash
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -31,19 +34,33 @@ func NewSandboxManager() *SandboxManager {
 }
 
 func (m *SandboxManager) detectSandbox() bool {
-	switch m.platform {
-	case "darwin":
-		// macOS sandbox-exec with a deny-default profile is brittle for shell
-		// commands because even simple sh -c invocations may require system
-		// service permissions beyond file/process rules. Keep Lumina's own
-		// permission model in charge on macOS instead of silently killing tools.
-		return false
-	case "linux":
-		_, err := exec.LookPath("bwrap")
-		return err == nil
-	default:
+	if m == nil {
 		return false
 	}
+	_, err := exec.LookPath(m.BackendName())
+	return err == nil
+}
+
+func (m *SandboxManager) Platform() string {
+	if m == nil {
+		return runtime.GOOS
+	}
+	return m.platform
+}
+
+func (m *SandboxManager) BackendName() string {
+	switch m.Platform() {
+	case "darwin":
+		return "sandbox-exec"
+	case "linux":
+		return "bwrap"
+	default:
+		return ""
+	}
+}
+
+func (m *SandboxManager) IsSandboxAvailable() bool {
+	return m != nil && m.sandboxAvailable
 }
 
 func (m *SandboxManager) IsSandboxingEnabled() bool {
@@ -59,8 +76,8 @@ func (m *SandboxManager) Enable() {
 }
 
 func (m *SandboxManager) GetSandboxCommand(command string, config SandboxConfig, cwd string) []string {
-	if !m.IsSandboxingEnabled() {
-		return ShellCommandArgs(command)
+	if !config.Enabled || !m.IsSandboxingEnabled() {
+		return nil
 	}
 	switch m.platform {
 	case "darwin":
@@ -68,100 +85,97 @@ func (m *SandboxManager) GetSandboxCommand(command string, config SandboxConfig,
 	case "linux":
 		return m.linuxSandbox(command, config, cwd)
 	default:
-		return ShellCommandArgs(command)
+		return nil
 	}
 }
 
 func (m *SandboxManager) macosSandbox(command string, config SandboxConfig, cwd string) []string {
 	profile := m.buildMacosProfile(config, cwd)
-	shell := ShellCommandArgs(command)
-	return append([]string{"sandbox-exec", "-p", profile}, shell...)
+	env := []string{
+		"/usr/bin/env", "-i",
+		"HOME=" + cwd,
+		"PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"TMPDIR=/private/tmp",
+		"LANG=C.UTF-8",
+	}
+	args := append([]string{"sandbox-exec", "-p", profile}, env...)
+	return append(args, ShellCommandArgs(command)...)
 }
 
 func (m *SandboxManager) buildMacosProfile(config SandboxConfig, cwd string) string {
+	readRoots := sandboxRoots(append(append([]string{}, config.AllowRead...), cwd))
+	writeRoots := sandboxRoots(append(append([]string{}, config.AllowWrite...), cwd))
+
 	lines := []string{
 		"(version 1)",
 		"(deny default)",
-		"(allow process-exec)",
-		`(allow file-read* (subpath "/usr/lib")`,
-		`             (subpath "/usr/share")`,
-		`             (subpath "/System/Library")`,
-		`             (subpath "/Library/Frameworks")`,
+		`(import "system.sb")`,
+		"(allow process-exec process-fork signal)",
+		"(allow file-read* file-test-existence file-map-executable",
 	}
-	for _, path := range []string{"/usr/local", "/opt/homebrew", "/usr/bin", "/bin"} {
-		if _, err := os.Stat(path); err == nil {
-			lines = append(lines, `             (subpath "`+path+`")`)
-		}
+	for _, path := range existingSandboxPaths(
+		"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local", "/opt/homebrew",
+		"/Library/Developer", "/Applications/Xcode.app/Contents/Developer", "/private/etc",
+		"/tmp", "/private/tmp",
+	) {
+		lines = append(lines, "  (subpath "+sbplString(path)+")")
 	}
-	lines = append(lines, `             (subpath "`+cwd+`")`)
-	for _, path := range []string{"/tmp", "/private/tmp"} {
-		if _, err := os.Stat(path); err == nil {
-			lines = append(lines, `             (subpath "`+path+`")`)
-		}
-	}
-	for _, path := range config.AllowRead {
-		lines = append(lines, `             (subpath "`+path+`")`)
+	for _, path := range readRoots {
+		lines = append(lines, "  (path-ancestors "+sbplString(path)+")")
+		lines = append(lines, "  (subpath "+sbplString(path)+")")
 	}
 	lines = append(lines, ")")
-	if len(config.AllowWrite) > 0 {
+
+	if len(writeRoots) > 0 {
 		lines = append(lines, "(allow file-write*")
-		for _, path := range config.AllowWrite {
-			lines = append(lines, `             (subpath "`+path+`")`)
+		for _, path := range writeRoots {
+			lines = append(lines, "  (subpath "+sbplString(path)+")")
 		}
-		lines = append(lines, `             (subpath "`+cwd+`")`)
-		for _, path := range []string{"/tmp", "/private/tmp"} {
-			if _, err := os.Stat(path); err == nil {
-				lines = append(lines, `             (subpath "`+path+`")`)
-			}
+		for _, path := range existingSandboxPaths("/tmp", "/private/tmp") {
+			lines = append(lines, "  (subpath "+sbplString(path)+")")
 		}
 		lines = append(lines, ")")
 	}
 	if config.AllowNetwork {
 		lines = append(lines, "(allow network*)")
 	}
-	if config.AllowProcesses {
-		lines = append(lines, "(allow process-fork)")
-	}
-	lines = append(lines, "(allow signal)")
 	return strings.Join(lines, "\n")
 }
 
 func (m *SandboxManager) linuxSandbox(command string, config SandboxConfig, cwd string) []string {
-	args := []string{
-		"bwrap", "--unshare-all", "--clearenv", "--new-session", "--die-with-parent",
-		"--ro-bind", "/usr", "/usr",
-		"--ro-bind", "/lib", "/lib",
-		"--ro-bind", "/lib64", "/lib64",
-		"--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/etc", "/etc",
-		"--ro-bind", "/opt", "/opt",
+	if roots := sandboxRoots([]string{cwd}); len(roots) == 1 {
+		cwd = roots[0]
+	}
+	args := []string{"bwrap", "--unshare-all", "--clearenv", "--new-session", "--die-with-parent"}
+	for _, path := range existingSandboxPaths("/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/usr/local", "/opt/homebrew") {
+		args = append(args, "--ro-bind", path, path)
+	}
+	args = append(args,
 		"--bind", cwd, cwd,
 		"--chdir", cwd,
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--tmpfs", "/tmp",
-	}
-	for _, path := range []string{"/usr/local", "/opt/homebrew"} {
-		if _, err := os.Stat(path); err == nil {
+		"--setenv", "HOME", cwd,
+		"--setenv", "PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"--setenv", "TMPDIR", "/tmp",
+		"--setenv", "LANG", "C.UTF-8",
+	)
+	for _, path := range sandboxRoots(config.AllowRead) {
+		if path != cwd && pathExists(path) {
 			args = append(args, "--ro-bind", path, path)
 		}
 	}
-	for _, path := range config.AllowRead {
-		if _, err := os.Stat(path); err == nil {
-			args = append(args, "--ro-bind", path, path)
-		}
-	}
-	for _, path := range config.AllowWrite {
-		if _, err := os.Stat(path); err == nil {
+	for _, path := range sandboxRoots(config.AllowWrite) {
+		if path != cwd && pathExists(path) {
 			args = append(args, "--bind", path, path)
 		}
 	}
-	if !config.AllowNetwork {
-		args = append(args, "--unshare-net")
+	if config.AllowNetwork {
+		args = append(args, "--share-net")
 	}
 	args = append(args, "--")
-	args = append(args, ShellCommandArgs(command)...)
-	return args
+	return append(args, ShellCommandArgs(command)...)
 }
 
 func ShellCommandArgs(command string) []string {
@@ -177,25 +191,50 @@ func ShellCommandArgs(command string) []string {
 	return []string{"sh", "-c", command}
 }
 
-var sandboxExcludedCommands = map[string]bool{
-	"docker": true, "podman": true, "kubectl": true, "systemctl": true,
-	"launchctl": true, "brew": true, "apt": true, "apt-get": true,
-	"yum": true, "dnf": true, "pacman": true, "snap": true,
-	"flatpak": true, "nix": true, "guix": true, "ssh": true,
-	"scp": true, "sftp": true, "rsync": true, "git": true,
+func ShouldUseSandbox(_ string, manager *SandboxManager, yolo bool, _ map[string]bool) bool {
+	return manager != nil && manager.IsSandboxingEnabled() && !yolo
 }
 
-func ShouldUseSandbox(command string, manager *SandboxManager, dangerouslyDisableSandbox bool, excludedCommands map[string]bool) bool {
-	if manager == nil || !manager.IsSandboxingEnabled() {
-		return false
+func sandboxRoots(paths []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		path = filepath.Clean(path)
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = filepath.Clean(resolved)
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
 	}
-	if dangerouslyDisableSandbox {
-		return false
+	sort.Strings(result)
+	return result
+}
+
+func existingSandboxPaths(paths ...string) []string {
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if pathExists(path) {
+			result = append(result, path)
+		}
 	}
-	exclusions := sandboxExcludedCommands
-	if excludedCommands != nil {
-		exclusions = excludedCommands
-	}
-	base := ExtractBaseCommand(command)
-	return base == "" || !exclusions[base]
+	return result
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func sbplString(value string) string {
+	return strconv.Quote(value)
 }

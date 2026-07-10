@@ -719,6 +719,15 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		resolver := PermissionResolver{
 			Registry:        activeRegistry,
 			CheckPermission: e.CheckPermissionChain,
+			EnableYolo: func(state *AgentState) {
+				if state != nil && state.PermissionState != nil {
+					state.PermissionState.YoloMode = true
+				}
+				e.Config.Yolo = true
+				if e.StateObserver != nil {
+					e.StateObserver(state)
+				}
+			},
 			RequestDecision: func(ctx context.Context, event StreamEvent) (string, string) {
 				sendStream(ctx, out, event)
 				e.mu.Lock()
@@ -1593,13 +1602,10 @@ func ClonePermissionState(state *security.PermissionState) *security.PermissionS
 	return &clone
 }
 
-func BuildSubagentState(parentState *AgentState, permissionMode string) AgentState {
+func BuildSubagentState(parentState *AgentState, _ string) AgentState {
 	child := NewAgentState()
 	if parentState != nil {
 		child.PermissionState = ClonePermissionState(parentState.PermissionState)
-	}
-	if permissionMode == "bypass" && child.PermissionState != nil {
-		child.PermissionState.YoloMode = true
 	}
 	return child
 }

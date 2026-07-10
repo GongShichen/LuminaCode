@@ -345,8 +345,8 @@ func TestBackgroundWorkerUsesPythonScopedExecutionContext(t *testing.T) {
 	if payload["current_agent_type"] != "Explore" || payload["has_task_runtime"] != true {
 		t.Fatalf("worker runtime context missing Python fields: %#v", payload)
 	}
-	if payload["parent_yolo"] != true {
-		t.Fatalf("bypass permission mode should clone worker state with yolo=true, got %#v", payload)
+	if payload["parent_yolo"] != false {
+		t.Fatalf("permission bypass must not manufacture user YOLO state, got %#v", payload)
 	}
 	if payload["cwd"] != worktreeCWD {
 		t.Fatalf("worker execution cwd should come from worktree_cwd, got %#v", payload)

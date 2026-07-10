@@ -303,7 +303,7 @@ lumina-backend daemon --host 127.0.0.1 --port 0
 - `-base-url`：API Base URL。
 - `-api-type`：`openai_compatible`、`anthropic` 或 `auto`。
 - `-max-tokens`：用于本地统计的上下文窗口 token 数。
-- `-yolo`：跳过权限确认。
+- `-yolo`：跳过权限确认和操作系统沙箱隔离。
 - `-bare`：禁用 auto-memory 等持久化能力。
 - `-verbose`, `-v`：开启调试输出。
 

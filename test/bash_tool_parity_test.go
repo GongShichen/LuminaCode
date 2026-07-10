@@ -51,9 +51,8 @@ func TestBashInputSchemaDefaultsMatchPython(t *testing.T) {
 		t.Fatalf("run_in_background schema mismatch: %#v", background)
 	}
 
-	disableSandbox := properties["dangerouslyDisableSandbox"].(map[string]any)
-	if disableSandbox["default"] != false || disableSandbox["description"] != "If True, skip sandbox isolation (requires policy approval)" {
-		t.Fatalf("dangerouslyDisableSandbox schema mismatch: %#v", disableSandbox)
+	if _, exposed := properties["dangerouslyDisableSandbox"]; exposed {
+		t.Fatal("dangerouslyDisableSandbox must not be exposed to the model")
 	}
 }
 
@@ -220,11 +219,11 @@ func TestBashPathValidationAllowsRuntimeRoot(t *testing.T) {
 			"command":                   "mkdir -p " + shellPath(target),
 			"dangerouslyDisableSandbox": true,
 		},
-	}, coretools.ExecutionContext{
+	}, yoloBashContext(dir, map[string]any{
 		"cwd":                 dir,
 		"allowed_read_roots":  []string{dir, runtimeDir},
 		"allowed_write_roots": []string{dir, runtimeDir},
-	})
+	}))
 	if !strings.Contains(result.Content, "Success (exit 0)") {
 		t.Fatalf("expected runtime root command to pass, got error=%v content=%q", result.IsError, result.Content)
 	}
@@ -243,7 +242,7 @@ func TestBashInterpretsGrepNoMatchAsNonError(t *testing.T) {
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "bash-1", Name: "run_shell",
 		Input: map[string]any{"command": "grep nomatch " + shellPath(path), "dangerouslyDisableSandbox": true},
-	}, coretools.ExecutionContext{"cwd": dir})
+	}, yoloBashContext(dir, nil))
 	if !strings.Contains(result.Content, "[Exit code: 1") ||
 		!strings.Contains(result.Content, "No match found (not an error)") {
 		t.Fatalf("expected grep exit-code semantics, got error=%v content=%q", result.IsError, result.Content)
@@ -258,7 +257,7 @@ func TestBashExplicitZeroTimeoutMatchesPython(t *testing.T) {
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "bash-timeout-zero", Name: "run_shell",
 		Input: map[string]any{"command": "sleep 1", "timeout": timeout, "dangerouslyDisableSandbox": true},
-	}, coretools.ExecutionContext{"cwd": dir})
+	}, yoloBashContext(dir, nil))
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("timeout=0 should timeout immediately like Python, took %s", time.Since(start))
 	}
@@ -277,7 +276,7 @@ func TestBashBackgroundTaskRunsAfterLaunch(t *testing.T) {
 			"description":       "background parity test",
 			"run_in_background": true,
 		},
-	}, coretools.ExecutionContext{"cwd": dir})
+	}, yoloBashContext(dir, nil))
 	if !strings.Contains(result.Content, "Command launched in background.") {
 		t.Fatalf("expected background launch, got error=%v content=%q", result.IsError, result.Content)
 	}
@@ -314,7 +313,7 @@ func TestBashBackgroundDescriptionUsesPythonCharacterSlice(t *testing.T) {
 			"command":           command,
 			"run_in_background": true,
 		},
-	}, coretools.ExecutionContext{"cwd": dir})
+	}, yoloBashContext(dir, nil))
 	want := "Description: " + strings.Repeat("测", 80)
 	if result.IsError || !strings.Contains(result.Content, want) {
 		t.Fatalf("background description should truncate by Python characters, got error=%v content=%q", result.IsError, result.Content)
@@ -328,7 +327,7 @@ func TestBashLargeUnicodeOutputTruncatesWithPythonDecodeReplacement(t *testing.T
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "bash-large-unicode", Name: "run_shell",
 		Input: map[string]any{"command": command, "dangerouslyDisableSandbox": true},
-	}, coretools.ExecutionContext{"cwd": dir})
+	}, yoloBashContext(dir, nil))
 	if result.IsError {
 		t.Fatalf("large unicode bash output failed: %s", result.Content)
 	}
@@ -348,4 +347,12 @@ func extractBackgroundOutputPath(content string) string {
 		}
 	}
 	return ""
+}
+
+func yoloBashContext(cwd string, extra map[string]any) coretools.ExecutionContext {
+	ctx := coretools.ExecutionContext{"cwd": cwd, "config": config.Config{Yolo: true}}
+	for key, value := range extra {
+		ctx[key] = value
+	}
+	return ctx
 }

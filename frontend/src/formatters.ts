@@ -47,7 +47,7 @@ export function formatPermissionPrompt(payload: any): string {
   const prompt = payload?.prompt ?? payload?.skill_shell_request ?? payload;
   if (typeof prompt === "string") return prompt;
   if (prompt && typeof prompt === "object") {
-    const request = (prompt as any).skill_shell_request || prompt;
+    const request = (prompt as any).skill_shell_request || (prompt as any).input || prompt;
     const parts: string[] = [];
     if (request.agent_display || payload?.agent_display) parts.push(`Agent: ${request.agent_display || payload.agent_display}`);
     const toolName = request.tool_name || request.tool || request.name || request.skill || request.skill_name;

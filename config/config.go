@@ -367,6 +367,9 @@ func ApplyHarnessDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	if strings.TrimSpace(cfg.HarnessMode) != "" {
+		cfg.Yolo = true
+	}
 	if IsTerminalBenchHarnessMode(cfg.HarnessMode) && cfg.ShellTimeoutSeconds == 30.0 {
 		cfg.ShellTimeoutSeconds = 120.0
 	}

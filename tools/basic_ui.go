@@ -163,11 +163,10 @@ func BackfillBashInput(input BashInput) BashInput {
 		description = bashpkg.ClassifyBashCommand(input.Command)
 	}
 	return BashInput{
-		Command:                   input.Command,
-		Timeout:                   input.Timeout,
-		TimeoutSeconds:            input.TimeoutSeconds,
-		Description:               description,
-		RunInBackground:           input.RunInBackground,
-		DangerouslyDisableSandbox: input.DangerouslyDisableSandbox,
+		Command:         input.Command,
+		Timeout:         input.Timeout,
+		TimeoutSeconds:  input.TimeoutSeconds,
+		Description:     description,
+		RunInBackground: input.RunInBackground,
 	}
 }

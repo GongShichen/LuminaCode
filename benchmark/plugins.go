@@ -383,16 +383,8 @@ func buildSecurityScorecard(cases []securityEvalCase) SecurityBenchmarkScorecard
 	}
 }
 
-func benchmarkShouldUseSandbox(command string) bool {
-	base := bashtool.ExtractBaseCommand(command)
-	excluded := map[string]struct{}{
-		"docker": {}, "podman": {}, "kubectl": {}, "systemctl": {},
-		"launchctl": {}, "brew": {}, "apt": {}, "apt-get": {}, "yum": {},
-		"dnf": {}, "pacman": {}, "snap": {}, "flatpak": {}, "nix": {},
-		"guix": {}, "ssh": {}, "scp": {}, "sftp": {}, "rsync": {}, "git": {},
-	}
-	_, found := excluded[base]
-	return base == "" || !found
+func benchmarkShouldUseSandbox(_ string) bool {
+	return true
 }
 
 func labelSet(labels ...string) map[string]struct{} {

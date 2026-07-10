@@ -1065,6 +1065,12 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 			s.appendRecovery(msg)
 		case "permission_needed":
 			decision := s.requestPermission(agentID, event)
+			if isTruthy(event.Metadata["sandbox_unavailable"]) &&
+				(decision == agent.PermissionOnce || decision == agent.PermissionAlways || decision == "true") {
+				cfg := s.Config
+				cfg.Yolo = true
+				s.ApplyRuntimeConfig(cfg)
+			}
 			runtime.Engine.ResolvePermission(decision, toolNameFromPermissionEvent(event))
 		}
 	}
@@ -3245,6 +3251,12 @@ func permissionPromptPayload(agentID, agentDisplay string, event agent.StreamEve
 		"agent_display": agentDisplay,
 		"tool_name":     firstNonEmpty(event.Content, toolNameFromPermissionEvent(event), "tool"),
 		"risk":          stringFromMetadata(event.Metadata, "risk"),
+	}
+	if reason := stringFromMetadata(event.Metadata, "reason"); reason != "" {
+		payload["reason"] = truncateTeamVisible(reason, 800)
+	}
+	if backend := stringFromMetadata(event.Metadata, "sandbox_backend"); backend != "" {
+		payload["sandbox_backend"] = backend
 	}
 	if tc, ok := event.Metadata["tool_call"].(coretools.ToolCall); ok {
 		payload["tool_call_id"] = tc.ID

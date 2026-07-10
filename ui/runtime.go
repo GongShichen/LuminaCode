@@ -375,7 +375,9 @@ func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
 	}
 	answer := "deny"
 	if r.UI != nil {
-		if _, _, ok := skillShellRequestParts(event.Metadata["skill_shell_request"]); ok {
+		if truthy(event.Metadata["sandbox_unavailable"]) {
+			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
+		} else if _, _, ok := skillShellRequestParts(event.Metadata["skill_shell_request"]); ok {
 			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
 		} else if _, ok := normalizeMCPTrustRequest(event.Metadata["mcp_trust_request"]); ok {
 			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
@@ -414,7 +416,15 @@ func (r *UiRuntime) BuildPermissionModalState(event UiEvent) map[string]any {
 	targetSummary := ""
 	summaryLines := []string{}
 	kind := "permission_request"
-	if tc, ok := event.Metadata["tool_call"].(coretools.ToolCall); ok {
+	if truthy(event.Metadata["sandbox_unavailable"]) {
+		toolName = "run_shell"
+		targetSummary = firstNonEmpty(stringFromAny(event.Metadata["sandbox_backend"]), "OS sandbox")
+		summaryLines = nonEmptyStrings([]string{
+			stringFromAny(event.Metadata["reason"]),
+			truncateString(stringFromAny(event.Metadata["command"]), 200),
+		})
+		kind = "sandbox_unavailable_permission"
+	} else if tc, ok := event.Metadata["tool_call"].(coretools.ToolCall); ok {
 		toolName = tc.Name
 		targetSummary = firstNonEmpty(stringFromAny(tc.Input["file_path"]), stringFromAny(tc.Input["command"]), stringFromAny(tc.Input["pattern"]))
 		switch toolName {

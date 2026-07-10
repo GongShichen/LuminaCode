@@ -327,7 +327,7 @@ Common flags:
 - `-base-url`: API base URL
 - `-api-type`: `openai_compatible`, `anthropic`, or `auto`
 - `-max-tokens`: context-window token limit used for local accounting
-- `-yolo`: skip permission prompts
+- `-yolo`: skip permission prompts and OS sandbox isolation
 - `-bare`: disable auto-memory and other persistent features
 - `-verbose`, `-v`: enable debug output
 

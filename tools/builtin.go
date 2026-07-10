@@ -730,12 +730,11 @@ func (t *GlobMatchTool) Execute(_ context.Context, execCtx ExecutionContext, inp
 }
 
 type BashInput struct {
-	Command                   string `json:"command" jsonschema_description:"The shell command to execute"`
-	Timeout                   *int   `json:"timeout,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in milliseconds. Numeric strings are accepted by the runtime as seconds for benchmark compatibility. Maximum 120 seconds."`
-	TimeoutSeconds            any    `json:"timeout_seconds,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in seconds. Maximum 120 seconds."`
-	Description               string `json:"description,omitempty" jsonschema:"default=" jsonschema_description:"Brief activity description for UI display"`
-	RunInBackground           bool   `json:"run_in_background,omitempty" jsonschema:"default=false" jsonschema_description:"If True, execute asynchronously and return immediately"`
-	DangerouslyDisableSandbox bool   `json:"dangerouslyDisableSandbox,omitempty" jsonschema:"default=false" jsonschema_description:"If True, skip sandbox isolation (requires policy approval)"`
+	Command         string `json:"command" jsonschema_description:"The shell command to execute"`
+	Timeout         *int   `json:"timeout,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in milliseconds. Numeric strings are accepted by the runtime as seconds for benchmark compatibility. Maximum 120 seconds."`
+	TimeoutSeconds  any    `json:"timeout_seconds,omitempty" jsonschema:"nullable,default=null" jsonschema_description:"Optional timeout in seconds. Maximum 120 seconds."`
+	Description     string `json:"description,omitempty" jsonschema:"default=" jsonschema_description:"Brief activity description for UI display"`
+	RunInBackground bool   `json:"run_in_background,omitempty" jsonschema:"default=false" jsonschema_description:"If True, execute asynchronously and return immediately"`
 }
 
 type RunShellInput = BashInput
@@ -751,7 +750,7 @@ type RunShellTool = BashTool
 func NewBashTool() *BashTool {
 	return &BashTool{BaseTool: BaseTool{Spec: ToolSpec{
 		Name:              "run_shell",
-		Description:       "Execute a shell command in the project environment. Output is limited to 5MB. Use run_in_background for long-running commands and dangerouslyDisableSandbox only when sandbox isolation prevents legitimate operations.",
+		Description:       "Execute a shell command in the project environment. Output is limited to 5MB. Use run_in_background for long-running commands. Sandbox isolation is controlled by the user's YOLO mode setting.",
 		InputPrototype:    BashInput{},
 		ReadOnly:          BoolPtr(false),
 		ConcurrencySafe:   BoolPtr(false),
@@ -760,6 +759,13 @@ func NewBashTool() *BashTool {
 		SiblingAbort:      true,
 		MaxOutputChars:    100_000,
 	}}, sandboxManager: bashpkg.NewSandboxManager()}
+}
+
+func (t *BashTool) SandboxStatus() (available bool, platform string, backend string) {
+	if t == nil || t.sandboxManager == nil {
+		return false, runtime.GOOS, ""
+	}
+	return t.sandboxManager.IsSandboxingEnabled(), t.sandboxManager.Platform(), t.sandboxManager.BackendName()
 }
 
 func (t *BashTool) DecodeInput(raw map[string]any) (any, error) {
@@ -849,16 +855,29 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 		}
 	}
 
+	yolo := bashYoloEnabled(execCtx)
+	if !yolo && (t.sandboxManager == nil || !t.sandboxManager.IsSandboxingEnabled()) {
+		return "<tool_use_error>\nOS sandbox backend is unavailable. The command was not executed. Enable YOLO mode explicitly to run without sandbox isolation.\n</tool_use_error>", nil
+	}
+	argv := bashpkg.ShellArgv(in.Command, "")
+	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, yolo, nil) {
+		readRoots := append([]string{cwd}, rootsFromAny(execCtx["allowed_read_roots"])...)
+		writeRoots := append([]string{cwd}, rootsFromAny(execCtx["allowed_write_roots"])...)
+		argv = t.sandboxManager.GetSandboxCommand(in.Command, bashpkg.SandboxConfig{
+			Enabled: true, AllowWrite: writeRoots, AllowRead: readRoots, AllowNetwork: false, AllowProcesses: true,
+		}, cwd)
+		if len(argv) == 0 {
+			return "<tool_use_error>\nSandbox initialization failed. The command was not executed. Enable YOLO mode explicitly to run without sandbox isolation.\n</tool_use_error>", nil
+		}
+	}
+
 	if in.RunInBackground {
-		return t.executeBackground(execCtx, in.Command, in.Description, cwd, timeout)
+		return t.executeBackground(execCtx, in.Command, in.Description, argv, cwd, timeout)
 	}
 
 	var exitCode int
 	var output string
-	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, in.DangerouslyDisableSandbox, nil) {
-		argv := t.sandboxManager.GetSandboxCommand(in.Command, bashpkg.SandboxConfig{
-			Enabled: true, AllowWrite: []string{cwd}, AllowRead: []string{cwd}, AllowNetwork: false,
-		}, cwd)
+	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, yolo, nil) {
 		exitCode, output = runArgvCommand(ctx, argv, cwd, timeout, in.Command)
 	} else {
 		exitCode, output = runShellCommand(ctx, in.Command, cwd, timeout)
@@ -1533,7 +1552,7 @@ func editLineCount(content string) int {
 	return count
 }
 
-func (t *BashTool) executeBackground(execCtx ExecutionContext, command, description, cwd string, timeout time.Duration) (string, error) {
+func (t *BashTool) executeBackground(execCtx ExecutionContext, command, description string, argv []string, cwd string, timeout time.Duration) (string, error) {
 	if t.backgroundManager == nil {
 		if cwd == "" {
 			cwd = "."
@@ -1552,7 +1571,7 @@ func (t *BashTool) executeBackground(execCtx ExecutionContext, command, descript
 	} else {
 		timeoutPtr = &bgTimeout
 	}
-	task, err := t.backgroundManager.StartBackgroundWithOptionalTimeout(command, description, cwd, timeoutPtr)
+	task, err := t.backgroundManager.StartBackgroundWithOptionalTimeoutArgv(command, description, argv, cwd, timeoutPtr)
 	if err != nil {
 		return fmt.Sprintf("Could not start background task: %s\nCurrent active tasks: %d", err, t.backgroundManager.ActiveCount()), nil
 	}
@@ -1574,6 +1593,18 @@ func projectRuntimeDirFromContext(execCtx ExecutionContext, cwd string) string {
 		}
 	}
 	return config.ProjectRuntimeDir(cwd)
+}
+
+func bashYoloEnabled(execCtx ExecutionContext) bool {
+	if execCtx != nil {
+		if state, ok := execCtx["parent_state"].(interface{ YoloEnabled() bool }); ok && state.YoloEnabled() {
+			return true
+		}
+		if cfg, ok := execCtx["config"].(config.Config); ok && cfg.Yolo {
+			return true
+		}
+	}
+	return false
 }
 
 func runShellCommand(ctx context.Context, command, cwd string, timeout time.Duration) (int, string) {

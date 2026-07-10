@@ -54,7 +54,7 @@ func run(args []string) error {
 	apiKey := flags.String("api-key", "", "API key.")
 	baseURL := flags.String("base-url", "", "API base URL.")
 	maxTokens := flags.Int("max-tokens", 0, "Context window tokens used for local compression.")
-	yolo := flags.Bool("yolo", false, "Skip permission prompts.")
+	yolo := flags.Bool("yolo", false, "Skip permission prompts and OS sandbox isolation.")
 	cwd := flags.String("cwd", "", "Working directory.")
 	verbose := flags.Bool("verbose", false, "Enable debug output.")
 	verboseShort := flags.Bool("v", false, "Enable debug output.")
@@ -225,6 +225,9 @@ func resolveHeadlessPermission(engine *agent.QueryEngine, event agent.StreamEven
 	granted := engine.Config.Yolo
 	decision := agent.PermissionOnce
 	if !granted {
+		if reason, ok := event.Metadata["reason"].(string); ok && strings.TrimSpace(reason) != "" {
+			fmt.Fprintln(out, reason)
+		}
 		fmt.Fprintf(out, "Permission needed for %s. Allow once? [y/N] ", headlessPermissionName(event))
 		answer, _ := reader.ReadString('\n')
 		answer = strings.ToLower(strings.TrimSpace(answer))

@@ -37,7 +37,7 @@ var BuiltinCommandSpecs = []SlashCommandSpec{
 	{Primary: "/save", Description: "Save session to disk", Aliases: []string{"/s"}},
 	{Primary: "/tokens", Description: "Show token usage"},
 	{Primary: "/compact", Description: "Manually compress conversation context", Aliases: []string{"/compress"}},
-	{Primary: "/yolo", Description: "Toggle YOLO mode (skip all permission prompts)"},
+	{Primary: "/yolo", Description: "Toggle YOLO mode (skip permission prompts and OS sandbox isolation)"},
 	{Primary: "/skill", Description: "Show visible skills for current directory"},
 	{Primary: "/Team", Description: "Enter Agent Team mode"},
 	{Primary: "/TeamOut", Description: "Exit Agent Team mode"},

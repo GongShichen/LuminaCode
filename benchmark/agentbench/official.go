@@ -188,6 +188,7 @@ func officialHarnessEnv(base []string, options RunnerOptions) []string {
 		"LUMINA_API_BASE_URL="+options.Config.APIBaseURL,
 		"LUMINA_API_MODEL="+options.Config.APIModel,
 		"LUMINA_API_TYPE="+options.Config.APIType,
+		"YOLO_MODE=true",
 		"LUMINA_MAX_PARENT_TURNS="+strconv.Itoa(options.Config.MaxParentTurns),
 	)
 	if options.Suite == SuiteTerminalBench {
