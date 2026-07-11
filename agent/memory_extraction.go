@@ -21,8 +21,8 @@ const extractionResultPreviewChars = 500
 var ExtractionAgentDef = AgentDef{
 	Name:           "auto-memory-extract",
 	Description:    "Background agent that extracts persistent memories from conversation context",
-	ToolsAllowlist: stringSet("read_file", "write_file", "edit_file", "grep_search", "glob_match", "run_shell"),
-	MaxTurns:       5,
+	ToolsAllowlist: stringSet("ExtractMemoryBatch"),
+	MaxTurns:       3,
 	PermissionMode: "inherit",
 }
 
@@ -249,17 +249,73 @@ func (c *ExtractionController) ExtractNow(ctx context.Context, state *AgentState
 		StorePath: c.Config.LongTermMemoryStore, TurnCount: state.TurnCount, UserTurnCount: state.UserTurnCount, State: state})
 }
 
+// IngestMessages persists the next raw message batch and its searchable chunks
+// without waiting for semantic enrichment. It advances only the ingestion
+// cursor, so extraction can retry independently.
+func (c *ExtractionController) IngestMessages(ctx context.Context, state *AgentState) (int, error) {
+	if state == nil {
+		return 0, fmt.Errorf("agent state is required")
+	}
+	storePath := c.Config.LongTermMemoryStore
+	sessionID := firstNonEmptyString(c.SourceSessionID, state.MemorySessionID)
+	if sessionID == "" {
+		sessionID = "runtime-" + longmemory.ProjectScopeKey(c.Config.CWD) + "-" + firstNonEmptyString(c.SourceAgentID, "main")
+	}
+	consumerID := "long-term-extraction:" + firstNonEmptyString(c.SourceAgentID, "main")
+	start := 0
+	store, err := longmemory.Open(ctx, storePath)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	if _, index, cursorErr := store.GetCursor(ctx, consumerID+":ingestion", sessionID); cursorErr == nil {
+		start = index + 1
+	} else if !errors.Is(cursorErr, sql.ErrNoRows) {
+		return 0, cursorErr
+	}
+	if start >= len(state.Messages) {
+		return 0, nil
+	}
+	end := minIntAgent(start+32, len(state.Messages))
+	messages := append([]map[string]any(nil), state.Messages[start:end]...)
+	messageIDs := make([]string, len(messages))
+	for offset, message := range messages {
+		messageIDs[offset] = extractionMessageID(sessionID, start+offset, message)
+	}
+	payload := &extractionContext{Messages: messages, MessageIDs: messageIDs, StartIndex: start, EndIndex: end - 1,
+		SessionID: sessionID, ConsumerID: consumerID, StorePath: storePath, TurnCount: state.TurnCount,
+		UserTurnCount: state.UserTurnCount, State: state}
+	batch := c.buildRawIngestionBatch(ctx, payload, firstNonEmptyString(c.SourceAgentID, "main"))
+	if err := store.CommitExtraction(ctx, batch); err != nil {
+		return 0, fmt.Errorf("commit raw memory ingestion: %w", err)
+	}
+	return len(messages), nil
+}
+
+func minIntAgent(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payload *extractionContext) (summary string, runErr error) {
 	storePath := firstNonEmptyString(payload.StorePath, c.Config.LongTermMemoryStore)
 	store, err := longmemory.Open(ctx, storePath)
 	if err != nil {
+		if payload.State != nil {
+			payload.State.MemoryExtractionCursor = payload.StartIndex
+		}
 		return "", err
 	}
 	defer store.Close()
+	jobMessages, jobMessageIDs := persistentExtractionMessages(payload.Messages, payload.MessageIDs)
 	jobPayload, _ := json.Marshal(map[string]any{
 		"session_id": payload.SessionID, "consumer_id": payload.ConsumerID,
 		"start_message_index": payload.StartIndex, "end_message_index": payload.EndIndex,
-		"message_ids": payload.MessageIDs,
+		"message_ids": jobMessageIDs, "messages": jobMessages, "cwd": c.Config.CWD,
+		"source_agent_id": c.SourceAgentID, "source_team_name": c.SourceTeamName,
+		"source_team_agent_id": c.SourceTeamAgentID, "source_team_session_id": c.SourceTeamSessionID,
 	})
 	job := longmemory.Job{Kind: "extraction", ScopeType: longmemory.ScopeProject,
 		ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD), Payload: string(jobPayload)}
@@ -267,6 +323,9 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		return "", fmt.Errorf("enqueue memory extraction: %w", err)
 	}
 	job.JobID = longmemory.StableID(job.ScopeType, job.ScopeKey, job.Kind, job.Payload)
+	if err := store.StartJob(ctx, job.JobID); err != nil {
+		return "", fmt.Errorf("start memory extraction job: %w", err)
+	}
 	defer func() {
 		jobCtx := context.WithoutCancel(ctx)
 		if runErr != nil {
@@ -277,6 +336,10 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	}()
 	agentID := firstNonEmptyString(c.SourceAgentID, "main")
 	scopes := longmemory.RuntimeScopes(c.Config.CWD, agentID, c.SourceTeamName, c.SourceTeamAgentID)
+	rawBatch := c.buildRawIngestionBatch(ctx, payload, agentID)
+	if err := store.CommitExtraction(ctx, rawBatch); err != nil {
+		return "", fmt.Errorf("commit raw memory ingestion: %w", err)
+	}
 	existing, _ := store.Search(ctx, longmemory.SearchOptions{
 		Query:         extractionSearchText(payload.Messages),
 		Scopes:        scopes,
@@ -285,20 +348,24 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	})
 	prompt := BuildLongTermExtractionPromptWithIDs(payload.Messages, payload.MessageIDs, existing)
 	systemPrompt := longTermExtractionSystemPrompt()
-	filtered := coretools.NewToolRegistry()
 	runner := c.Runner
 	if runner == nil {
 		runner = c.defaultRunner(payload.State)
 	}
-	result, err := runner(ctx, prompt, systemPrompt, filtered, coretools.ExecutionContext{
+	result, err := runner(ctx, prompt, systemPrompt, coretools.NewToolRegistry(), coretools.ExecutionContext{
 		"system_prompt_override": systemPrompt,
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("extract semantic memory: %w", err)
 	}
 	batch := ParseLongTermExtractionBatch(result)
 	var candidates []longmemory.Candidate
-	for _, candidate := range batch.Memories {
+	acceptedMemoryIndexes := map[int]int{}
+	validMessageIDs := map[string]struct{}{}
+	for _, messageID := range payload.MessageIDs {
+		validMessageIDs[messageID] = struct{}{}
+	}
+	for memoryIndex, candidate := range batch.Memories {
 		action := normalizeMemoryAction(candidate.Action)
 		if action == "ignore" {
 			continue
@@ -334,10 +401,26 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		if requiresMemoryConfirmation(c.Config, candidate) {
 			candidate.Status = longmemory.StatusPending
 		}
-		candidate.SourceMessageIDs = append([]string(nil), payload.MessageIDs...)
+		sources := append([]string(nil), candidate.SourceMessageIDs...)
+		for _, span := range batch.Spans {
+			if span.MemoryIndex == memoryIndex {
+				sources = append(sources, span.MessageID)
+			}
+		}
+		candidate.SourceMessageIDs = candidate.SourceMessageIDs[:0]
+		for _, source := range sources {
+			if _, ok := validMessageIDs[source]; ok && !containsStringAgent(candidate.SourceMessageIDs, source) {
+				candidate.SourceMessageIDs = append(candidate.SourceMessageIDs, source)
+			}
+		}
+		if len(candidate.SourceMessageIDs) == 0 {
+			continue
+		}
+		acceptedMemoryIndexes[memoryIndex] = len(candidates)
 		candidates = append(candidates, candidate)
 	}
 	batch.Memories = candidates
+	batch.Facts, batch.Spans, batch.Edges = remapAcceptedExtractionReferences(batch.Facts, batch.Spans, batch.Edges, acceptedMemoryIndexes)
 	now := time.Now().UTC()
 	batch.Episode = &longmemory.Episode{
 		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
@@ -355,9 +438,17 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 			continue
 		}
 		batch.EpisodeSpans = append(batch.EpisodeSpans, longmemory.EvidenceSpan{
-			MessageID: payload.MessageIDs[index], Text: text,
+			MessageID: payload.MessageIDs[index], Role: role, Text: text,
 			OccurredAt: extractionMessageOccurredAt(message, batch.Episode.OccurredAt),
 		})
+	}
+	sessionIndexID := longmemory.StableID(batch.Episode.ScopeType, batch.Episode.ScopeKey, "session-index", batch.Episode.SessionID)
+	for _, span := range batch.EpisodeSpans {
+		span.MemoryID = sessionIndexID
+		span.ScopeType = batch.Episode.ScopeType
+		span.ScopeKey = batch.Episode.ScopeKey
+		span.SessionID = batch.Episode.SessionID
+		batch.Chunks = append(batch.Chunks, longmemory.BuildEvidenceChunks(span)...)
 	}
 	for index := range batch.Facts {
 		memoryIndex := batch.Facts[index].MemoryIndex
@@ -416,6 +507,33 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 				ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD), Payload: fmt.Sprintf(`{"session_id":%q}`, payload.SessionID)})
 		}
 	}
+	if c.Config.MemoryEmbeddingEnabled && len(batch.Chunks) > 0 {
+		if embedder, embedErr := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); embedErr == nil {
+			texts := make([]string, len(batch.Chunks))
+			for index := range batch.Chunks {
+				texts[index] = batch.Chunks[index].Text
+			}
+			if vectors, embedErr := embedder.Embed(ctx, texts, longmemory.EmbeddingPassage); embedErr == nil {
+				for index, vector := range vectors {
+					if index >= len(batch.Chunks) {
+						break
+					}
+					batch.ChunkEmbeddings = append(batch.ChunkEmbeddings, longmemory.MemoryEmbedding{
+						MemoryID: batch.Chunks[index].ChunkID, Model: embedder.Model(),
+						ContentHash: batch.Chunks[index].ContentHash, Vector: vector,
+					})
+				}
+			}
+		}
+	}
+	if c.Config.MemoryEmbeddingEnabled && batch.Episode != nil && batch.SessionEmbedding == nil {
+		if embedder, embedErr := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); embedErr == nil {
+			if vectors, embedErr := embedder.Embed(ctx, []string{batch.Episode.Content}, longmemory.EmbeddingPassage); embedErr == nil && len(vectors) == 1 {
+				batch.SessionEmbedding = &longmemory.MemoryEmbedding{Model: embedder.Model(),
+					ContentHash: longmemory.StableID(longmemory.ScopeProject, "embedding", "session", batch.Episode.Content), Vector: vectors[0]}
+			}
+		}
+	}
 	batch.ConsumerID = payload.ConsumerID
 	batch.SessionID = payload.SessionID
 	batch.LastMessageIndex = payload.EndIndex
@@ -450,15 +568,210 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	return formatted, nil
 }
 
+func persistentExtractionMessages(messages []map[string]any, messageIDs []string) ([]map[string]any, []string) {
+	result := make([]map[string]any, 0, len(messages))
+	ids := make([]string, 0, len(messages))
+	for index, message := range messages {
+		if index >= len(messageIDs) {
+			break
+		}
+		role := strings.ToLower(strings.TrimSpace(stringFromAny(message["role"])))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := visibleMessageText(message["content"])
+		if text == "" {
+			continue
+		}
+		stored := map[string]any{"role": role, "content": text, "id": messageIDs[index]}
+		if timestamp := stringFromAny(message["timestamp"]); timestamp != "" {
+			stored["timestamp"] = timestamp
+		}
+		result = append(result, stored)
+		ids = append(ids, messageIDs[index])
+	}
+	return result, ids
+}
+
+func (c *ExtractionController) ProcessExtractionJob(ctx context.Context, job longmemory.Job) error {
+	if job.Kind != "extraction" {
+		return fmt.Errorf("unsupported memory job kind %q", job.Kind)
+	}
+	var payload struct {
+		SessionID           string           `json:"session_id"`
+		ConsumerID          string           `json:"consumer_id"`
+		StartMessageIndex   int              `json:"start_message_index"`
+		EndMessageIndex     int              `json:"end_message_index"`
+		MessageIDs          []string         `json:"message_ids"`
+		Messages            []map[string]any `json:"messages"`
+		CWD                 string           `json:"cwd"`
+		SourceAgentID       string           `json:"source_agent_id"`
+		SourceTeamName      string           `json:"source_team_name"`
+		SourceTeamAgentID   string           `json:"source_team_agent_id"`
+		SourceTeamSessionID string           `json:"source_team_session_id"`
+	}
+	if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil {
+		return fmt.Errorf("decode memory extraction job: %w", err)
+	}
+	controller := NewExtractionController(c.Config, c.BaseRegistry, c.ExtractionConfig)
+	controller.Runner = c.Runner
+	if strings.TrimSpace(payload.CWD) != "" {
+		controller.Config.CWD = payload.CWD
+	}
+	controller.SourceAgentID = payload.SourceAgentID
+	controller.SourceTeamName = payload.SourceTeamName
+	controller.SourceTeamAgentID = payload.SourceTeamAgentID
+	controller.SourceTeamSessionID = payload.SourceTeamSessionID
+	controller.SourceSessionID = payload.SessionID
+	if len(payload.Messages) == 0 && len(payload.MessageIDs) > 0 {
+		store, err := longmemory.Open(ctx, controller.Config.LongTermMemoryStore)
+		if err != nil {
+			return err
+		}
+		spans, loadErr := store.EvidenceSpansByMessageIDs(ctx, payload.SessionID, payload.MessageIDs)
+		_ = store.Close()
+		if loadErr != nil {
+			return loadErr
+		}
+		payload.Messages = make([]map[string]any, 0, len(spans))
+		payload.MessageIDs = payload.MessageIDs[:0]
+		for _, span := range spans {
+			role := span.Role
+			if role == "" {
+				role = "unknown"
+			}
+			payload.Messages = append(payload.Messages, map[string]any{"role": role, "content": span.Text,
+				"id": span.MessageID, "timestamp": span.OccurredAt.Format(time.RFC3339)})
+			payload.MessageIDs = append(payload.MessageIDs, span.MessageID)
+		}
+	}
+	if len(payload.Messages) == 0 || len(payload.Messages) != len(payload.MessageIDs) {
+		return errors.New("memory extraction job does not contain a complete visible message window")
+	}
+	_, err := controller.runLongTermExtraction(ctx, &extractionContext{Messages: payload.Messages,
+		MessageIDs: payload.MessageIDs, StartIndex: payload.StartMessageIndex, EndIndex: payload.EndMessageIndex,
+		SessionID: payload.SessionID, ConsumerID: payload.ConsumerID, StorePath: controller.Config.LongTermMemoryStore})
+	return err
+}
+
+func remapAcceptedExtractionReferences(facts []longmemory.Fact, spans []longmemory.EvidenceSpan, edges []longmemory.Edge,
+	accepted map[int]int) ([]longmemory.Fact, []longmemory.EvidenceSpan, []longmemory.Edge) {
+	filteredFacts := facts[:0]
+	for _, fact := range facts {
+		if index, ok := accepted[fact.MemoryIndex]; ok {
+			fact.MemoryIndex = index
+			filteredFacts = append(filteredFacts, fact)
+		}
+	}
+	filteredSpans := spans[:0]
+	for _, span := range spans {
+		if index, ok := accepted[span.MemoryIndex]; ok {
+			span.MemoryIndex = index
+			filteredSpans = append(filteredSpans, span)
+		}
+	}
+	filteredEdges := edges[:0]
+	for _, edge := range edges {
+		from, fromOK := accepted[edge.FromMemoryIndex]
+		to, toOK := accepted[edge.ToMemoryIndex]
+		if fromOK && toOK {
+			edge.FromMemoryIndex = from
+			edge.ToMemoryIndex = to
+			filteredEdges = append(filteredEdges, edge)
+		}
+	}
+	return filteredFacts, filteredSpans, filteredEdges
+}
+
 func (c *ExtractionController) defaultRunner(parentState *AgentState) ExtractionRunner {
-	return func(ctx context.Context, prompt, systemPrompt string, filteredRegistry *coretools.ToolRegistry, extraContext coretools.ExecutionContext) (string, error) {
+	return func(ctx context.Context, prompt, systemPrompt string, _ *coretools.ToolRegistry, extraContext coretools.ExecutionContext) (string, error) {
 		model := c.Config.APIModel
 		if c.Config.ExtractionModel != nil && *c.Config.ExtractionModel != "" {
 			model = *c.Config.ExtractionModel
 		}
-		sub := NewSubAgent(c.Config, filteredRegistry, ExtractionAgentDef, parentState, model, "auto-memory-extract", extraContext)
-		return sub.Run(ctx, prompt)
+		extractionTool := newExtractMemoryBatchTool()
+		registry := coretools.NewToolRegistry(extractionTool)
+		sub := NewSubAgent(c.Config, registry, ExtractionAgentDef, parentState, model, "auto-memory-extract", extraContext)
+		if _, err := sub.Run(ctx, prompt); err != nil {
+			return "", err
+		}
+		result, ok, err := extractionTool.batchJSON()
+		if err != nil {
+			return "", fmt.Errorf("encode extracted memory batch: %w", err)
+		}
+		if !ok {
+			return "", errors.New("memory extraction model did not call ExtractMemoryBatch")
+		}
+		return result, nil
 	}
+}
+
+func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, payload *extractionContext, agentID string) longmemory.ExtractionBatch {
+	now := time.Now().UTC()
+	episode := &longmemory.Episode{
+		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+		SessionID: payload.SessionID, TeamSessionID: c.SourceTeamSessionID, AgentID: agentID,
+		MessageIDs: append([]string(nil), payload.MessageIDs...), Kind: "conversation",
+		Content: extractionSearchText(payload.Messages), OccurredAt: extractionOccurredAt(payload.Messages, now), ObservedAt: now,
+	}
+	batch := longmemory.ExtractionBatch{Episode: episode, ConsumerID: payload.ConsumerID + ":ingestion",
+		SessionID: payload.SessionID, LastMessageIndex: payload.EndIndex}
+	if len(payload.MessageIDs) > 0 {
+		batch.LastMessageID = payload.MessageIDs[len(payload.MessageIDs)-1]
+	}
+	for index, message := range payload.Messages {
+		if index >= len(payload.MessageIDs) {
+			break
+		}
+		role := strings.ToLower(strings.TrimSpace(stringFromAny(message["role"])))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := visibleMessageText(message["content"])
+		if text == "" {
+			continue
+		}
+		batch.EpisodeSpans = append(batch.EpisodeSpans, longmemory.EvidenceSpan{MessageID: payload.MessageIDs[index],
+			Role: role, Text: text, OccurredAt: extractionMessageOccurredAt(message, episode.OccurredAt)})
+	}
+	sessionIndexID := longmemory.StableID(episode.ScopeType, episode.ScopeKey, "session-index", episode.SessionID)
+	for _, span := range batch.EpisodeSpans {
+		span.MemoryID = sessionIndexID
+		span.ScopeType = episode.ScopeType
+		span.ScopeKey = episode.ScopeKey
+		span.SessionID = episode.SessionID
+		batch.Chunks = append(batch.Chunks, longmemory.BuildEvidenceChunks(span)...)
+	}
+	if c.Config.MemoryEmbeddingEnabled {
+		if embedder, err := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); err == nil {
+			if len(batch.Chunks) > 0 {
+				texts := make([]string, len(batch.Chunks))
+				for index := range batch.Chunks {
+					texts[index] = batch.Chunks[index].Text
+				}
+				if vectors, err := embedder.Embed(ctx, texts, longmemory.EmbeddingPassage); err == nil {
+					for index, vector := range vectors {
+						if index >= len(batch.Chunks) {
+							break
+						}
+						batch.ChunkEmbeddings = append(batch.ChunkEmbeddings, longmemory.MemoryEmbedding{
+							MemoryID: batch.Chunks[index].ChunkID, Model: embedder.Model(),
+							ContentHash: batch.Chunks[index].ContentHash, Vector: vector})
+					}
+				}
+			}
+			if vectors, err := embedder.Embed(ctx, []string{episode.Content}, longmemory.EmbeddingPassage); err == nil && len(vectors) == 1 {
+				batch.SessionEmbedding = &longmemory.MemoryEmbedding{Model: embedder.Model(),
+					ContentHash: longmemory.StableID(episode.ScopeType, episode.ScopeKey, episode.SessionID, episode.Content), Vector: vectors[0]}
+			}
+		}
+		if len(batch.ChunkEmbeddings) != len(batch.Chunks) || batch.SessionEmbedding == nil {
+			batch.Jobs = append(batch.Jobs, longmemory.Job{Kind: "embedding_backfill",
+				ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+				Payload: fmt.Sprintf(`{"session_id":%q,"source":"raw_ingestion"}`, payload.SessionID)})
+		}
+	}
+	return batch
 }
 
 func BuildLongTermExtractionPrompt(messagesSlice []map[string]any, existing []longmemory.Entry) string {
@@ -495,7 +808,7 @@ func BuildLongTermExtractionPromptWithIDs(messagesSlice []map[string]any, messag
 
 ## Task
 
-Extract only durable cross-session memories. Return JSON only, matching this shape:
+Extract only durable cross-session memories. Call ExtractMemoryBatch exactly once with this shape:
 
 {
   "memories": [
@@ -513,6 +826,7 @@ Extract only durable cross-session memories. Return JSON only, matching this sha
       "entities": ["entity"],
       "importance": 0.0,
       "confidence": 0.0,
+	  "source_message_ids": ["exact source message_id"],
       "source_paths": ["optional path"]
     }
   ],
@@ -526,16 +840,6 @@ Extract only durable cross-session memories. Return JSON only, matching this sha
       "confidence": 0.0,
       "valid_from": "RFC3339 when known, otherwise empty",
       "valid_until": "RFC3339 when known, otherwise empty"
-    }
-  ],
-  "evidence_spans": [
-    {
-      "memory_index": 0,
-      "message_id": "exact source message_id",
-      "text": "exact verbatim source span supporting this memory",
-      "start_rune": 0,
-      "end_rune": 0,
-      "occurred_at": "RFC3339 when known, otherwise empty"
     }
   ],
   "edges": [
@@ -556,7 +860,7 @@ Rules:
 - Use procedural for durable behavior rules.
 - Compare against existing memories. Use create for new knowledge, update to revise the same durable memory in place, supersede when a new memory replaces an outdated one, and ignore for duplicates or weak candidates.
 - For update and supersede, set target_memory_id to the relevant existing memory_id.
-- Every saved memory must include at least one evidence_spans item with an exact source message_id and verbatim text from that message.
+- Every saved memory must include at least one source_message_ids entry copied exactly from the recent conversation. The runtime attaches the original message text; do not reproduce or rewrite evidence text.
 - Facts must use memory_index to reference the zero-based memories array. Extract valid_from/valid_until from the conversation when present; do not use the extraction time as event time.
 - Core blocks are only for compact, repeatedly useful preferences, project invariants, or team policies. Do not copy ordinary episodic details into core blocks.
 - Return {"memories":[]} when nothing should be remembered.`
@@ -631,7 +935,7 @@ func normalizeMemoryAction(action string) string {
 
 func longTermExtractionSystemPrompt() string {
 	return `You are LuminaCode's long-term memory extraction engine.
-You produce structured JSON memory candidates only.
+You must submit structured memory candidates by calling ExtractMemoryBatch exactly once.
 You never write files.
 You never include secrets.
 You separate session history from cross-session long-term memory.
@@ -644,6 +948,15 @@ func extractionSearchText(messagesSlice []map[string]any) string {
 		parts = append(parts, formatExtractionMessageContent(msg["content"]))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func containsStringAgent(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func requiresMemoryConfirmation(cfg config.Config, candidate longmemory.Candidate) bool {
@@ -710,28 +1023,31 @@ func extractionMessageOccurredAt(message map[string]any, fallback time.Time) tim
 }
 
 func validateExtractionSpans(spans []longmemory.EvidenceSpan, candidates []longmemory.Candidate, payload *extractionContext) []longmemory.EvidenceSpan {
-	byMessage := map[string]string{}
+	type sourceMessage struct {
+		text       string
+		role       string
+		occurredAt time.Time
+	}
+	byMessage := map[string]sourceMessage{}
 	for index, messageID := range payload.MessageIDs {
 		if index < len(payload.Messages) {
-			byMessage[messageID] = formatExtractionMessageContent(payload.Messages[index]["content"])
+			byMessage[messageID] = sourceMessage{text: formatExtractionMessageContent(payload.Messages[index]["content"]),
+				role:       strings.ToLower(strings.TrimSpace(stringFromAny(payload.Messages[index]["role"]))),
+				occurredAt: extractionMessageOccurredAt(payload.Messages[index], time.Now().UTC())}
 		}
 	}
 	var valid []longmemory.EvidenceSpan
-	for _, span := range spans {
-		if span.MemoryIndex < 0 || span.MemoryIndex >= len(candidates) {
-			continue
+	for memoryIndex, candidate := range candidates {
+		for _, messageID := range candidate.SourceMessageIDs {
+			source, ok := byMessage[messageID]
+			if !ok || strings.TrimSpace(source.text) == "" {
+				continue
+			}
+			valid = append(valid, longmemory.EvidenceSpan{MemoryIndex: memoryIndex,
+				ScopeType: candidate.ScopeType, ScopeKey: candidate.ScopeKey, SessionID: payload.SessionID,
+				MessageID: messageID, Role: source.role, Text: source.text, StartRune: 0,
+				EndRune: len([]rune(source.text)), OccurredAt: source.occurredAt})
 		}
-		source, ok := byMessage[span.MessageID]
-		if !ok || strings.TrimSpace(span.Text) == "" || !strings.Contains(source, span.Text) {
-			continue
-		}
-		span.ScopeType = candidates[span.MemoryIndex].ScopeType
-		span.ScopeKey = candidates[span.MemoryIndex].ScopeKey
-		span.SessionID = payload.SessionID
-		if span.OccurredAt.IsZero() {
-			span.OccurredAt = extractionOccurredAt(payload.Messages, time.Now().UTC())
-		}
-		valid = append(valid, span)
 	}
 	return valid
 }

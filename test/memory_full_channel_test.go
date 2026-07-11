@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"LuminaCode/agent"
 	"LuminaCode/api"
@@ -85,11 +86,11 @@ func TestMemoryExpansionForbiddenFieldFallsBackToAllChannels(t *testing.T) {
 		t.Fatalf("missing retrieval trace: traces=%#v err=%v", traces, err)
 	}
 	run := traces[0].Run
-	if !strings.Contains(run.ExpansionError, "forbidden field") {
-		t.Fatalf("expected forbidden expansion diagnostic, got %q", run.ExpansionError)
+	if run.ExpansionError != "" {
+		t.Fatalf("unknown routing fields should be ignored without discarding valid expansion: %q", run.ExpansionError)
 	}
-	if len(run.Expansion.Queries) != 0 {
-		t.Fatalf("invalid expansion must be discarded, got %#v", run.Expansion)
+	if len(run.Expansion.Queries) != 1 || run.Expansion.Queries[0] != "release test command" {
+		t.Fatalf("valid expansion fields must be retained, got %#v", run.Expansion)
 	}
 	if len(run.ChannelResults) != 6 {
 		t.Fatalf("all six channels must run, got %d", len(run.ChannelResults))
@@ -134,5 +135,32 @@ func TestMemoryExpansionReceivesOnlyVisibleRecentContext(t *testing.T) {
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(request), &decoded); err != nil || decoded["query"] != "Which package manager should I use?" {
 		t.Fatalf("raw query was not preserved: decoded=%#v err=%v", decoded, err)
+	}
+}
+
+func TestMemoryExpansionKeepsValidFieldsWhenTemporalInputIsPartiallyInvalid(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.MemoryQueryExpansionEnabled = true
+	cfg.MemoryQueryExpansionMaxQueries = 5
+	client := &expansionStreamClient{input: map[string]any{
+		"queries":  []any{"Aurora persistence decision"},
+		"entities": []any{"Project Aurora"},
+		"temporal_constraints": []any{map[string]any{
+			"from": "May 4, 2026", "to": "not a date", "order": "sideways", "ignored": "value",
+		}},
+		"channel": "bm25",
+	}}
+	expansion, _, expansionErr := agent.ExpandMemoryQuery(context.Background(), cfg,
+		longmemory.MemoryQuery{Text: "What did Aurora decide?", Timestamp: time.Now().UTC()}, longmemory.MemoryCatalog{},
+		func(context.Context, string) (api.LLMClient, error) { return client, nil })
+	if expansionErr != "" {
+		t.Fatalf("partial temporal input discarded the whole expansion: %s", expansionErr)
+	}
+	if len(expansion.Queries) != 1 || len(expansion.Entities) != 1 || len(expansion.TemporalConstraints) != 1 {
+		t.Fatalf("valid expansion fields were not retained: %#v", expansion)
+	}
+	constraint := expansion.TemporalConstraints[0]
+	if constraint.From.IsZero() || !constraint.To.IsZero() || constraint.Order != "none" {
+		t.Fatalf("temporal fields were not normalized independently: %#v", constraint)
 	}
 }

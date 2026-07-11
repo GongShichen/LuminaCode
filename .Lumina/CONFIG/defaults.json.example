@@ -70,6 +70,7 @@
   "memory_core_context_tokens": 512,
   "memory_context_target_tokens": 2400,
   "memory_retrieval_local_timeout_seconds": 3.0,
+  "memory_evidence_neighbor_chunks": 1,
   "memory_query_expansion_enabled": true,
   "memory_query_expansion_model": "inherit",
   "memory_query_expansion_timeout_seconds": 8.0,

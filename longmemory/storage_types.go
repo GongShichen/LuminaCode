@@ -70,6 +70,7 @@ const (
 	EdgeSupersedes  EdgeType = "supersedes"
 	EdgeDerivedFrom EdgeType = "derived_from"
 	EdgeNextEvent   EdgeType = "next_event"
+	EdgeContains    EdgeType = "contains"
 )
 
 type Edge struct {
@@ -95,12 +96,31 @@ type EvidenceSpan struct {
 	ScopeKey    string    `json:"scope_key"`
 	SessionID   string    `json:"session_id"`
 	MessageID   string    `json:"message_id"`
+	Role        string    `json:"role,omitempty"`
 	SourcePath  string    `json:"source_path,omitempty"`
 	Text        string    `json:"text"`
 	StartRune   int       `json:"start_rune"`
 	EndRune     int       `json:"end_rune"`
 	OccurredAt  time.Time `json:"occurred_at"`
 	ContentHash string    `json:"content_hash"`
+}
+
+type EvidenceChunk struct {
+	ChunkID        string    `json:"chunk_id"`
+	SpanID         string    `json:"span_id"`
+	ParentMemoryID string    `json:"parent_memory_id"`
+	ScopeType      ScopeType `json:"scope_type"`
+	ScopeKey       string    `json:"scope_key"`
+	SessionID      string    `json:"session_id"`
+	MessageID      string    `json:"message_id"`
+	Role           string    `json:"role"`
+	Text           string    `json:"text"`
+	StartRune      int       `json:"start_rune"`
+	EndRune        int       `json:"end_rune"`
+	OccurredAt     time.Time `json:"occurred_at"`
+	ValidFrom      time.Time `json:"valid_from"`
+	ValidUntil     time.Time `json:"valid_until"`
+	ContentHash    string    `json:"content_hash"`
 }
 
 type CoreBlock struct {
@@ -154,10 +174,13 @@ type MemoryQuery struct {
 }
 
 type TemporalConstraint struct {
-	From  time.Time `json:"from,omitempty"`
-	To    time.Time `json:"to,omitempty"`
-	At    time.Time `json:"at,omitempty"`
-	Order string    `json:"order,omitempty"`
+	From     time.Time `json:"from,omitempty"`
+	To       time.Time `json:"to,omitempty"`
+	At       time.Time `json:"at,omitempty"`
+	Order    string    `json:"order,omitempty"`
+	FromText string    `json:"from_text,omitempty"`
+	ToText   string    `json:"to_text,omitempty"`
+	AtText   string    `json:"at_text,omitempty"`
 }
 
 type QueryExpansion struct {
@@ -168,6 +191,9 @@ type QueryExpansion struct {
 }
 
 type RetrievalCandidate struct {
+	DocumentID     string             `json:"document_id,omitempty"`
+	DocumentKind   string             `json:"document_kind,omitempty"`
+	ParentID       string             `json:"parent_id,omitempty"`
 	MemoryID       string             `json:"memory_id"`
 	Entry          Entry              `json:"entry"`
 	SourceSession  string             `json:"source_session_id,omitempty"`
@@ -182,6 +208,20 @@ type RetrievalCandidate struct {
 	GraphScore     float64            `json:"graph_score,omitempty"`
 	Selected       bool               `json:"selected"`
 	DropReason     string             `json:"drop_reason,omitempty"`
+}
+
+type RetrievalDocument struct {
+	DocumentID string    `json:"document_id"`
+	Kind       string    `json:"kind"`
+	ParentID   string    `json:"parent_id,omitempty"`
+	Scope      Scope     `json:"scope"`
+	SessionID  string    `json:"session_id,omitempty"`
+	MessageID  string    `json:"message_id,omitempty"`
+	Role       string    `json:"role,omitempty"`
+	Text       string    `json:"text"`
+	OccurredAt time.Time `json:"occurred_at,omitempty"`
+	ValidFrom  time.Time `json:"valid_from,omitempty"`
+	ValidUntil time.Time `json:"valid_until,omitempty"`
 }
 
 type ChannelResult struct {
@@ -211,6 +251,9 @@ type RetrievalRun struct {
 type MemoryCatalog struct {
 	TotalMemories int            `json:"total_memories"`
 	TotalEpisodes int            `json:"total_episodes"`
+	TotalSessions int            `json:"total_sessions"`
+	TotalChunks   int            `json:"total_chunks"`
+	TotalEntities int            `json:"total_entities"`
 	TotalFacts    int            `json:"total_facts"`
 	TotalEdges    int            `json:"total_edges"`
 	ByType        map[string]int `json:"by_type"`
@@ -220,6 +263,7 @@ type MemoryCatalog struct {
 }
 
 type CandidateScore struct {
+	DocumentID    string             `json:"document_id,omitempty"`
 	MemoryID      string             `json:"memory_id"`
 	Entry         Entry              `json:"entry"`
 	ChannelRanks  map[string]int     `json:"channel_ranks"`
@@ -231,7 +275,11 @@ type CandidateScore struct {
 }
 
 type Evidence struct {
+	DocumentID     string         `json:"document_id,omitempty"`
+	DocumentKind   string         `json:"document_kind,omitempty"`
+	ParentID       string         `json:"parent_id,omitempty"`
 	MemoryID       string         `json:"memory_id"`
+	DocumentIDs    []string       `json:"document_ids,omitempty"`
 	Title          string         `json:"title"`
 	Text           string         `json:"text"`
 	ScopeType      ScopeType      `json:"scope_type"`
@@ -249,11 +297,13 @@ type Evidence struct {
 }
 
 type EvidencePacket struct {
-	Plan            QueryPlan   `json:"plan"`
-	CoreBlocks      []CoreBlock `json:"core_blocks"`
-	Evidence        []Evidence  `json:"evidence"`
-	EstimatedTokens int         `json:"estimated_tokens"`
-	Warnings        []string    `json:"warnings,omitempty"`
+	Plan            QueryPlan           `json:"plan"`
+	CoreBlocks      []CoreBlock         `json:"core_blocks"`
+	Evidence        []Evidence          `json:"evidence"`
+	EstimatedTokens int                 `json:"estimated_tokens"`
+	Warnings        []string            `json:"warnings,omitempty"`
+	Documents       []RetrievalDocument `json:"documents,omitempty"`
+	SourceCoverage  map[string]int      `json:"source_coverage,omitempty"`
 }
 
 type RetrievalTrace struct {
@@ -278,6 +328,8 @@ type ExtractionBatch struct {
 	Edges            []Edge            `json:"edges"`
 	Spans            []EvidenceSpan    `json:"evidence_spans"`
 	EpisodeSpans     []EvidenceSpan    `json:"episode_spans,omitempty"`
+	Chunks           []EvidenceChunk   `json:"chunks,omitempty"`
+	ChunkEmbeddings  []MemoryEmbedding `json:"chunk_embeddings,omitempty"`
 	CoreBlocks       []CoreBlock       `json:"core_blocks"`
 	Embeddings       []MemoryEmbedding `json:"embeddings,omitempty"`
 	SessionEmbedding *MemoryEmbedding  `json:"session_embedding,omitempty"`

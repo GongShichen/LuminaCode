@@ -123,6 +123,9 @@ func RenderMarkdown(report Report) string {
 			fmt.Fprintf(&b, "| Avg evidence recall@k | %.2f%% |\n", report.Summary.Memory.AverageEvidenceRecallAtK*100)
 			fmt.Fprintf(&b, "| Avg evidence MRR | %.3f |\n", report.Summary.Memory.AverageEvidenceMRR)
 			fmt.Fprintf(&b, "| Avg source-session recall | %.2f%% |\n", report.Summary.Memory.AverageSourceSessionRecall*100)
+			fmt.Fprintf(&b, "| Avg gold-message recall | %.2f%% |\n", report.Summary.Memory.AverageGoldMessageRecall*100)
+			fmt.Fprintf(&b, "| Avg injected chunk recall | %.2f%% |\n", report.Summary.Memory.AverageInjectedChunkRecall*100)
+			fmt.Fprintf(&b, "| Avg injected text coverage | %.2f%% |\n", report.Summary.Memory.AverageInjectedTextCoverage*100)
 		}
 		fmt.Fprintf(&b, "| Avg memory token estimate | %.0f |\n", report.Summary.Memory.AverageMemoryTokenEstimate)
 		fmt.Fprintf(&b, "| Avg memory/input token ratio | %.2f%% |\n", report.Summary.Memory.AverageMemoryTokenRatio*100)
@@ -284,6 +287,9 @@ func hasMemorySummary(summary MemorySummary) bool {
 		summary.AverageEvidenceRecallAtK > 0 ||
 		summary.AverageEvidenceMRR > 0 ||
 		summary.AverageSourceSessionRecall > 0 ||
+		summary.AverageGoldMessageRecall > 0 ||
+		summary.AverageInjectedChunkRecall > 0 ||
+		summary.AverageInjectedTextCoverage > 0 ||
 		summary.AverageMemoryTokenEstimate > 0 ||
 		summary.AverageMemoryTokenRatio > 0 ||
 		summary.AverageRetrievalDurationMS > 0 ||

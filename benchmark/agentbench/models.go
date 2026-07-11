@@ -101,6 +101,8 @@ type CaseResult struct {
 type MemoryHit struct {
 	Rank            int      `json:"rank"`
 	MemoryID        string   `json:"memory_id"`
+	DocumentKind    string   `json:"document_kind,omitempty"`
+	MessageID       string   `json:"message_id,omitempty"`
 	Title           string   `json:"title"`
 	SourceSessionID string   `json:"source_session_id,omitempty"`
 	Tags            []string `json:"tags,omitempty"`
@@ -119,6 +121,13 @@ type MemoryMetrics struct {
 	GoldSourceSessionCount    int      `json:"gold_source_session_count,omitempty"`
 	GoldSourceSessionHitCount int      `json:"gold_source_session_hit_count,omitempty"`
 	SourceSessionRecall       float64  `json:"source_session_recall,omitempty"`
+	GoldMessageCount          int      `json:"gold_message_count,omitempty"`
+	GoldMessageHitCount       int      `json:"gold_message_hit_count,omitempty"`
+	GoldMessageRecall         float64  `json:"gold_message_recall,omitempty"`
+	GoldChunkCount            int      `json:"gold_chunk_count,omitempty"`
+	GoldChunkHitCount         int      `json:"gold_chunk_hit_count,omitempty"`
+	InjectedChunkRecall       float64  `json:"injected_chunk_recall,omitempty"`
+	InjectedTextCoverage      float64  `json:"injected_text_coverage,omitempty"`
 	MemoryTokenEstimate       int      `json:"memory_token_estimate,omitempty"`
 	MemoryTokenRatio          float64  `json:"memory_token_ratio,omitempty"`
 	RetrievalRuns             int      `json:"retrieval_runs,omitempty"`
@@ -172,6 +181,9 @@ type MemorySummary struct {
 	AverageEvidenceRecallAtK       float64        `json:"average_evidence_recall_at_k,omitempty"`
 	AverageEvidenceMRR             float64        `json:"average_evidence_mrr,omitempty"`
 	AverageSourceSessionRecall     float64        `json:"average_source_session_recall,omitempty"`
+	AverageGoldMessageRecall       float64        `json:"average_gold_message_recall,omitempty"`
+	AverageInjectedChunkRecall     float64        `json:"average_injected_chunk_recall,omitempty"`
+	AverageInjectedTextCoverage    float64        `json:"average_injected_text_coverage,omitempty"`
 	AverageMemoryTokenEstimate     float64        `json:"average_memory_token_estimate,omitempty"`
 	AverageMemoryTokenRatio        float64        `json:"average_memory_token_ratio,omitempty"`
 	AverageRetrievalDurationMS     float64        `json:"average_retrieval_duration_ms,omitempty"`

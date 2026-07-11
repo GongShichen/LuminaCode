@@ -10,12 +10,14 @@ import (
 )
 
 type MaintenanceResult struct {
-	Embedded     int `json:"embedded"`
-	Enriched     int `json:"enriched"`
-	Consolidated int `json:"consolidated"`
-	Linked       int `json:"linked"`
-	Promoted     int `json:"promoted"`
-	Archived     int `json:"archived"`
+	Embedded        int `json:"embedded"`
+	ChunkEmbedded   int `json:"chunk_embedded"`
+	SessionEmbedded int `json:"session_embedded"`
+	Enriched        int `json:"enriched"`
+	Consolidated    int `json:"consolidated"`
+	Linked          int `json:"linked"`
+	Promoted        int `json:"promoted"`
+	Archived        int `json:"archived"`
 }
 
 func (s *Store) EnqueueJob(ctx context.Context, job Job) error {
@@ -26,6 +28,16 @@ func (s *Store) EnqueueJob(ctx context.Context, job Job) error {
 		THEN memory_jobs.status ELSE 'pending' END, available_at=excluded.available_at, updated_at=excluded.updated_at`,
 		job.JobID, job.Kind, job.ScopeType, job.ScopeKey, job.Payload, job.Status, job.Attempts, job.LastError,
 		formatTime(job.AvailableAt), formatTime(job.CreatedAt), formatTime(job.UpdatedAt))
+	return err
+}
+
+func (s *Store) StartJob(ctx context.Context, jobID string) error {
+	if strings.TrimSpace(jobID) == "" {
+		return errors.New("memory job id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE memory_jobs SET status='running',
+		attempts=attempts+CASE WHEN status='running' THEN 0 ELSE 1 END,
+		updated_at=? WHERE job_id=?`, formatTime(time.Now().UTC()), jobID)
 	return err
 }
 
@@ -168,6 +180,53 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 			}
 		}
 	}
+	chunks, err := s.ChunksMissingEmbedding(ctx, embedder.Model(), limit)
+	if err != nil {
+		return result, err
+	}
+	if len(chunks) > 0 {
+		texts := make([]string, len(chunks))
+		for index := range chunks {
+			texts[index] = chunks[index].Text
+		}
+		vectors, err := embedder.Embed(ctx, texts, EmbeddingPassage)
+		if err != nil {
+			return result, err
+		}
+		for index, chunk := range chunks {
+			if index >= len(vectors) {
+				break
+			}
+			if err := s.UpsertChunkEmbedding(ctx, chunk.ChunkID, embedder.Model(), chunk.ContentHash, vectors[index]); err != nil {
+				return result, err
+			}
+			result.ChunkEmbedded++
+		}
+	}
+	sessions, err := s.sessionsMissingEmbedding(ctx, embedder.Model(), limit)
+	if err != nil {
+		return result, err
+	}
+	if len(sessions) > 0 {
+		texts := make([]string, len(sessions))
+		for index := range sessions {
+			texts[index] = sessions[index].Content
+		}
+		vectors, err := embedder.Embed(ctx, texts, EmbeddingPassage)
+		if err != nil {
+			return result, err
+		}
+		for index, session := range sessions {
+			if index >= len(vectors) {
+				break
+			}
+			if err := s.UpsertEmbedding(ctx, session.MemoryID, embedder.Model(),
+				StableID(session.ScopeType, session.ScopeKey, session.SourceSessionID, texts[index]), vectors[index]); err != nil {
+				return result, err
+			}
+			result.SessionEmbedded++
+		}
+	}
 	consolidated, err := s.Consolidate(ctx, embedder.Model(), maxInt(limit*8, 128))
 	if err != nil {
 		return result, err
@@ -178,6 +237,29 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 	archived, err := s.archiveExpiredLowValue(ctx)
 	result.Archived = archived
 	return result, err
+}
+
+func (s *Store) sessionsMissingEmbedding(ctx context.Context, model string, limit int) ([]Entry, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT s.index_id, s.scope_type, s.scope_key, s.session_id, s.summary,
+		s.keyphrases_json, s.entities_json, s.roles_json, s.started_at, s.ended_at
+		FROM memory_session_index s LEFT JOIN memory_embeddings e ON e.memory_id=s.index_id AND e.model=?
+		WHERE e.memory_id IS NULL OR e.content_hash<>s.content_hash ORDER BY s.ended_at LIMIT ?`, model, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []Entry
+	for rows.Next() {
+		entry, _, scanErr := scanSessionEntry(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
 }
 
 type ConsolidationResult struct {
@@ -287,7 +369,7 @@ func (s *Store) mergeDuplicateMemory(ctx context.Context, canonical, duplicate E
 	if err := upsertEntryTx(ctx, tx, &canonical); err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT session_id, message_id, source_path, text, start_rune, end_rune, occurred_at
+	rows, err := tx.QueryContext(ctx, `SELECT session_id, message_id, role, source_path, text, start_rune, end_rune, occurred_at
 		FROM memory_evidence_spans WHERE memory_id=?`, duplicate.MemoryID)
 	if err != nil {
 		return err
@@ -296,7 +378,7 @@ func (s *Store) mergeDuplicateMemory(ctx context.Context, canonical, duplicate E
 	for rows.Next() {
 		var span EvidenceSpan
 		var occurredAt string
-		if err := rows.Scan(&span.SessionID, &span.MessageID, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune, &occurredAt); err != nil {
+		if err := rows.Scan(&span.SessionID, &span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune, &occurredAt); err != nil {
 			rows.Close()
 			return err
 		}
@@ -485,9 +567,9 @@ func (s *Store) enrichLegacyMemory(ctx context.Context, entry Entry) (bool, erro
 	span := normalizeEvidenceSpan(EvidenceSpan{MemoryID: entry.MemoryID, ScopeType: entry.ScopeType,
 		ScopeKey: entry.ScopeKey, SessionID: entry.SourceSessionID, Text: text, OccurredAt: entry.ValidFrom})
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO memory_evidence_spans(span_id, memory_id, scope_type, scope_key,
-		session_id, message_id, source_path, text, start_rune, end_rune, occurred_at, content_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, span.SpanID, span.MemoryID, span.ScopeType, span.ScopeKey,
-		span.SessionID, span.MessageID, firstString(entry.SourcePaths), span.Text, span.StartRune, span.EndRune,
+		session_id, message_id, role, source_path, text, start_rune, end_rune, occurred_at, content_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, span.SpanID, span.MemoryID, span.ScopeType, span.ScopeKey,
+		span.SessionID, span.MessageID, span.Role, firstString(entry.SourcePaths), span.Text, span.StartRune, span.EndRune,
 		formatTime(span.OccurredAt), span.ContentHash)
 	return err == nil, err
 }
@@ -556,6 +638,6 @@ func firstString(values []string) string {
 }
 
 func (r MaintenanceResult) String() string {
-	return fmt.Sprintf("embedded=%d enriched=%d consolidated=%d linked=%d promoted=%d archived=%d",
-		r.Embedded, r.Enriched, r.Consolidated, r.Linked, r.Promoted, r.Archived)
+	return fmt.Sprintf("embedded=%d chunk_embedded=%d session_embedded=%d enriched=%d consolidated=%d linked=%d promoted=%d archived=%d",
+		r.Embedded, r.ChunkEmbedded, r.SessionEmbedded, r.Enriched, r.Consolidated, r.Linked, r.Promoted, r.Archived)
 }

@@ -22,6 +22,7 @@ import (
 	"LuminaCode/llmclient"
 	"LuminaCode/longmemory"
 	luminateam "LuminaCode/team"
+	coretools "LuminaCode/tools"
 
 	"github.com/gorilla/websocket"
 )
@@ -236,12 +237,7 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 	run := func() {
 		cfg := config.GetConfig()
-		if !cfg.LongTermMemoryEnabled || !cfg.MemoryEmbeddingEnabled {
-			return
-		}
-		embedder, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
+		if !cfg.LongTermMemoryEnabled {
 			return
 		}
 		store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
@@ -250,13 +246,34 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 			return
 		}
 		defer store.Close()
+		extractionJobs, _ := store.ClaimJobs(ctx, []string{"extraction"}, 8)
+		if len(extractionJobs) > 0 {
+			controller := agent.NewExtractionController(cfg, coretools.NewToolRegistry())
+			for _, job := range extractionJobs {
+				if err := controller.ProcessExtractionJob(ctx, job); err != nil {
+					_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
+					fmt.Fprintf(os.Stderr, "lumina-backend memory enrichment: %v\n", err)
+				} else {
+					_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
+				}
+			}
+		}
+		if !cfg.MemoryEmbeddingEnabled {
+			return
+		}
+		embedder, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
+			return
+		}
 		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "consolidation", "migration_backfill"}, 32)
 		if result, err := store.RunMaintenance(ctx, embedder, 32); err != nil {
 			for _, job := range jobs {
 				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
 			}
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance failed: %v\n", err)
-		} else if result.Embedded+result.Enriched+result.Archived > 0 {
+		} else if result.Embedded+result.ChunkEmbedded+result.SessionEmbedded+result.Enriched+result.Consolidated+
+			result.Linked+result.Promoted+result.Archived > 0 {
 			for _, job := range jobs {
 				_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
 			}
@@ -911,6 +928,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			MaxContextTokens: cfg.MemoryContextMaxTokens, LocalTimeout: time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
 			SessionID: p.SessionID, AgentID: "main",
 			ExpansionModel: expansionModel, ExpansionError: expansionError,
+			NeighborChunks: cfg.MemoryEvidenceNeighborChunks,
 		})
 		if err != nil {
 			return nil, toRPCError("memory_search_failed", err)

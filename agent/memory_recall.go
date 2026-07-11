@@ -87,6 +87,7 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 		ExcludeIDs:          memory.RecalledMemoryIDs(state.Messages),
 		ExpansionModel:      expansionModel,
 		ExpansionError:      expansionError,
+		NeighborChunks:      cfg.MemoryEvidenceNeighborChunks,
 	})
 	if err != nil || (len(result.Packet.Evidence) == 0 && len(result.Packet.CoreBlocks) == 0) {
 		return nil
@@ -106,7 +107,11 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 			MemoryType: memory.MemoryTypeUser, RecallID: "core-memory", Score: 1})
 	}
 	for _, evidence := range result.Packet.Evidence {
-		ids = append(ids, evidence.MemoryID)
+		if len(evidence.DocumentIDs) > 0 {
+			ids = append(ids, evidence.DocumentIDs...)
+		} else {
+			ids = append(ids, evidence.MemoryID)
+		}
 		recalls = append(recalls, MemoryRecall{
 			Filename:   evidence.MemoryID,
 			FilePath:   "longmemory://" + evidence.MemoryID,
@@ -206,9 +211,16 @@ func maxIntAgent(left, right int) int {
 func formatLongTermEvidence(evidence longmemory.Evidence) string {
 	parts := []string{
 		"Long-term evidence ID: " + evidence.MemoryID,
+		"Document kind: " + firstNonEmptyString(evidence.DocumentKind, "memory"),
 		"Scope: " + string(evidence.ScopeType) + "/" + evidence.ScopeKey,
 		"Type: " + string(evidence.MemoryType),
 		"Confidence: " + formatFloat(evidence.Confidence),
+	}
+	if role := strings.TrimSpace(stringFromAny(evidence.Metadata["role"])); role != "" {
+		parts = append(parts, "Provenance role: "+role)
+	}
+	if !evidence.OccurredAt.IsZero() {
+		parts = append(parts, "Occurred at: "+evidence.OccurredAt.Format(time.RFC3339))
 	}
 	if !evidence.ValidFrom.IsZero() {
 		parts = append(parts, "Valid from: "+evidence.ValidFrom.Format(time.RFC3339))
@@ -221,6 +233,9 @@ func formatLongTermEvidence(evidence longmemory.Evidence) string {
 	}
 	if len(evidence.SourceMessages) > 0 {
 		parts = append(parts, "Source messages: "+strings.Join(evidence.SourceMessages, ", "))
+	}
+	if len(evidence.DocumentIDs) > 1 {
+		parts = append(parts, "Evidence chunks: "+strings.Join(evidence.DocumentIDs, ", "))
 	}
 	if len(evidence.SourcePaths) > 0 {
 		parts = append(parts, "Source paths: "+strings.Join(evidence.SourcePaths, ", "))

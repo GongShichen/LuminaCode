@@ -11,13 +11,11 @@ import (
 	"LuminaCode/api"
 	"LuminaCode/config"
 	"LuminaCode/longmemory"
+
+	"github.com/araddon/dateparse"
 )
 
 type MemoryExpansionClientFactory func(context.Context, string) (api.LLMClient, error)
-
-var allowedExpansionFields = map[string]struct{}{
-	"queries": {}, "entities": {}, "temporal_constraints": {}, "relation_terms": {},
-}
 
 func expandMemoryQuery(ctx context.Context, cfg config.Config, query longmemory.MemoryQuery, catalog longmemory.MemoryCatalog, factory MemoryExpansionClientFactory) (longmemory.QueryExpansion, string, string) {
 	if !cfg.MemoryQueryExpansionEnabled || factory == nil {
@@ -111,11 +109,6 @@ func memoryExpansionToolSchema(maxQueries int) map[string]any {
 }
 
 func parseQueryExpansion(input map[string]any, maxQueries int) (longmemory.QueryExpansion, error) {
-	for key := range input {
-		if _, ok := allowedExpansionFields[key]; !ok {
-			return longmemory.QueryExpansion{}, fmt.Errorf("query expansion contains forbidden field %q", key)
-		}
-	}
 	if maxQueries <= 0 {
 		maxQueries = 5
 	}
@@ -131,30 +124,21 @@ func parseQueryExpansion(input map[string]any, maxQueries int) (longmemory.Query
 		for _, raw := range rawConstraints {
 			value, ok := raw.(map[string]any)
 			if !ok {
-				return longmemory.QueryExpansion{}, fmt.Errorf("temporal constraint must be an object")
-			}
-			for key := range value {
-				if key != "from" && key != "to" && key != "at" && key != "order" {
-					return longmemory.QueryExpansion{}, fmt.Errorf("temporal constraint contains forbidden field %q", key)
-				}
+				continue
 			}
 			constraint := longmemory.TemporalConstraint{Order: strings.ToLower(strings.TrimSpace(stringFromAny(value["order"])))}
 			if constraint.Order == "" {
 				constraint.Order = "none"
 			}
 			if constraint.Order != "none" && constraint.Order != "asc" && constraint.Order != "desc" {
-				return longmemory.QueryExpansion{}, fmt.Errorf("invalid temporal order %q", constraint.Order)
+				constraint.Order = "none"
 			}
-			var err error
-			if constraint.From, err = parseExpansionTime(value["from"]); err != nil {
-				return longmemory.QueryExpansion{}, fmt.Errorf("invalid temporal from: %w", err)
-			}
-			if constraint.To, err = parseExpansionTime(value["to"]); err != nil {
-				return longmemory.QueryExpansion{}, fmt.Errorf("invalid temporal to: %w", err)
-			}
-			if constraint.At, err = parseExpansionTime(value["at"]); err != nil {
-				return longmemory.QueryExpansion{}, fmt.Errorf("invalid temporal at: %w", err)
-			}
+			constraint.FromText = strings.TrimSpace(stringFromAny(value["from"]))
+			constraint.ToText = strings.TrimSpace(stringFromAny(value["to"]))
+			constraint.AtText = strings.TrimSpace(stringFromAny(value["at"]))
+			constraint.From, _ = parseExpansionTime(value["from"])
+			constraint.To, _ = parseExpansionTime(value["to"])
+			constraint.At, _ = parseExpansionTime(value["at"])
 			expansion.TemporalConstraints = append(expansion.TemporalConstraints, constraint)
 		}
 	}
@@ -168,7 +152,10 @@ func parseExpansionTime(value any) (time.Time, error) {
 	}
 	parsed, err := time.Parse(time.RFC3339, text)
 	if err != nil {
-		return time.Time{}, err
+		parsed, err = dateparse.ParseAny(text)
+		if err != nil {
+			return time.Time{}, err
+		}
 	}
 	return parsed.UTC(), nil
 }

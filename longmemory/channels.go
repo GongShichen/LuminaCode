@@ -46,9 +46,12 @@ func (s *Store) InspectCatalog(ctx context.Context, scopes []Scope) (MemoryCatal
 		return catalog, err
 	}
 	for table, target := range map[string]*int{
-		"memory_episodes": &catalog.TotalEpisodes,
-		"memory_facts":    &catalog.TotalFacts,
-		"memory_edges":    &catalog.TotalEdges,
+		"memory_episodes":        &catalog.TotalEpisodes,
+		"memory_session_index":   &catalog.TotalSessions,
+		"memory_evidence_chunks": &catalog.TotalChunks,
+		"memory_entities":        &catalog.TotalEntities,
+		"memory_facts":           &catalog.TotalFacts,
+		"memory_edges":           &catalog.TotalEdges,
 	} {
 		count, err := s.countScopedRows(ctx, table, scopes)
 		if err != nil {
@@ -78,6 +81,10 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 	if len(terms) == 0 {
 		return nil, nil
 	}
+	chunkEntries, chunkErr := s.SearchChunkEntities(ctx, queries, entities, scopes, limit)
+	if chunkErr != nil {
+		return nil, chunkErr
+	}
 	scopeSQL, scopeArgs := scopedClauses(scopes, "e.")
 	clauses := []string{"m.status=?"}
 	args := []any{StatusActive}
@@ -103,7 +110,7 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 	if err != nil {
 		return nil, err
 	}
-	entries = appendUniqueEntries(nil, entries)
+	entries = appendUniqueEntries(chunkEntries, entries)
 	for index := range entries {
 		entries[index].Score = float64(len(entries) - index)
 		entries[index].MatchReason = "entity"
@@ -170,7 +177,19 @@ func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []S
 	if len(sessions) > limit {
 		sessions = sessions[:limit]
 	}
-	return s.memoriesForSessions(ctx, sessions, scopes, limit)
+	chunkEntries, err := s.chunksForSessions(ctx, sessions, queries, scopes, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := s.memoriesForSessions(ctx, sessions, scopes, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries = appendUniqueEntries(chunkEntries, entries)
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
 }
 
 func (s *Store) memoriesForSessions(ctx context.Context, sessions []sessionRank, scopes []Scope, limit int) ([]Entry, error) {
@@ -322,6 +341,7 @@ func scanSessionEntry(scanner interface{ Scan(...any) error }) (Entry, string, e
 	entry.UpdatedAt = parseTime(endedAt)
 	entry.Status = StatusActive
 	entry.MatchReason = "session"
+	entry.DocumentKind = "session"
 	return entry, sessionID, nil
 }
 
@@ -330,6 +350,13 @@ func (s *Store) SearchTemporal(ctx context.Context, queries []string, constraint
 		limit = 40
 	}
 	combined := map[string]Entry{}
+	chunkEntries, chunkErr := s.SearchChunkTemporal(ctx, queries, constraints, scopes, limit)
+	if chunkErr != nil {
+		return nil, chunkErr
+	}
+	for _, entry := range chunkEntries {
+		combined[entry.MemoryID] = entry
+	}
 	for _, query := range normalizeStrings(queries) {
 		entries, err := s.Search(ctx, SearchOptions{Query: query, Scopes: scopes, IncludeExpired: true,
 			Limit: limit, MaxCandidates: limit * 2})

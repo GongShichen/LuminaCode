@@ -26,6 +26,7 @@ type HybridSearchOptions struct {
 	ExcludeIDs          map[string]struct{}
 	ExpansionModel      string
 	ExpansionError      string
+	NeighborChunks      int
 }
 
 func (s *Store) BuildEvidencePacket(ctx context.Context, plan QueryPlan, selected []CandidateScore, blocks []CoreBlock, opts HybridSearchOptions) (EvidencePacket, error) {
@@ -39,41 +40,121 @@ func (s *Store) BuildEvidencePacket(ctx context.Context, plan QueryPlan, selecte
 		packet.CoreBlocks = append(packet.CoreBlocks, block)
 		packet.EstimatedTokens += cost
 	}
+	packet.SourceCoverage = map[string]int{}
 	ids := make([]string, 0, len(selected))
 	for _, item := range selected {
-		ids = append(ids, item.MemoryID)
+		if item.Entry.DocumentKind == "chunk" {
+			ids = append(ids, item.MemoryID)
+		}
 	}
-	spans, err := s.ListEvidenceSpans(ctx, ids)
+	chunks, err := s.GetChunks(ctx, ids)
 	if err != nil {
 		return packet, err
+	}
+	chunkByID := map[string]EvidenceChunk{}
+	for _, chunk := range chunks {
+		chunkByID[chunk.ChunkID] = chunk
 	}
 	target := minInt(opts.TargetContextTokens, opts.MaxContextTokens)
 	if target <= 0 {
 		target = opts.MaxContextTokens
 	}
-	for _, item := range selected {
-		entry := item.Entry
-		text, occurredAt, sourceMessages := bestEvidenceText(plan.Query, entry, spans[entry.MemoryID])
+	seen := map[string]struct{}{}
+	appendEntry := func(entry Entry, score float64, sourceChunks []EvidenceChunk) {
+		if _, ok := seen[entry.MemoryID]; ok {
+			return
+		}
+		remaining := minInt(target, opts.MaxContextTokens) - packet.EstimatedTokens
+		if remaining <= 0 {
+			return
+		}
+		text := strings.TrimSpace(entry.Content)
+		if text == "" {
+			text = strings.TrimSpace(entry.Summary)
+		}
+		if text == "" || estimateTokens(entry.Title+" "+text) > remaining {
+			return
+		}
 		evidence := Evidence{
+			DocumentID: entry.MemoryID, DocumentKind: entry.DocumentKind, ParentID: entry.ParentID,
 			MemoryID: entry.MemoryID, Title: entry.Title, Text: text, ScopeType: entry.ScopeType,
 			ScopeKey: entry.ScopeKey, MemoryType: entry.MemoryType, SourceSession: entry.SourceSessionID,
 			SourceMessages: append([]string(nil), entry.SourceMessageIDs...), SourcePaths: append([]string(nil), entry.SourcePaths...),
-			OccurredAt: occurredAt, ValidFrom: entry.ValidFrom, ValidUntil: entry.ValidUntil,
-			Confidence: entry.Confidence, Score: item.FusedScore,
+			OccurredAt: entry.OccurredAt, ValidFrom: entry.ValidFrom, ValidUntil: entry.ValidUntil,
+			Confidence: entry.Confidence, Score: score, Metadata: map[string]any{"role": entry.Role},
 		}
-		for _, sourceMessage := range sourceMessages {
-			if sourceMessage != "" && !containsString(evidence.SourceMessages, sourceMessage) {
-				evidence.SourceMessages = append(evidence.SourceMessages, sourceMessage)
+		if len(sourceChunks) == 0 {
+			evidence.DocumentIDs = []string{entry.MemoryID}
+		} else {
+			for _, chunk := range sourceChunks {
+				evidence.DocumentIDs = append(evidence.DocumentIDs, chunk.ChunkID)
 			}
 		}
+		if evidence.OccurredAt.IsZero() {
+			evidence.OccurredAt = entry.ValidFrom
+		}
 		cost := estimateTokens(evidence.Title + " " + evidence.Text)
-		if packet.EstimatedTokens+cost > target || packet.EstimatedTokens+cost > opts.MaxContextTokens {
-			continue
+		if cost > remaining {
+			return
+		}
+		for _, documentID := range evidence.DocumentIDs {
+			seen[documentID] = struct{}{}
 		}
 		packet.Evidence = append(packet.Evidence, evidence)
+		if len(sourceChunks) == 0 {
+			packet.Documents = append(packet.Documents, documentFromEntry(entry, text))
+		} else {
+			for _, chunk := range sourceChunks {
+				packet.Documents = append(packet.Documents, documentFromEntry(chunkEntry(chunk, score, "neighbor"), chunk.Text))
+			}
+		}
+		packet.SourceCoverage[entry.SourceSessionID]++
 		packet.EstimatedTokens += cost
 	}
+	for _, item := range selected {
+		entry := item.Entry
+		var sourceChunks []EvidenceChunk
+		if chunk, ok := chunkByID[item.MemoryID]; ok && opts.NeighborChunks > 0 {
+			neighbors, neighborErr := s.NeighborChunks(ctx, chunk, opts.NeighborChunks)
+			if neighborErr != nil {
+				packet.Warnings = append(packet.Warnings, "neighbor chunks: "+neighborErr.Error())
+			} else {
+				for _, neighbor := range neighbors {
+					if _, alreadyUsed := seen[neighbor.ChunkID]; !alreadyUsed {
+						sourceChunks = append(sourceChunks, neighbor)
+					}
+				}
+				entry.Content = mergeNeighborChunkText(sourceChunks)
+				entry.Summary = entry.Content
+			}
+		}
+		appendEntry(entry, item.FusedScore, sourceChunks)
+	}
 	return packet, nil
+}
+
+func mergeNeighborChunkText(chunks []EvidenceChunk) string {
+	if len(chunks) == 0 {
+		return ""
+	}
+	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].StartRune < chunks[j].StartRune })
+	merged := []rune(strings.TrimSpace(chunks[0].Text))
+	coveredEnd := chunks[0].EndRune
+	for _, chunk := range chunks[1:] {
+		current := []rune(strings.TrimSpace(chunk.Text))
+		overlap := coveredEnd - chunk.StartRune
+		if overlap < 0 {
+			merged = append(merged, '\n')
+			overlap = 0
+		}
+		if overlap < len(current) {
+			merged = append(merged, current[overlap:]...)
+		}
+		if chunk.EndRune > coveredEnd {
+			coveredEnd = chunk.EndRune
+		}
+	}
+	return strings.TrimSpace(string(merged))
 }
 
 func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSearchOptions {
@@ -181,94 +262,14 @@ func cosineSimilarity(left, right []float32) float64 {
 }
 
 func lexicalSimilarity(left, right Entry) float64 {
-	a := tokenSet(left.Title + " " + left.Summary + " " + strings.Join(left.Entities, " "))
-	b := tokenSet(right.Title + " " + right.Summary + " " + strings.Join(right.Entities, " "))
-	if len(a) == 0 || len(b) == 0 {
-		return 0
-	}
-	intersection := 0
-	for token := range a {
-		if _, ok := b[token]; ok {
-			intersection++
-		}
-	}
-	return float64(intersection) / float64(len(a)+len(b)-intersection)
+	return 0
 }
 
-func tokenSet(text string) map[string]struct{} {
-	result := map[string]struct{}{}
-	for _, token := range strings.Fields(strings.ToLower(text)) {
-		token = strings.Trim(token, ",.;:!?，。；：！？()[]{}")
-		if len([]rune(token)) >= 2 {
-			result[token] = struct{}{}
-		}
-	}
-	return result
-}
-
-func bestEvidenceText(query string, entry Entry, spans []EvidenceSpan) (string, time.Time, []string) {
-	if len(spans) == 0 {
-		text := strings.TrimSpace(entry.Content)
-		if text == "" {
-			text = entry.Summary
-		}
-		return clipEvidence(text, 1800), entry.ValidFrom, nil
-	}
-	queryTokens := tokenSet(query)
-	type rankedSpan struct {
-		span    EvidenceSpan
-		overlap int
-		tokens  int
-	}
-	ranked := make([]rankedSpan, 0, len(spans))
-	for _, span := range spans {
-		spanTokens := tokenSet(span.Text)
-		overlap := 0
-		for token := range spanTokens {
-			if _, ok := queryTokens[token]; ok {
-				overlap++
-			}
-		}
-		ranked = append(ranked, rankedSpan{span: span, overlap: overlap, tokens: len(spanTokens)})
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].overlap != ranked[j].overlap {
-			return ranked[i].overlap > ranked[j].overlap
-		}
-		if ranked[i].tokens != ranked[j].tokens {
-			return ranked[i].tokens < ranked[j].tokens
-		}
-		return ranked[i].span.OccurredAt.Before(ranked[j].span.OccurredAt)
-	})
-
-	const maxSpans = 3
-	const maxSpanRunes = 600
-	parts := make([]string, 0, maxSpans)
-	messages := make([]string, 0, maxSpans)
-	occurredAt := ranked[0].span.OccurredAt
-	for _, item := range ranked {
-		if len(parts) >= maxSpans {
-			break
-		}
-		text := clipEvidence(item.span.Text, maxSpanRunes)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		parts = append(parts, text)
-		messages = append(messages, item.span.MessageID)
-		if occurredAt.IsZero() || (!item.span.OccurredAt.IsZero() && item.span.OccurredAt.Before(occurredAt)) {
-			occurredAt = item.span.OccurredAt
-		}
-	}
-	return strings.Join(parts, "\n\n---\n\n"), occurredAt, normalizeStrings(messages)
-}
-
-func clipEvidence(text string, maxRunes int) string {
-	runes := []rune(strings.TrimSpace(text))
-	if len(runes) <= maxRunes {
-		return string(runes)
-	}
-	return string(runes[:maxRunes]) + "\n...[evidence truncated]"
+func documentFromEntry(entry Entry, text string) RetrievalDocument {
+	return RetrievalDocument{DocumentID: entry.MemoryID, Kind: entry.DocumentKind, ParentID: entry.ParentID,
+		Scope: Scope{Type: entry.ScopeType, Key: entry.ScopeKey}, SessionID: entry.SourceSessionID,
+		MessageID: entry.MessageID, Role: entry.Role, Text: text, OccurredAt: entry.OccurredAt,
+		ValidFrom: entry.ValidFrom, ValidUntil: entry.ValidUntil}
 }
 
 func estimateTokens(text string) int {

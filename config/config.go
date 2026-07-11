@@ -101,6 +101,7 @@ type Config struct {
 	MemoryCoreContextTokens            int
 	MemoryContextTargetTokens          int
 	MemoryRetrievalLocalTimeoutSeconds float64
+	MemoryEvidenceNeighborChunks       int
 	MemoryQueryExpansionEnabled        bool
 	MemoryQueryExpansionModel          string
 	MemoryQueryExpansionTimeoutSeconds float64
@@ -232,6 +233,7 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryCoreContextTokens:            512,
 		MemoryContextTargetTokens:          2400,
 		MemoryRetrievalLocalTimeoutSeconds: 3,
+		MemoryEvidenceNeighborChunks:       1,
 		MemoryQueryExpansionEnabled:        true,
 		MemoryQueryExpansionModel:          "inherit",
 		MemoryQueryExpansionTimeoutSeconds: 8,
@@ -361,6 +363,7 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryCoreContextTokens = fresh.MemoryCoreContextTokens
 	updated.MemoryContextTargetTokens = fresh.MemoryContextTargetTokens
 	updated.MemoryRetrievalLocalTimeoutSeconds = fresh.MemoryRetrievalLocalTimeoutSeconds
+	updated.MemoryEvidenceNeighborChunks = fresh.MemoryEvidenceNeighborChunks
 	updated.MemoryQueryExpansionEnabled = fresh.MemoryQueryExpansionEnabled
 	updated.MemoryQueryExpansionModel = fresh.MemoryQueryExpansionModel
 	updated.MemoryQueryExpansionTimeoutSeconds = fresh.MemoryQueryExpansionTimeoutSeconds
@@ -601,6 +604,7 @@ type luminaDefaults struct {
 	MemoryCoreContextTokens            *int           `json:"memory_core_context_tokens"`
 	MemoryContextTargetTokens          *int           `json:"memory_context_target_tokens"`
 	MemoryRetrievalLocalTimeoutSeconds *float64       `json:"memory_retrieval_local_timeout_seconds"`
+	MemoryEvidenceNeighborChunks       *int           `json:"memory_evidence_neighbor_chunks"`
 	MemoryQueryExpansionEnabled        *bool          `json:"memory_query_expansion_enabled"`
 	MemoryQueryExpansionModel          *string        `json:"memory_query_expansion_model"`
 	MemoryQueryExpansionTimeoutSeconds *float64       `json:"memory_query_expansion_timeout_seconds"`
@@ -864,6 +868,9 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.MemoryRetrievalLocalTimeoutSeconds != nil && *defaults.MemoryRetrievalLocalTimeoutSeconds > 0 {
 		cfg.MemoryRetrievalLocalTimeoutSeconds = *defaults.MemoryRetrievalLocalTimeoutSeconds
+	}
+	if defaults.MemoryEvidenceNeighborChunks != nil && *defaults.MemoryEvidenceNeighborChunks >= 0 {
+		cfg.MemoryEvidenceNeighborChunks = *defaults.MemoryEvidenceNeighborChunks
 	}
 	if defaults.MemoryQueryExpansionEnabled != nil {
 		cfg.MemoryQueryExpansionEnabled = *defaults.MemoryQueryExpansionEnabled

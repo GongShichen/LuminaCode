@@ -576,6 +576,7 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 		ExcludeIDs:          surfaced,
 		ExpansionModel:      expansionModel,
 		ExpansionError:      expansionError,
+		NeighborChunks:      s.Config.MemoryEvidenceNeighborChunks,
 	})
 	if err != nil {
 		return longmemory.EvidencePacket{}, nil

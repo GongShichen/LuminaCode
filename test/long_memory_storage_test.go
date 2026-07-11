@@ -213,7 +213,7 @@ func TestMemorySessionIndexAccumulatesAndCreatesNextEventEdges(t *testing.T) {
 	}
 	var sessionMemoryID string
 	for _, entry := range sessionHits {
-		if entry.MemoryID != "event-one" && entry.MemoryID != "event-two" {
+		if entry.DocumentKind == "session" {
 			sessionMemoryID = entry.MemoryID
 			break
 		}

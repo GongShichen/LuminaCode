@@ -17,7 +17,8 @@ func BuildEvidenceContextMessage(packet EvidencePacket) map[string]any {
 	}
 	parts := []string{
 		"<system-reminder>",
-		"Long-term evidence recalled for this task. Treat it as sourced, point-in-time evidence. Recheck current files and external state before relying on mutable claims.",
+		"Long-term evidence recalled for this task. Use the original excerpts, provenance, and timestamps below as point-in-time evidence.",
+		"Distinguish user statements, assistant responses, tool observations, and derived facts. Compute from the evidence when needed, resolve updates by valid time and provenance, and express uncertainty only when the supplied evidence is genuinely insufficient. Recheck current files and external state before relying on mutable claims.",
 	}
 	var ids []string
 	if len(packet.CoreBlocks) > 0 {
@@ -95,8 +96,14 @@ func formatEvidenceForContext(evidence Evidence) string {
 		"Title: " + evidence.Title,
 		"Excerpt: " + evidence.Text,
 	}
+	if role := strings.TrimSpace(fmt.Sprint(evidence.Metadata["role"])); role != "" && role != "<nil>" {
+		fields = append(fields, "Provenance role: "+role)
+	}
 	if evidence.SourceSession != "" || len(evidence.SourceMessages) > 0 {
 		fields = append(fields, fmt.Sprintf("Source: session=%s messages=%s", evidence.SourceSession, strings.Join(evidence.SourceMessages, ",")))
+	}
+	if len(evidence.DocumentIDs) > 1 {
+		fields = append(fields, "Evidence chunks: "+strings.Join(evidence.DocumentIDs, ","))
 	}
 	if !evidence.ValidFrom.IsZero() || !evidence.ValidUntil.IsZero() {
 		fields = append(fields, fmt.Sprintf("Valid time: %s to %s", formatContextTime(evidence.ValidFrom), formatContextTime(evidence.ValidUntil)))

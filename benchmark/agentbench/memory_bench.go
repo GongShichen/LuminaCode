@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,12 +45,14 @@ type memoryMetricInput struct {
 	SubtaskTotal          int
 	SubtaskAnswered       int
 	SubtaskMemorySessions []string
-	GoldMemoryIDs         []string
+	GoldChunkIDs          []string
+	GoldMessageTexts      map[string]string
 	GoldSourceSessions    []string
 }
 
 type longMemEvalSeedEvidence struct {
-	MemoryIDs      []string
+	ChunkIDs       []string
+	MessageTexts   map[string]string
 	SourceSessions []string
 }
 
@@ -484,7 +487,8 @@ func runLongMemEvalCase(ctx context.Context, c longMemEvalCase, options RunnerOp
 	}
 	return finishMemoryCase(caseCtx, result, artifactDir, start, timeline, agentResult, c.Answer, storePath, nil, cfg, memoryMetricInput{
 		Suite:              SuiteLongMemEval,
-		GoldMemoryIDs:      seedEvidence.MemoryIDs,
+		GoldChunkIDs:       seedEvidence.ChunkIDs,
+		GoldMessageTexts:   seedEvidence.MessageTexts,
 		GoldSourceSessions: seedEvidence.SourceSessions,
 	})
 }
@@ -689,7 +693,8 @@ func finishMemoryCase(ctx context.Context, result CaseResult, artifactDir string
 	result.MemoryStorePath = storePath
 	result.MemoryHits = hits
 	result.AnswerMatch = answerContainsExpected(result.Hypothesis, expected)
-	if !result.AnswerMatch && strings.TrimSpace(result.Hypothesis) != "" && agentResult.ErrorType == "" {
+	usesUpstreamEvaluator := result.Case.Benchmark == SuiteLongMemEval
+	if !usesUpstreamEvaluator && !result.AnswerMatch && strings.TrimSpace(result.Hypothesis) != "" && agentResult.ErrorType == "" {
 		if judged, reason, err := judgeAnswerMatch(ctx, cfg, result.Case.Prompt, expected, result.Hypothesis); err == nil {
 			result.AnswerMatch = judged
 			timeline = append(timeline, newTimelineEvent(start, time.Now(), "semantic_judge", map[string]any{
@@ -700,11 +705,11 @@ func finishMemoryCase(ctx context.Context, result CaseResult, artifactDir string
 			timeline = append(timeline, newTimelineEvent(start, time.Now(), "semantic_judge_failed", map[string]any{"error": err.Error()}))
 		}
 	}
-	result.ExpectedSatisfied = result.AnswerMatch
-	if result.AnswerMatch && result.ErrorType == "" {
+	result.ExpectedSatisfied = result.AnswerMatch && !usesUpstreamEvaluator
+	if result.AnswerMatch && result.ErrorType == "" && !usesUpstreamEvaluator {
 		result.Resolved = true
 		result.TestPassRate = 1
-	} else if result.ErrorType == "" {
+	} else if result.ErrorType == "" && !usesUpstreamEvaluator {
 		result.ErrorType = "answer_mismatch"
 	}
 	details, metrics := collectMemoryMetrics(ctx, storePath, metricInput, result.InputTokens, result.Resolved, result.ErrorType)
@@ -851,6 +856,8 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 		details = append(details, MemoryHit{
 			Rank:            len(details) + 1,
 			MemoryID:        entry.MemoryID,
+			DocumentKind:    entry.DocumentKind,
+			MessageID:       entry.MessageID,
 			Title:           entry.Title,
 			SourceSessionID: source,
 			Tags:            entry.Tags,
@@ -913,29 +920,40 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 	}
 	if input.Suite == SuiteLongMemEval {
 		goldSources := map[string]struct{}{}
-		goldMemoryIDs := map[string]struct{}{}
-		for _, memoryID := range input.GoldMemoryIDs {
-			if strings.TrimSpace(memoryID) != "" {
-				goldMemoryIDs[strings.TrimSpace(memoryID)] = struct{}{}
+		goldChunkIDs := map[string]struct{}{}
+		goldMessageIDs := map[string]struct{}{}
+		for _, chunkID := range input.GoldChunkIDs {
+			if strings.TrimSpace(chunkID) != "" {
+				goldChunkIDs[strings.TrimSpace(chunkID)] = struct{}{}
 			}
+		}
+		for messageID := range input.GoldMessageTexts {
+			goldMessageIDs[messageID] = struct{}{}
 		}
 		for _, source := range input.GoldSourceSessions {
 			if strings.TrimSpace(source) != "" {
 				goldSources[strings.TrimSpace(source)] = struct{}{}
 			}
 		}
-		metrics.EvidenceTotal = len(goldMemoryIDs)
+		metrics.EvidenceTotal = len(goldChunkIDs)
+		metrics.GoldChunkCount = len(goldChunkIDs)
+		metrics.GoldMessageCount = len(goldMessageIDs)
 		metrics.GoldSourceSessionCount = len(goldSources)
+		hitMessages := map[string]struct{}{}
 		for index := range details {
-			_, isGold := goldMemoryIDs[details[index].MemoryID]
+			_, isGold := goldChunkIDs[details[index].MemoryID]
 			details[index].Evidence = isGold
 			if isGold {
 				metrics.EvidenceHitCount++
+				metrics.GoldChunkHitCount++
 				if metrics.FirstEvidenceRank == nil {
 					rank := details[index].Rank
 					metrics.FirstEvidenceRank = &rank
 					metrics.EvidenceMRR = 1 / float64(rank)
 				}
+			}
+			if _, ok := goldMessageIDs[details[index].MessageID]; ok {
+				hitMessages[details[index].MessageID] = struct{}{}
 			}
 			if _, ok := goldSources[details[index].SourceSessionID]; ok {
 				seenSources[details[index].SourceSessionID] = struct{}{}
@@ -948,6 +966,14 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 				metrics.EvidenceRecallAtK = 1
 			}
 		}
+		metrics.GoldMessageHitCount = len(hitMessages)
+		if metrics.GoldMessageCount > 0 {
+			metrics.GoldMessageRecall = float64(metrics.GoldMessageHitCount) / float64(metrics.GoldMessageCount)
+		}
+		if metrics.GoldChunkCount > 0 {
+			metrics.InjectedChunkRecall = float64(metrics.GoldChunkHitCount) / float64(metrics.GoldChunkCount)
+		}
+		metrics.InjectedTextCoverage = injectedGoldTextCoverage(ctx, store, usedIDs, input.GoldMessageTexts)
 		if len(goldSources) > 0 {
 			for source := range seenSources {
 				if _, ok := goldSources[source]; ok {
@@ -988,6 +1014,73 @@ func actualRecalledMemoryIDs(ctx context.Context, store *longmemory.Store) []str
 		}
 	}
 	return ids
+}
+
+type runeInterval struct {
+	start int
+	end   int
+}
+
+func injectedGoldTextCoverage(ctx context.Context, store *longmemory.Store, usedIDs []string, goldMessages map[string]string) float64 {
+	if len(goldMessages) == 0 || len(usedIDs) == 0 {
+		return 0
+	}
+	chunks, err := store.GetChunks(ctx, usedIDs)
+	if err != nil {
+		return 0
+	}
+	covered := map[string][]runeInterval{}
+	for _, chunk := range chunks {
+		text, ok := goldMessages[chunk.MessageID]
+		if !ok {
+			continue
+		}
+		length := len([]rune(strings.TrimSpace(text)))
+		start := maxIntMemoryMetric(0, minIntMemoryMetric(chunk.StartRune, length))
+		end := maxIntMemoryMetric(start, minIntMemoryMetric(chunk.EndRune, length))
+		if end > start {
+			covered[chunk.MessageID] = append(covered[chunk.MessageID], runeInterval{start: start, end: end})
+		}
+	}
+	totalRunes, coveredRunes := 0, 0
+	for messageID, text := range goldMessages {
+		length := len([]rune(strings.TrimSpace(text)))
+		totalRunes += length
+		intervals := covered[messageID]
+		sort.Slice(intervals, func(i, j int) bool {
+			if intervals[i].start == intervals[j].start {
+				return intervals[i].end < intervals[j].end
+			}
+			return intervals[i].start < intervals[j].start
+		})
+		cursor := 0
+		for _, interval := range intervals {
+			if interval.end <= cursor {
+				continue
+			}
+			start := maxIntMemoryMetric(cursor, interval.start)
+			coveredRunes += interval.end - start
+			cursor = interval.end
+		}
+	}
+	if totalRunes == 0 {
+		return 0
+	}
+	return float64(coveredRunes) / float64(totalRunes)
+}
+
+func minIntMemoryMetric(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func maxIntMemoryMetric(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func memoryHitTitles(details []MemoryHit) []string {
@@ -1036,6 +1129,9 @@ func classifyMemoryRetrievalError(metrics *MemoryMetrics, suite string, resolved
 	}
 	if suite == SuiteLongMemEval && metrics.EvidenceTotal > 0 && !metrics.EvidenceHit {
 		return "retrieval_miss"
+	}
+	if suite == SuiteLongMemEval && errorType == "unresolved" {
+		return "evaluation_pending"
 	}
 	if suite == SuiteMemoryArena && metrics.SubtaskTotal > 0 {
 		if metrics.SubtaskAnswered < metrics.SubtaskTotal {
@@ -1098,10 +1194,19 @@ func ingestLongMemEvalHistory(ctx context.Context, storePath string, c longMemEv
 		controller := agent.NewExtractionController(extractionCfg, coretools.NewToolRegistry())
 		controller.SourceSessionID = sessionID
 		controller.SourceAgentID = "history-replay"
+		for {
+			ingested, err := controller.IngestMessages(ctx, &state)
+			if err != nil {
+				return fmt.Errorf("ingest session %s: %w", sessionID, err)
+			}
+			if ingested == 0 {
+				break
+			}
+		}
 		for state.MemoryExtractionCursor < len(state.Messages) {
 			before := state.MemoryExtractionCursor
 			if _, err := controller.ExtractNow(ctx, &state); err != nil {
-				return fmt.Errorf("extract session %s: %w", sessionID, err)
+				break
 			}
 			if state.MemoryExtractionCursor <= before {
 				return fmt.Errorf("extract session %s made no cursor progress at message %d", sessionID, before)
@@ -1112,46 +1217,30 @@ func ingestLongMemEvalHistory(ctx context.Context, storePath string, c longMemEv
 }
 
 func collectLongMemEvalGold(ctx context.Context, storePath string, scope longmemory.Scope, c longMemEvalCase) (longMemEvalSeedEvidence, error) {
-	var gold longMemEvalSeedEvidence
+	gold := longMemEvalSeedEvidence{MessageTexts: map[string]string{}}
 	store, err := longmemory.Open(ctx, storePath)
 	if err != nil {
 		return gold, err
 	}
 	defer store.Close()
-	entries, err := store.List(ctx, longmemory.SearchOptions{Limit: 100000, IncludeInactive: true, IncludeExpired: true})
-	if err != nil {
-		return gold, err
-	}
-	ids := make([]string, 0, len(entries))
-	byID := make(map[string]longmemory.Entry, len(entries))
-	for _, entry := range entries {
-		ids = append(ids, entry.MemoryID)
-		byID[entry.MemoryID] = entry
-	}
-	spans, err := store.ListEvidenceSpans(ctx, ids)
-	if err != nil {
-		return gold, err
-	}
-	goldMessages := longMemEvalGoldMessageIDs(c)
+	goldMessages := longMemEvalGoldMessages(c)
 	goldSessions := longMemEvalGoldSessions(c)
 	for sessionID := range goldSessions {
-		memoryID := longmemory.StableID(scope.Type, scope.Key, "session-index", sessionID)
-		gold.MemoryIDs = append(gold.MemoryIDs, memoryID)
 		gold.SourceSessions = append(gold.SourceSessions, sessionID)
 	}
-	for memoryID, memorySpans := range spans {
-		for _, span := range memorySpans {
-			if _, ok := goldMessages[span.MessageID]; !ok {
-				continue
-			}
-			gold.MemoryIDs = append(gold.MemoryIDs, memoryID)
-			if entry, ok := byID[memoryID]; ok && entry.SourceSessionID != "" {
-				gold.SourceSessions = append(gold.SourceSessions, entry.SourceSessionID)
-			}
-			break
-		}
+	messageIDs := make([]string, 0, len(goldMessages))
+	for messageID, text := range goldMessages {
+		messageIDs = append(messageIDs, messageID)
+		gold.MessageTexts[messageID] = text
 	}
-	gold.MemoryIDs = uniqueMemoryStrings(gold.MemoryIDs)
+	chunks, err := store.ChunksByMessageIDs(ctx, []longmemory.Scope{scope}, messageIDs)
+	if err != nil {
+		return gold, err
+	}
+	for _, chunk := range chunks {
+		gold.ChunkIDs = append(gold.ChunkIDs, chunk.ChunkID)
+	}
+	gold.ChunkIDs = uniqueMemoryStrings(gold.ChunkIDs)
 	gold.SourceSessions = uniqueMemoryStrings(gold.SourceSessions)
 	return gold, nil
 }
@@ -1170,8 +1259,8 @@ func longMemEvalGoldSessions(c longMemEvalCase) map[string]struct{} {
 	return result
 }
 
-func longMemEvalGoldMessageIDs(c longMemEvalCase) map[string]struct{} {
-	gold := map[string]struct{}{}
+func longMemEvalGoldMessages(c longMemEvalCase) map[string]string {
+	gold := map[string]string{}
 	for sessionIndex, session := range c.HaystackSessions {
 		sessionID := stringAt(c.HaystackSessionIDs, sessionIndex, fmt.Sprintf("session-%d", sessionIndex+1))
 		for turnIndex, turn := range session {
@@ -1183,8 +1272,16 @@ func longMemEvalGoldMessageIDs(c longMemEvalCase) map[string]struct{} {
 			}
 			messageID := longmemory.StableID(longmemory.ScopeProject, sessionID,
 				fmt.Sprintf("turn-%03d-%s", turnIndex+1, role), content)
-			gold[messageID] = struct{}{}
+			gold[messageID] = strings.TrimSpace(content)
 		}
+	}
+	return gold
+}
+
+func longMemEvalGoldMessageIDs(c longMemEvalCase) map[string]struct{} {
+	gold := map[string]struct{}{}
+	for messageID := range longMemEvalGoldMessages(c) {
+		gold[messageID] = struct{}{}
 	}
 	return gold
 }
@@ -1410,16 +1507,20 @@ func looseStringMatch(normalizedHypothesis string, expected string) bool {
 	if expectedNorm == "" {
 		return false
 	}
-	if strings.Contains(normalizedHypothesis, expectedNorm) {
+	if strings.Contains(" "+normalizedHypothesis+" ", " "+expectedNorm+" ") {
 		return true
 	}
 	tokens := meaningfulTokens(expectedNorm)
 	if len(tokens) == 0 {
 		return false
 	}
+	hypothesisTokens := map[string]struct{}{}
+	for _, token := range strings.Fields(normalizedHypothesis) {
+		hypothesisTokens[token] = struct{}{}
+	}
 	matches := 0
 	for _, token := range tokens {
-		if strings.Contains(normalizedHypothesis, token) {
+		if _, ok := hypothesisTokens[token]; ok {
 			matches++
 		}
 	}
@@ -1432,12 +1533,21 @@ func looseStringMatch(normalizedHypothesis string, expected string) bool {
 func meaningfulTokens(value string) []string {
 	var out []string
 	for _, token := range strings.Fields(value) {
-		if len([]rune(token)) <= 1 || answerStopwords[token] {
+		if answerStopwords[token] || (len([]rune(token)) <= 1 && !containsASCIIDigit(token)) {
 			continue
 		}
 		out = append(out, token)
 	}
 	return out
+}
+
+func containsASCIIDigit(value string) bool {
+	for _, current := range value {
+		if current >= '0' && current <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueMemoryStrings(values []string) []string {

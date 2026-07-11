@@ -120,12 +120,53 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 			scope_key TEXT NOT NULL,
 			session_id TEXT NOT NULL DEFAULT '',
 			message_id TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT '',
 			source_path TEXT NOT NULL DEFAULT '',
 			text TEXT NOT NULL,
 			start_rune INTEGER NOT NULL DEFAULT 0,
 			end_rune INTEGER NOT NULL DEFAULT 0,
 			occurred_at TEXT NOT NULL DEFAULT '',
 			content_hash TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_evidence_chunks (
+			chunk_id TEXT PRIMARY KEY,
+			span_id TEXT NOT NULL,
+			parent_memory_id TEXT NOT NULL DEFAULT '',
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			message_id TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			start_rune INTEGER NOT NULL DEFAULT 0,
+			end_rune INTEGER NOT NULL DEFAULT 0,
+			occurred_at TEXT NOT NULL DEFAULT '',
+			valid_from TEXT NOT NULL DEFAULT '',
+			valid_until TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL
+		);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunk_fts USING fts5(
+			chunk_id UNINDEXED, session_id UNINDEXED, message_id UNINDEXED, role UNINDEXED, text
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_chunk_embeddings (
+			chunk_id TEXT NOT NULL,
+			model TEXT NOT NULL,
+			dimensions INTEGER NOT NULL,
+			content_hash TEXT NOT NULL,
+			embedding BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(chunk_id, model)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_chunk_entities (
+			chunk_id TEXT NOT NULL,
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			normalized_entity TEXT NOT NULL,
+			original_text TEXT NOT NULL,
+			entity_type TEXT NOT NULL DEFAULT '',
+			confidence REAL NOT NULL DEFAULT 0.5,
+			PRIMARY KEY(chunk_id, normalized_entity)
 		);`,
 		`CREATE TABLE IF NOT EXISTS memory_jobs (
 			job_id TEXT PRIMARY KEY,
@@ -182,6 +223,10 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_edges_from ON memory_edges(scope_type, scope_key, from_id, edge_type);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_edges_to ON memory_edges(scope_type, scope_key, to_id, edge_type);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_spans_memory ON memory_evidence_spans(memory_id, occurred_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_parent ON memory_evidence_chunks(parent_memory_id, session_id, occurred_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_message ON memory_evidence_chunks(scope_type, scope_key, message_id, start_rune);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_chunks_canonical ON memory_evidence_chunks(scope_type, scope_key, session_id, message_id, start_rune, end_rune, content_hash);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_chunk_entities_lookup ON memory_chunk_entities(scope_type, scope_key, normalized_entity);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_jobs_ready ON memory_jobs(status, available_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_retrieval_created ON memory_retrieval_runs(created_at);`,
 	}
@@ -192,6 +237,12 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 	}
 	if err := ensureTableColumn(ctx, s.db, "memory_retrieval_runs", "run_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return fmt.Errorf("migrate retrieval run diagnostics: %w", err)
+	}
+	if err := ensureTableColumn(ctx, s.db, "memory_evidence_spans", "role", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate evidence span role: %w", err)
+	}
+	if _, err := s.BackfillEvidenceChunks(ctx, 0); err != nil {
+		return fmt.Errorf("backfill evidence chunks: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO memory_schema(key, value, updated_at) VALUES ('extended_storage', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
@@ -290,18 +341,93 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			}
 		}
 	}
+	var committedChunks []EvidenceChunk
+	var sessionIndex SessionIndex
 	if committedEpisode != nil {
-		sessionIndex := buildSessionIndex(*committedEpisode, batch.Memories)
+		sessionIndex = buildSessionIndex(*committedEpisode, batch.Memories)
 		if err := upsertSessionIndexTx(ctx, tx, sessionIndex); err != nil {
 			return err
 		}
+		var priorSessionIndexID string
+		_ = tx.QueryRowContext(ctx, `SELECT index_id FROM memory_session_index WHERE scope_type=? AND scope_key=?
+			AND session_id<>? AND ended_at<=? ORDER BY ended_at DESC LIMIT 1`, sessionIndex.ScopeType,
+			sessionIndex.ScopeKey, sessionIndex.SessionID, formatTime(sessionIndex.StartedAt)).Scan(&priorSessionIndexID)
+		if priorSessionIndexID != "" {
+			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+				ScopeKey: sessionIndex.ScopeKey, FromID: priorSessionIndexID, ToID: sessionIndex.IndexID,
+				Type: EdgeNextEvent, Weight: 1, Confidence: 1})); err != nil {
+				return err
+			}
+		}
+		var priorChunkID string
+		_ = tx.QueryRowContext(ctx, `SELECT chunk_id FROM memory_evidence_chunks
+			WHERE scope_type=? AND scope_key=? AND session_id=? ORDER BY occurred_at DESC, end_rune DESC LIMIT 1`,
+			sessionIndex.ScopeType, sessionIndex.ScopeKey, sessionIndex.SessionID).Scan(&priorChunkID)
 		for _, span := range batch.EpisodeSpans {
 			span.MemoryID = sessionIndex.IndexID
 			span.ScopeType = sessionIndex.ScopeType
 			span.ScopeKey = sessionIndex.ScopeKey
 			span.SessionID = sessionIndex.SessionID
-			if err := upsertEvidenceSpanTx(ctx, tx, normalizeEvidenceSpan(span)); err != nil {
+			span = normalizeEvidenceSpan(span)
+			if err := upsertEvidenceSpanTx(ctx, tx, span); err != nil {
 				return err
+			}
+			chunks := BuildEvidenceChunks(span)
+			for _, chunk := range chunks {
+				if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
+					return err
+				}
+				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+					ScopeKey: sessionIndex.ScopeKey, FromID: sessionIndex.IndexID, ToID: chunk.ChunkID,
+					Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+					return err
+				}
+				previousID := priorChunkID
+				if len(committedChunks) > 0 {
+					previousID = committedChunks[len(committedChunks)-1].ChunkID
+				}
+				if previousID != "" && previousID != chunk.ChunkID {
+					if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+						ScopeKey: sessionIndex.ScopeKey, FromID: previousID, ToID: chunk.ChunkID,
+						Type: EdgeNextEvent, Weight: 0.9, Confidence: 1})); err != nil {
+						return err
+					}
+				}
+				committedChunks = append(committedChunks, chunk)
+			}
+		}
+		for _, chunk := range batch.Chunks {
+			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
+				return err
+			}
+		}
+		for _, embedding := range batch.ChunkEmbeddings {
+			if err := upsertChunkEmbeddingTx(ctx, tx, embedding.MemoryID, embedding); err != nil {
+				return err
+			}
+		}
+		for memoryIndex, candidate := range batch.Memories {
+			if memoryIndex >= len(memoryIDs) {
+				continue
+			}
+			allowedMessages := map[string]struct{}{}
+			for _, messageID := range candidate.SourceMessageIDs {
+				allowedMessages[messageID] = struct{}{}
+			}
+			for _, chunk := range committedChunks {
+				if _, ok := allowedMessages[chunk.MessageID]; !ok {
+					continue
+				}
+				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: candidate.ScopeType,
+					ScopeKey: candidate.ScopeKey, FromID: memoryIDs[memoryIndex], ToID: chunk.ChunkID,
+					Type: EdgeSupports, Weight: 1, Confidence: candidate.Confidence})); err != nil {
+					return err
+				}
+				for _, entity := range candidate.Entities {
+					if err := upsertChunkEntityTx(ctx, tx, chunk, entity, candidate.Confidence); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		if batch.SessionEmbedding != nil && len(batch.SessionEmbedding.Vector) > 0 {
@@ -457,7 +583,6 @@ func (s *Store) SearchVector(ctx context.Context, embedding []float32, model str
 		return nil, err
 	}
 	for idx := range entries {
-		entries[idx].Score = -entries[idx].Score
 		entries[idx].MatchReason = "vector"
 	}
 	return entries, nil
@@ -822,6 +947,22 @@ func (s *Store) GetMany(ctx context.Context, ids []string) ([]Entry, error) {
 			return nil, sessionErr
 		}
 		entries = append(entries, sessionEntries...)
+		for _, entry := range sessionEntries {
+			found[entry.MemoryID] = struct{}{}
+		}
+		missing = missing[:0]
+		for _, id := range ids {
+			if _, ok := found[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		chunks, chunkErr := s.GetChunks(ctx, missing)
+		if chunkErr != nil {
+			return nil, chunkErr
+		}
+		for _, chunk := range chunks {
+			entries = append(entries, chunkEntry(chunk, 0, "get"))
+		}
 	}
 	order := make(map[string]int, len(ids))
 	for idx, id := range ids {
@@ -841,7 +982,7 @@ func (s *Store) ListEvidenceSpans(ctx context.Context, memoryIDs []string) (map[
 	for idx := range memoryIDs {
 		args[idx] = memoryIDs[idx]
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT span_id, memory_id, scope_type, scope_key, session_id, message_id,
+	rows, err := s.db.QueryContext(ctx, `SELECT span_id, memory_id, scope_type, scope_key, session_id, message_id, role,
 		source_path, text, start_rune, end_rune, occurred_at, content_hash
 		FROM memory_evidence_spans WHERE memory_id IN (`+marks+`) ORDER BY occurred_at`, args...)
 	if err != nil {
@@ -852,13 +993,60 @@ func (s *Store) ListEvidenceSpans(ctx context.Context, memoryIDs []string) (map[
 		var span EvidenceSpan
 		var occurredAt string
 		if err := rows.Scan(&span.SpanID, &span.MemoryID, &span.ScopeType, &span.ScopeKey, &span.SessionID,
-			&span.MessageID, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune, &occurredAt, &span.ContentHash); err != nil {
+			&span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune, &occurredAt, &span.ContentHash); err != nil {
 			return nil, err
 		}
 		span.OccurredAt = parseTime(occurredAt)
 		result[span.MemoryID] = append(result[span.MemoryID], span)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) EvidenceSpansByMessageIDs(ctx context.Context, sessionID string, messageIDs []string) ([]EvidenceSpan, error) {
+	messageIDs = normalizeStrings(messageIDs)
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(messageIDs)), ",")
+	args := make([]any, 0, len(messageIDs)+1)
+	args = append(args, sessionID)
+	for _, messageID := range messageIDs {
+		args = append(args, messageID)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT s.span_id, s.memory_id, s.scope_type, s.scope_key,
+		s.session_id, s.message_id, s.role, s.source_path, s.text, s.start_rune, s.end_rune,
+		s.occurred_at, s.content_hash FROM memory_evidence_spans s
+		LEFT JOIN memory_session_index si ON si.index_id=s.memory_id
+		WHERE s.session_id=? AND s.message_id IN (`+marks+`)
+		ORDER BY CASE WHEN si.index_id IS NULL THEN 1 ELSE 0 END, s.occurred_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := map[string]EvidenceSpan{}
+	for rows.Next() {
+		var span EvidenceSpan
+		var occurredAt string
+		if err := rows.Scan(&span.SpanID, &span.MemoryID, &span.ScopeType, &span.ScopeKey, &span.SessionID,
+			&span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune,
+			&occurredAt, &span.ContentHash); err != nil {
+			return nil, err
+		}
+		span.OccurredAt = parseTime(occurredAt)
+		if _, exists := byID[span.MessageID]; !exists {
+			byID[span.MessageID] = span
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]EvidenceSpan, 0, len(byID))
+	for _, messageID := range messageIDs {
+		if span, ok := byID[messageID]; ok {
+			result = append(result, span)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) ListCoreBlocks(ctx context.Context, scopes []Scope) ([]CoreBlock, error) {
@@ -1281,9 +1469,9 @@ func upsertFactTx(ctx context.Context, tx *sql.Tx, fact Fact) error {
 
 func upsertEvidenceSpanTx(ctx context.Context, tx *sql.Tx, span EvidenceSpan) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO memory_evidence_spans(span_id, memory_id, scope_type, scope_key,
-		session_id, message_id, source_path, text, start_rune, end_rune, occurred_at, content_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(span_id) DO NOTHING`, span.SpanID, span.MemoryID,
-		span.ScopeType, span.ScopeKey, span.SessionID, span.MessageID, span.SourcePath, span.Text, span.StartRune,
+		session_id, message_id, role, source_path, text, start_rune, end_rune, occurred_at, content_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(span_id) DO UPDATE SET role=excluded.role`, span.SpanID, span.MemoryID,
+		span.ScopeType, span.ScopeKey, span.SessionID, span.MessageID, span.Role, span.SourcePath, span.Text, span.StartRune,
 		span.EndRune, formatTime(span.OccurredAt), span.ContentHash)
 	return err
 }

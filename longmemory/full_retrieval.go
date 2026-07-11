@@ -39,6 +39,10 @@ type baseChannelOutput struct {
 func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expansion QueryExpansion, embedder Embedder, opts HybridSearchOptions) (AllChannelResult, error) {
 	started := time.Now().UTC()
 	queries := normalizeStrings(append([]string{query.Text}, expansion.Queries...))
+	for _, constraint := range expansion.TemporalConstraints {
+		queries = append(queries, constraint.FromText, constraint.ToText, constraint.AtText)
+	}
+	queries = normalizeStrings(queries)
 	if len(queries) == 0 {
 		queries = []string{strings.TrimSpace(query.Text)}
 	}
@@ -160,14 +164,14 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	graphResult.DurationMS = time.Since(graphStarted).Milliseconds()
 	run.ChannelResults = append(run.ChannelResults, graphResult)
 
-	candidates := filterExcludedCandidates(candidateSlice(combined), opts.ExcludeIDs)
+	candidates := preferEvidenceChunks(filterExcludedCandidates(candidateSlice(combined), opts.ExcludeIDs))
 	var embeddings map[string][]float32
 	if embedder != nil && len(candidates) > 0 {
 		ids := make([]string, len(candidates))
 		for index := range candidates {
 			ids[index] = candidates[index].MemoryID
 		}
-		loaded, err := s.LoadEmbeddings(localCtx, ids, embedder.Model())
+		loaded, err := s.LoadDocumentEmbeddings(ctx, ids, embedder.Model())
 		if err != nil {
 			warnings = append(warnings, "load candidate embeddings: "+err.Error())
 		} else {
@@ -188,11 +192,11 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		}
 	}
 
-	blocks, err := s.ListCoreBlocks(localCtx, query.Scopes)
+	blocks, err := s.ListCoreBlocks(ctx, query.Scopes)
 	if err != nil {
 		warnings = append(warnings, "core blocks: "+err.Error())
 	}
-	packet, packetErr := s.BuildEvidencePacket(localCtx, plan, selected, blocks, opts)
+	packet, packetErr := s.BuildEvidencePacket(ctx, plan, selected, blocks, opts)
 	if packetErr != nil {
 		warnings = append(warnings, "evidence packet: "+packetErr.Error())
 		run.StopReason = "evidence_packet_error"
@@ -217,10 +221,58 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	return AllChannelResult{Packet: packet, Trace: trace, Run: run}, packetErr
 }
 
+func preferEvidenceChunks(candidates []CandidateScore) []CandidateScore {
+	chunkMessages := map[string]struct{}{}
+	chunkSessions := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if candidate.Entry.DocumentKind != "chunk" {
+			continue
+		}
+		if candidate.Entry.MessageID != "" {
+			chunkMessages[candidate.Entry.MessageID] = struct{}{}
+		}
+		if candidate.Entry.SourceSessionID != "" {
+			chunkSessions[candidate.Entry.SourceSessionID] = struct{}{}
+		}
+	}
+	if len(chunkMessages) == 0 && len(chunkSessions) == 0 {
+		return candidates
+	}
+	filtered := make([]CandidateScore, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Entry.DocumentKind == "chunk" {
+			filtered = append(filtered, candidate)
+			continue
+		}
+		covered := false
+		for _, messageID := range candidate.Entry.SourceMessageIDs {
+			if _, ok := chunkMessages[messageID]; ok {
+				covered = true
+				break
+			}
+		}
+		if candidate.Entry.DocumentKind == "session" {
+			_, covered = chunkSessions[candidate.Entry.SourceSessionID]
+		}
+		if !covered {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
 func (s *Store) searchBM25Queries(ctx context.Context, queries []string, scopes []Scope, opts HybridSearchOptions) ([]Entry, error) {
 	return mergeQueryEntries(queries, func(query string) ([]Entry, error) {
-		return s.Search(ctx, SearchOptions{Query: query, Scopes: scopes, Limit: opts.FTSCandidates,
+		memoryEntries, err := s.Search(ctx, SearchOptions{Query: query, Scopes: scopes, Limit: opts.FTSCandidates,
 			MaxCandidates: opts.FTSCandidates, ExcludeIDs: opts.ExcludeIDs})
+		if err != nil {
+			return nil, err
+		}
+		chunkEntries, err := s.SearchChunkBM25(ctx, []string{query}, scopes, opts.FTSCandidates)
+		if err != nil {
+			return nil, err
+		}
+		return appendUniqueEntries(chunkEntries, memoryEntries), nil
 	})
 }
 
@@ -247,7 +299,11 @@ func (s *Store) searchVectorQueries(ctx context.Context, queries []string, scope
 				if sessionErr != nil {
 					return nil, sessionErr
 				}
-				return appendUniqueEntries(memoryEntries, sessionEntries), nil
+				chunkEntries, chunkErr := s.SearchChunkVector(ctx, vectors[index], embedder.Model(), scopes, opts.VectorCandidates)
+				if chunkErr != nil {
+					return nil, chunkErr
+				}
+				return appendUniqueEntries(chunkEntries, appendUniqueEntries(memoryEntries, sessionEntries)), nil
 			}
 		}
 		return nil, nil
@@ -280,7 +336,7 @@ func mergeChannelEntries(combined map[string]*CandidateScore, channel string, en
 	for rank, entry := range appendUniqueEntries(nil, entries) {
 		item := combined[entry.MemoryID]
 		if item == nil {
-			item = &CandidateScore{MemoryID: entry.MemoryID, Entry: entry,
+			item = &CandidateScore{MemoryID: entry.MemoryID, DocumentID: entry.MemoryID, Entry: entry,
 				ChannelRanks: map[string]int{}, ChannelScores: map[string]float64{}}
 			combined[entry.MemoryID] = item
 		}
@@ -293,7 +349,8 @@ func mergeChannelEntries(combined map[string]*CandidateScore, channel string, en
 func retrievalCandidates(entries []Entry, channel string) []RetrievalCandidate {
 	result := make([]RetrievalCandidate, 0, len(entries))
 	for rank, entry := range entries {
-		result = append(result, RetrievalCandidate{MemoryID: entry.MemoryID, Entry: entry,
+		result = append(result, RetrievalCandidate{MemoryID: entry.MemoryID, DocumentID: entry.MemoryID,
+			DocumentKind: entry.DocumentKind, ParentID: entry.ParentID, Entry: entry,
 			SourceSession: entry.SourceSessionID, SourceMessages: append([]string(nil), entry.SourceMessageIDs...),
 			Scope: Scope{Type: entry.ScopeType, Key: entry.ScopeKey}, ValidFrom: entry.ValidFrom,
 			ValidUntil: entry.ValidUntil, ChannelRanks: map[string]int{channel: rank + 1},
@@ -314,9 +371,24 @@ func (s *Store) entriesForGraph(ctx context.Context, scores map[string]float64) 
 	if err != nil {
 		return nil, err
 	}
+	found := map[string]struct{}{}
 	for index := range entries {
+		found[entries[index].MemoryID] = struct{}{}
 		entries[index].Score = scores[entries[index].MemoryID]
 		entries[index].MatchReason = channelGraph
+	}
+	var missing []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	chunks, chunkErr := s.GetChunks(ctx, missing)
+	if chunkErr != nil {
+		return nil, chunkErr
+	}
+	for _, chunk := range chunks {
+		entries = append(entries, chunkEntry(chunk, scores[chunk.ChunkID], channelGraph))
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
 	return entries, nil
@@ -327,37 +399,32 @@ func diversifySessions(selected, candidates []CandidateScore, limit int) []Candi
 		return selected
 	}
 	result := make([]CandidateScore, 0, minInt(limit, len(candidates)))
-	seenIDs, seenSessions := map[string]struct{}{}, map[string]struct{}{}
-	for _, candidate := range candidates {
+	seenIDs, sessionCounts := map[string]struct{}{}, map[string]int{}
+	maxPerSession := maxInt(1, (limit+1)/2)
+	ordered := append(append([]CandidateScore(nil), selected...), candidates...)
+	for _, candidate := range ordered {
+		if _, exists := seenIDs[candidate.MemoryID]; exists {
+			continue
+		}
 		session := candidate.Entry.SourceSessionID
-		if session == "" {
-			continue
-		}
-		if _, exists := seenSessions[session]; exists {
+		if session != "" && sessionCounts[session] >= maxPerSession {
 			continue
 		}
 		result = append(result, candidate)
 		seenIDs[candidate.MemoryID] = struct{}{}
-		seenSessions[session] = struct{}{}
+		if session != "" {
+			sessionCounts[session]++
+		}
 		if len(result) >= limit {
 			return result
 		}
 	}
-	for _, candidate := range selected {
+	for _, candidate := range ordered {
 		if _, exists := seenIDs[candidate.MemoryID]; exists {
 			continue
 		}
 		result = append(result, candidate)
 		seenIDs[candidate.MemoryID] = struct{}{}
-		if len(result) >= limit {
-			return result
-		}
-	}
-	for _, candidate := range candidates {
-		if _, exists := seenIDs[candidate.MemoryID]; exists {
-			continue
-		}
-		result = append(result, candidate)
 		if len(result) >= limit {
 			break
 		}
@@ -368,7 +435,9 @@ func diversifySessions(selected, candidates []CandidateScore, limit int) []Candi
 func evidenceIDs(evidence []Evidence) []string {
 	ids := make([]string, 0, len(evidence))
 	for _, item := range evidence {
-		if item.MemoryID != "" {
+		if len(item.DocumentIDs) > 0 {
+			ids = append(ids, item.DocumentIDs...)
+		} else if item.MemoryID != "" {
 			ids = append(ids, item.MemoryID)
 		}
 	}

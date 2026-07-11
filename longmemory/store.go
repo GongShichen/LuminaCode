@@ -176,17 +176,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Entry, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, sql.ErrNoRows
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memories WHERE memory_id = ?`, id)
-	entry, err := scanEntry(row)
-	if err == nil {
-		return entry, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	entries, err := s.GetMany(ctx, []string{id})
+	if err != nil {
 		return nil, err
-	}
-	entries, sessionErr := s.sessionEntriesByIndexIDs(ctx, []string{id})
-	if sessionErr != nil {
-		return nil, sessionErr
 	}
 	if len(entries) == 0 {
 		return nil, sql.ErrNoRows
@@ -476,6 +468,25 @@ func (s *Store) Delete(ctx context.Context, id string, hard bool) error {
 		}
 		defer func() { _ = tx.Rollback() }()
 		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id = ?`, id); err != nil {
+			return err
+		}
+		for _, statement := range []string{
+			`DELETE FROM memory_edges WHERE from_id IN (SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?) OR to_id IN (SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`,
+			`DELETE FROM memory_chunk_fts WHERE chunk_id IN (SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`,
+			`DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`,
+			`DELETE FROM memory_chunk_entities WHERE chunk_id IN (SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`,
+		} {
+			if strings.Contains(statement, " OR ") {
+				if _, err := tx.ExecContext(ctx, statement, id, id); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, statement, id); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_evidence_chunks WHERE parent_memory_id=?`, id); err != nil {
 			return err
 		}
 		for _, statement := range []string{

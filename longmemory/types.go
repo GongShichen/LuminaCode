@@ -65,6 +65,11 @@ type Entry struct {
 	Status              Status     `json:"status"`
 	Score               float64    `json:"score,omitempty"`
 	MatchReason         string     `json:"match_reason,omitempty"`
+	DocumentKind        string     `json:"document_kind,omitempty"`
+	ParentID            string     `json:"parent_id,omitempty"`
+	MessageID           string     `json:"message_id,omitempty"`
+	Role                string     `json:"role,omitempty"`
+	OccurredAt          time.Time  `json:"occurred_at,omitempty"`
 }
 
 type Candidate struct {

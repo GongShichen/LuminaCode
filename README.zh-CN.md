@@ -36,10 +36,10 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 ~/.lumina/memory/lumina-memory.sqlite
 ```
 
-- 写入使用持久化 message cursor，保存 episode、证据片段、事实、实体、时间
-  版本、关系和来源。
+- 写入先通过持久化 message cursor 提交原始消息和重叠 evidence chunk；事实、
+  实体、时间版本和关系独立 enrichment，daemon 重启后可继续。
 - 每次查询固定运行 BM25、本地向量、实体、时间、Session 和图检索，再用
-  RRF 融合、MMR 去重，组装为较小的带来源证据包。
+  RRF 融合、MMR 去重，再从原始 chunk 组装为较小的带来源证据包。
 - user、project、Team、agent type 和 Team agent scope 相互隔离。召回内容是
   临时上下文，不进入可见 transcript。
 - 事实同时保留有效时间和观测时间；新事实会替代旧版本，但不会删除历史来源。
@@ -50,10 +50,25 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 
 ### LongMemEval
 
-Lumina 在 500 题 oracle 数据集上的成绩为 **61.6%（308/500）**。同一批答案
-使用 LongMemEval 官方判分 prompt 和 `deepseek-v4-pro` 独立判分 5 次，5 次
-总分与每题标签完全一致（均值 61.6%，标准差 0）。这不是官方 GPT-4o
-leaderboard 成绩。
+Lumina 在 500 题 oracle 数据集上的成绩为 **68.4%（342/500）**。保存的答案
+使用 LongMemEval 官方判分 prompt 和 `deepseek-v4-pro` 评估。这不是官方
+GPT-4o leaderboard 成绩。
+
+本次运行同时把检索质量与答案准确率分开统计：
+
+| 检索指标 | 结果 |
+|---|---:|
+| Evidence Hit Rate | 82.7% |
+| Evidence Recall@K | 68.6% |
+| Evidence MRR | 0.438 |
+| Source Session Recall | 97.2% |
+| Gold Message Recall | 69.0% |
+| Injected Chunk Recall | 68.6% |
+| Injected Text Coverage | 69.1% |
+| 平均记忆上下文 | 1,819 tokens（输入的 23.9%） |
+
+这些指标只统计真正注入回答模型的 evidence chunk。当前主要瓶颈已经不是找到
+正确 Session，而是从跨 Session 内容中稳定选出真正支持答案的消息片段。
 
 公开 LongMemEval 成绩按分数排序如下，仅用于定位：
 
@@ -61,9 +76,9 @@ leaderboard 成绩。
 |---|---:|---|
 | Mem0 Platform | 94.8% | Mem0 当前 benchmark，Top 50 |
 | LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
+| **LuminaCode** | **68.4%** | DeepSeek Judge，复用官方 prompt |
 | Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
 | Mem0 | 62.6% | GPT-4o-mini 同设置 baseline |
-| **LuminaCode** | **61.6%** | DeepSeek Judge，5 次结果一致 |
 | Zep | 58.6% | GPT-4o-mini 同设置 baseline |
 | A-Mem | 55.0% | GPT-4o-mini 同设置 baseline |
 | MemOS | 51.2% | GPT-4o-mini 同设置 baseline |

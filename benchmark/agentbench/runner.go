@@ -289,7 +289,7 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		BenchmarkSuiteBreakdown: map[string]float64{},
 	}
 	var durations, ttft, firstTool, firstTest, inputTokens, outputTokens, patchRates, testRates []float64
-	var retrievedCounts, evidenceRecalls, evidenceMRRs, sourceRecalls, memoryTokenEstimates, memoryTokenRatios []float64
+	var retrievedCounts, evidenceRecalls, evidenceMRRs, sourceRecalls, messageRecalls, chunkRecalls, textCoverages, memoryTokenEstimates, memoryTokenRatios []float64
 	var subtaskAnswerRates, memoryUpdateRates, previousSubtaskHitRates, retrievalDurations, staleUseRates []float64
 	var evidenceMetricCases, evidenceHitCases int
 	var failing []TopFailingCase
@@ -324,6 +324,13 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 			}
 			if m.GoldSourceSessionCount > 0 {
 				sourceRecalls = append(sourceRecalls, m.SourceSessionRecall)
+			}
+			if m.GoldMessageCount > 0 {
+				messageRecalls = append(messageRecalls, m.GoldMessageRecall)
+				textCoverages = append(textCoverages, m.InjectedTextCoverage)
+			}
+			if m.GoldChunkCount > 0 {
+				chunkRecalls = append(chunkRecalls, m.InjectedChunkRecall)
 			}
 			if m.MemoryTokenEstimate > 0 {
 				memoryTokenEstimates = append(memoryTokenEstimates, float64(m.MemoryTokenEstimate))
@@ -385,6 +392,9 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 	summary.Memory.AverageEvidenceRecallAtK = Average(evidenceRecalls)
 	summary.Memory.AverageEvidenceMRR = Average(evidenceMRRs)
 	summary.Memory.AverageSourceSessionRecall = Average(sourceRecalls)
+	summary.Memory.AverageGoldMessageRecall = Average(messageRecalls)
+	summary.Memory.AverageInjectedChunkRecall = Average(chunkRecalls)
+	summary.Memory.AverageInjectedTextCoverage = Average(textCoverages)
 	summary.Memory.AverageMemoryTokenEstimate = Average(memoryTokenEstimates)
 	summary.Memory.AverageMemoryTokenRatio = Average(memoryTokenRatios)
 	summary.Memory.AverageRetrievalDurationMS = Average(retrievalDurations)

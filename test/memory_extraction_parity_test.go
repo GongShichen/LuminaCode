@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,7 @@ func TestLongTermExtractionPromptParserAndResultFormatting(t *testing.T) {
 		{"role": "user", "content": []map[string]any{{"type": "tool_result", "content": strings.Repeat("x", 220)}}},
 	}
 	prompt := agent.BuildLongTermExtractionPrompt(messages, nil)
-	if !strings.Contains(prompt, "Return JSON only") ||
+	if !strings.Contains(prompt, "Call ExtractMemoryBatch exactly once") ||
 		!strings.Contains(prompt, "remember my preference") ||
 		!strings.Contains(prompt, "[tool: read_file id=t1]") ||
 		!strings.Contains(prompt, "...(truncated)") ||
@@ -201,10 +202,14 @@ func TestExtractionControllerPreservesExplicitZeroConfigLikePython(t *testing.T)
 		if !strings.Contains(prompt, "first") || !strings.Contains(prompt, "second") {
 			t.Fatalf("context_message_count=0 should keep all messages like Python slicing, got %q", prompt)
 		}
-		if !strings.Contains(prompt, "Return JSON only") {
-			t.Fatalf("long-term extraction prompt should request structured JSON, got %q", prompt)
+		if !strings.Contains(prompt, "Call ExtractMemoryBatch exactly once") {
+			t.Fatalf("long-term extraction prompt should request a structured tool call, got %q", prompt)
 		}
-		return `{"memories":[{"scope_type":"project","memory_type":"semantic","title":"Zero","content":"zero config run"}]}`, nil
+		matches := regexp.MustCompile(`message_id=([^\]]+)`).FindStringSubmatch(prompt)
+		if len(matches) != 2 {
+			t.Fatalf("missing source message id in extraction prompt: %q", prompt)
+		}
+		return `{"memories":[{"scope_type":"project","memory_type":"semantic","title":"Zero","content":"zero config run","source_message_ids":["` + matches[1] + `"]}]}`, nil
 	}
 	if !controller.Schedule(context.Background(), &state, dir) {
 		t.Fatalf("explicit zero config should schedule extraction")

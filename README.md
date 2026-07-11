@@ -45,11 +45,12 @@ Cross-session memory lives in one local SQLite store:
 ~/.lumina/memory/lumina-memory.sqlite
 ```
 
-- Ingestion advances with a persistent message cursor and writes episodes,
-  evidence spans, facts, entities, temporal versions, relations, and provenance.
+- Ingestion first commits original messages and overlapping evidence chunks with
+  a persistent cursor. Semantic facts, entities, temporal versions, and
+  relations are enriched independently and can resume after a restart.
 - Every query runs BM25, local vector, entity, temporal, Session, and graph
-  retrieval. Results are fused with RRF, deduplicated with MMR, and packed into
-  a small sourced evidence packet.
+  retrieval. Results are fused with RRF, deduplicated with MMR, and packed from
+  the original chunks into a small sourced evidence packet.
 - User, project, Team, agent-type, and Team-agent scopes are isolated. Retrieved
   evidence is transient context and never enters the visible transcript.
 - Facts retain valid-time and observed-time history, so updates supersede old
@@ -62,10 +63,27 @@ governance.
 
 ### LongMemEval
 
-Lumina scored **61.6% (308/500)** on the 500-question oracle set. The same saved
-answers were judged five times with the official LongMemEval prompt and
-`deepseek-v4-pro`; every run and every per-case label agreed (mean 61.6%,
-standard deviation 0). This is not an official GPT-4o leaderboard score.
+Lumina scored **68.4% (342/500)** on the 500-question oracle set. The saved
+answers were evaluated with the official LongMemEval judge prompt and
+`deepseek-v4-pro`. This is not an official GPT-4o leaderboard score.
+
+The run also records retrieval quality separately from answer accuracy:
+
+| Retrieval metric | Result |
+|---|---:|
+| Evidence hit rate | 82.7% |
+| Evidence Recall@K | 68.6% |
+| Evidence MRR | 0.438 |
+| Source Session recall | 97.2% |
+| Gold message recall | 69.0% |
+| Injected chunk recall | 68.6% |
+| Injected text coverage | 69.1% |
+| Average memory context | 1,819 tokens (23.9% of input) |
+
+These metrics are measured from the evidence chunks actually injected into the
+answering model. They show the remaining gap clearly: the correct Session is
+usually found, but selecting the exact supporting messages across Sessions is
+still the main retrieval bottleneck.
 
 Published LongMemEval accuracy, sorted for orientation:
 
@@ -73,9 +91,9 @@ Published LongMemEval accuracy, sorted for orientation:
 |---|---:|---|
 | Mem0 Platform | 94.8% | Mem0 current benchmark, Top 50 |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
+| **LuminaCode** | **68.4%** | DeepSeek Judge, official prompt reused |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
-| **LuminaCode** | **61.6%** | DeepSeek Judge, five identical runs |
 | Zep | 58.6% | GPT-4o-mini controlled baseline |
 | A-Mem | 55.0% | GPT-4o-mini controlled baseline |
 | MemOS | 51.2% | GPT-4o-mini controlled baseline |
