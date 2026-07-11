@@ -20,6 +20,10 @@ func BuildEvidenceContextMessage(packet EvidencePacket) map[string]any {
 		"Long-term evidence recalled for this task. Use the original excerpts, provenance, and timestamps below as point-in-time evidence.",
 		"Distinguish user statements, assistant responses, tool observations, and derived facts. Compute from the evidence when needed, resolve updates by valid time and provenance, and express uncertainty only when the supplied evidence is genuinely insufficient. Recheck current files and external state before relying on mutable claims.",
 	}
+	if !packet.ReferenceTime.IsZero() {
+		parts = append(parts, "Reference time for this user turn: "+packet.ReferenceTime.UTC().Format(time.RFC3339),
+			"Interpret relative dates and event order against this reference time.")
+	}
 	var ids []string
 	if len(packet.CoreBlocks) > 0 {
 		parts = append(parts, "", "Core memory:")

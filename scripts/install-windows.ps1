@@ -275,10 +275,18 @@ try {
     }
 
     Copy-DirectoryContents -Source (Join-Path $repoRoot ".Lumina") -Destination $AppRoot
+    if (-not (Test-Path $defaultsPath)) {
+        Copy-Item -LiteralPath (Join-Path $AppRoot "CONFIG\defaults.json.example") -Destination $defaultsPath -Force
+    }
     Copy-Item -LiteralPath (Join-Path $repoRoot "setup-searxng.sh") -Destination (Join-Path $AppRoot "setup-searxng.sh") -Force
     if ($preservedDefaults -and -not $WriteDefaults) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $defaultsPath) -Force | Out-Null
-        Copy-Item -LiteralPath $preservedDefaults -Destination $defaultsPath -Force
+        $mergedDefaults = Get-Content -LiteralPath $defaultsPath -Raw | ConvertFrom-Json -AsHashtable
+        $userDefaults = Get-Content -LiteralPath $preservedDefaults -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($key in $userDefaults.Keys) {
+            $mergedDefaults[$key] = $userDefaults[$key]
+        }
+        $mergedDefaults | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $defaultsPath -Encoding UTF8
     }
 
     if (Test-Path $frontendInstallRoot) {

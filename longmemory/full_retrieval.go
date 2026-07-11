@@ -55,13 +55,18 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	}
 	opts = normalizeHybridOptions(opts, plan)
 	run := RetrievalRun{
-		RunID:          StableID(ScopeProject, "retrieval", query.Text, formatTime(started)),
-		Query:          query,
-		Expansion:      expansion,
-		ExpansionModel: opts.ExpansionModel,
-		ExpansionError: opts.ExpansionError,
-		CreatedAt:      started,
-		StopReason:     "completed",
+		RunID:                       StableID(ScopeProject, "retrieval", query.Text, formatTime(started)),
+		Query:                       query,
+		Expansion:                   expansion,
+		ExpansionModel:              opts.ExpansionModel,
+		ExpansionError:              opts.ExpansionError,
+		ExpansionWaitMS:             opts.ExpansionWaitMS,
+		CreatedAt:                   started,
+		StopReason:                  "completed",
+		ReferenceTime:               query.Timestamp,
+		GlobalChannelCandidates:     map[string]int{},
+		PerSessionChannelCandidates: map[string]map[string]int{},
+		CoverageFacets:              normalizeStrings(append(append([]string(nil), expansion.Queries...), append(expansion.Entities, expansion.RelationTerms...)...)),
 	}
 	trace := RetrievalTrace{
 		RunID:         run.RunID,
@@ -71,13 +76,30 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		Plan:          plan,
 		CreatedAt:     started,
 	}
-
-	localCtx := ctx
-	cancel := func() {}
-	if opts.LocalTimeout > 0 {
-		localCtx, cancel = context.WithTimeout(ctx, opts.LocalTimeout)
+	cacheKey := ""
+	if opts.CacheEnabled && opts.CacheTTL > 0 {
+		var scopeKey string
+		cacheKey, scopeKey = s.retrievalCacheKey(ctx, query, expansion, opts)
+		if cached, ok := getCachedRetrieval(cacheKey); ok {
+			run.CacheHit, run.CacheKeyScope = true, scopeKey
+			run.ChannelResults = append([]ChannelResult(nil), cached.channelResults...)
+			run.GlobalChannelCandidates = cached.globalCounts
+			run.PerSessionChannelCandidates = cached.perSessionCounts
+			run.CanonicalEntities, run.CanonicalEvents = cached.canonicalEntities, cached.canonicalEvents
+			run.SelectedIDs = append([]string(nil), cached.selectedIDs...)
+			run.InjectedIDs = evidenceIDs(cached.packet.Evidence)
+			run.Evidence = append([]Evidence(nil), cached.packet.Evidence...)
+			run.EstimatedTokens = cached.packet.EstimatedTokens
+			run.DurationMS = time.Since(started).Milliseconds()
+			trace.SelectedIDs, trace.EstimatedTokens, trace.DurationMS = run.SelectedIDs, run.EstimatedTokens, run.DurationMS
+			trace.Run = &run
+			if !opts.SuppressTrace {
+				_ = s.RecordRetrievalTrace(context.WithoutCancel(ctx), trace)
+			}
+			return AllChannelResult{Packet: cached.packet, Trace: trace, Run: run}, nil
+		}
+		run.CacheKeyScope = scopeKey
 	}
-	defer cancel()
 
 	outputs := make(chan baseChannelOutput, 5)
 	var wait sync.WaitGroup
@@ -86,7 +108,12 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		go func() {
 			defer wait.Done()
 			channelStarted := time.Now()
-			entries, err := fn(localCtx)
+			channelCtx, cancel := ctx, func() {}
+			if name == channelVector {
+				channelCtx, cancel = localRetrievalContext(ctx, opts.LocalTimeout)
+			}
+			defer cancel()
+			entries, err := fn(channelCtx)
 			outputs <- baseChannelOutput{name: name, query: strings.Join(queries, " | "), entries: entries,
 				err: err, started: channelStarted, done: time.Now()}
 		}()
@@ -122,12 +149,31 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		} else {
 			mergeChannelEntries(combined, output.name, output.entries, opts.RRFK)
 			channelResult.Candidates = retrievalCandidates(output.entries, output.name)
+			run.GlobalChannelCandidates[output.name] = len(output.entries)
 		}
 		run.ChannelResults = append(run.ChannelResults, channelResult)
 	}
 	sort.SliceStable(run.ChannelResults, func(i, j int) bool {
 		return channelOrder(run.ChannelResults[i].Channel) < channelOrder(run.ChannelResults[j].Channel)
 	})
+
+	if opts.SessionRetrieval {
+		sessionCtx, sessionCancel := localRetrievalContext(ctx, opts.LocalTimeout)
+		sessionRanks, sessionErr := s.rankSessions(sessionCtx, queries, query.Scopes, opts.SessionCandidates)
+		sessionCancel()
+		if sessionErr != nil {
+			warnings = append(warnings, "session-scoped retrieval: "+sessionErr.Error())
+		} else if len(sessionRanks) > 0 {
+			for _, item := range sessionRanks {
+				run.SelectedSessions = append(run.SelectedSessions, item.SessionID)
+			}
+			scoped, counts, scopedWarnings := s.searchSelectedSessions(ctx, sessionRanks, queries,
+				expansion, query.Scopes, embedder, opts)
+			run.PerSessionChannelCandidates = counts
+			warnings = append(warnings, scopedWarnings...)
+			mergeSessionScopedCandidates(combined, scoped, opts.RRFK)
+		}
+	}
 
 	stageOne := candidateSlice(combined)
 	stageOne = filterExcludedCandidates(stageOne, opts.ExcludeIDs)
@@ -141,12 +187,14 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		for index := range seeds {
 			seeds[index] = stageOne[index].MemoryID
 		}
-		graphScores, err := s.ExpandGraph(localCtx, seeds, query.Scopes, opts.GraphMaxHops, opts.GraphCandidates)
+		graphCtx, graphCancel := localRetrievalContext(ctx, opts.LocalTimeout)
+		graphScores, err := s.ExpandGraph(graphCtx, seeds, query.Scopes, opts.GraphMaxHops, opts.GraphCandidates)
+		graphCancel()
 		if err != nil {
 			graphResult.Error = err.Error()
 			warnings = append(warnings, channelGraph+": "+err.Error())
 		} else {
-			graphEntries, loadErr := s.entriesForGraph(localCtx, graphScores)
+			graphEntries, loadErr := s.entriesForGraph(ctx, graphScores)
 			if loadErr != nil {
 				graphResult.Error = loadErr.Error()
 				warnings = append(warnings, channelGraph+": "+loadErr.Error())
@@ -178,7 +226,8 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 			embeddings = loaded
 		}
 	}
-	selected := selectWithMMR(candidates, opts.MaxItems, opts.MMRLambda, embeddings)
+	opts.CoverageFacets = run.CoverageFacets
+	selected := selectWithCoverageMMR(candidates, opts.MaxItems, opts, embeddings)
 	selected = diversifySessions(selected, candidates, opts.MaxItems)
 	for _, item := range selected {
 		run.SelectedIDs = append(run.SelectedIDs, item.MemoryID)
@@ -196,12 +245,43 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	if err != nil {
 		warnings = append(warnings, "core blocks: "+err.Error())
 	}
+	opts.ReferenceTime = query.Timestamp
 	packet, packetErr := s.BuildEvidencePacket(ctx, plan, selected, blocks, opts)
 	if packetErr != nil {
 		warnings = append(warnings, "evidence packet: "+packetErr.Error())
 		run.StopReason = "evidence_packet_error"
 	}
 	packet.Warnings = append(packet.Warnings, warnings...)
+	if opts.CanonicalEntityEnabled {
+		entities, entityErr := s.SearchCanonicalEntities(ctx, strings.Join(queries, " "), query.Scopes)
+		if entityErr != nil {
+			packet.Warnings = append(packet.Warnings, "canonical entities: "+entityErr.Error())
+		} else {
+			run.CanonicalEntities = entities
+		}
+	}
+	if opts.CanonicalEventEnabled {
+		events, eventErr := s.SearchCanonicalEvents(ctx, strings.Join(queries, " "), query.Scopes)
+		if eventErr != nil {
+			packet.Warnings = append(packet.Warnings, "canonical events: "+eventErr.Error())
+		} else {
+			run.CanonicalEvents, packet.CanonicalEvents = events, events
+			for _, event := range events {
+				packet.Timeline = append(packet.Timeline, TimelineEntry{EventID: event.EventID, Text: event.Summary,
+					OccurredAt: event.OccurredAt, ValidFrom: event.ValidFrom, ValidUntil: event.ValidUntil})
+			}
+			sort.SliceStable(packet.Timeline, func(i, j int) bool {
+				left, right := packet.Timeline[i].OccurredAt, packet.Timeline[j].OccurredAt
+				if left.IsZero() {
+					left = packet.Timeline[i].ValidFrom
+				}
+				if right.IsZero() {
+					right = packet.Timeline[j].ValidFrom
+				}
+				return left.Before(right)
+			})
+		}
+	}
 	run.Evidence = append([]Evidence(nil), packet.Evidence...)
 	run.InjectedIDs = evidenceIDs(packet.Evidence)
 	run.EstimatedTokens = packet.EstimatedTokens
@@ -214,11 +294,23 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	if packetErr != nil {
 		trace.Error = packetErr.Error()
 	}
-	if err := s.RecordRetrievalTrace(context.WithoutCancel(ctx), trace); err != nil {
-		packet.Warnings = append(packet.Warnings, "record retrieval trace: "+err.Error())
+	if !opts.SuppressTrace {
+		if err := s.RecordRetrievalTrace(context.WithoutCancel(ctx), trace); err != nil {
+			packet.Warnings = append(packet.Warnings, "record retrieval trace: "+err.Error())
+		}
+		_ = s.MarkAccess(context.WithoutCancel(ctx), run.InjectedIDs)
 	}
-	_ = s.MarkAccess(context.WithoutCancel(ctx), run.InjectedIDs)
+	if cacheKey != "" && packetErr == nil {
+		putCachedRetrieval(cacheKey, packet, run, opts.CacheTTL)
+	}
 	return AllChannelResult{Packet: packet, Trace: trace, Run: run}, packetErr
+}
+
+func localRetrievalContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func preferEvidenceChunks(candidates []CandidateScore) []CandidateScore {
@@ -346,6 +438,124 @@ func mergeChannelEntries(combined map[string]*CandidateScore, channel string, en
 	}
 }
 
+func mergeSessionScopedCandidates(combined map[string]*CandidateScore, sessions map[string][]CandidateScore, rrfK int) {
+	for _, candidates := range sessions {
+		for rank, candidate := range candidates {
+			item := combined[candidate.MemoryID]
+			if item == nil {
+				copy := candidate
+				copy.ChannelRanks = map[string]int{}
+				copy.ChannelScores = map[string]float64{}
+				item = &copy
+				combined[candidate.MemoryID] = item
+			}
+			channel := "session_scoped"
+			if prior, exists := item.ChannelRanks[channel]; !exists || rank+1 < prior {
+				item.ChannelRanks[channel] = rank + 1
+			}
+			item.ChannelScores[channel] = candidate.FusedScore
+			item.FusedScore += 1 / float64(maxInt(rrfK, 1)+rank+1)
+		}
+	}
+}
+
+func (s *Store) searchSelectedSessions(ctx context.Context, sessions []sessionRank, queries []string,
+	expansion QueryExpansion, scopes []Scope, embedder Embedder, opts HybridSearchOptions) (map[string][]CandidateScore, map[string]map[string]int, []string) {
+	results := make(map[string][]CandidateScore, len(sessions))
+	counts := make(map[string]map[string]int, len(sessions))
+	var warnings []string
+	var vectors [][]float32
+	if embedder != nil {
+		var err error
+		embeddingCtx, cancel := localRetrievalContext(ctx, opts.LocalTimeout)
+		vectors, err = embedder.Embed(embeddingCtx, queries, EmbeddingQuery)
+		cancel()
+		if err != nil {
+			warnings = append(warnings, "session vector: "+err.Error())
+			vectors = nil
+		}
+	}
+	type sessionResult struct {
+		id         string
+		candidates []CandidateScore
+		counts     map[string]int
+		warnings   []string
+	}
+	output := make(chan sessionResult, len(sessions))
+	var wait sync.WaitGroup
+	for _, session := range sessions {
+		wait.Add(1)
+		go func(session sessionRank) {
+			defer wait.Done()
+			sessionCtx, cancel := localRetrievalContext(ctx, opts.LocalTimeout)
+			defer cancel()
+			candidates, channelCounts, channelWarnings := s.searchOneSelectedSession(sessionCtx, session, queries,
+				expansion, vectors, embedder, opts)
+			output <- sessionResult{id: session.SessionID, candidates: candidates, counts: channelCounts, warnings: channelWarnings}
+		}(session)
+	}
+	go func() { wait.Wait(); close(output) }()
+	for item := range output {
+		results[item.id], counts[item.id] = item.candidates, item.counts
+		warnings = append(warnings, item.warnings...)
+	}
+	_ = scopes
+	return results, counts, warnings
+}
+
+func (s *Store) searchOneSelectedSession(ctx context.Context, session sessionRank, queries []string,
+	expansion QueryExpansion, vectors [][]float32, embedder Embedder, opts HybridSearchOptions) ([]CandidateScore, map[string]int, []string) {
+	var warnings []string
+	sessionScopes := []Scope{{Type: session.ScopeType, Key: session.ScopeKey}}
+	channels := map[string][]Entry{}
+	bm25, err := s.searchSessionChunkText(ctx, session.SessionID, queries, nil, sessionScopes,
+		opts.SessionChunkCandidates, "session_bm25")
+	if err != nil {
+		warnings = append(warnings, session.SessionID+" bm25: "+err.Error())
+	} else {
+		channels[channelBM25] = bm25
+	}
+	entities, err := s.searchSessionChunkEntities(ctx, session.SessionID, queries, expansion.Entities, sessionScopes,
+		opts.SessionChunkCandidates)
+	if err != nil {
+		warnings = append(warnings, session.SessionID+" entity: "+err.Error())
+	} else {
+		channels[channelEntity] = entities
+	}
+	temporalEntries, err := s.searchSessionChunkTemporal(ctx, session.SessionID, queries,
+		expansion.TemporalConstraints, sessionScopes, opts.SessionChunkCandidates)
+	if err != nil {
+		warnings = append(warnings, session.SessionID+" temporal: "+err.Error())
+	} else {
+		channels[channelTemporal] = temporalEntries
+	}
+	if len(vectors) == len(queries) {
+		var vectorEntries []Entry
+		for _, vector := range vectors {
+			entries, vectorErr := s.searchSessionChunkVector(ctx, session.SessionID, vector, embedder.Model(), sessionScopes,
+				opts.SessionChunkCandidates)
+			if vectorErr != nil {
+				warnings = append(warnings, session.SessionID+" vector: "+vectorErr.Error())
+				continue
+			}
+			vectorEntries = appendUniqueEntries(vectorEntries, entries)
+		}
+		channels[channelVector] = vectorEntries
+	}
+	combined := map[string]*CandidateScore{}
+	counts := map[string]int{}
+	for _, channel := range []string{channelBM25, channelVector, channelEntity, channelTemporal} {
+		entries := channels[channel]
+		counts[channel] = len(entries)
+		mergeChannelEntries(combined, channel, entries, opts.RRFK)
+	}
+	candidates := candidateSlice(combined)
+	if len(candidates) > opts.ChunksPerSession {
+		candidates = candidates[:opts.ChunksPerSession]
+	}
+	return candidates, counts, warnings
+}
+
 func retrievalCandidates(entries []Entry, channel string) []RetrievalCandidate {
 	result := make([]RetrievalCandidate, 0, len(entries))
 	for rank, entry := range entries {
@@ -372,11 +582,17 @@ func (s *Store) entriesForGraph(ctx context.Context, scores map[string]float64) 
 		return nil, err
 	}
 	found := map[string]struct{}{}
+	activeEntries := entries[:0]
 	for index := range entries {
+		if entries[index].Status != StatusActive {
+			continue
+		}
 		found[entries[index].MemoryID] = struct{}{}
 		entries[index].Score = scores[entries[index].MemoryID]
 		entries[index].MatchReason = channelGraph
+		activeEntries = append(activeEntries, entries[index])
 	}
+	entries = activeEntries
 	var missing []string
 	for _, id := range ids {
 		if _, ok := found[id]; !ok {

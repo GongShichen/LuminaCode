@@ -182,6 +182,182 @@ func (s *Store) SearchChunkBM25(ctx context.Context, queries []string, scopes []
 	return s.searchChunkText(ctx, queries, nil, scopes, limit, "bm25")
 }
 
+// SearchSessionChunks searches inside a Session at SQL query time. It never
+// performs a global Top-K followed by filtering, so evidence deep in a relevant
+// Session cannot be discarded by unrelated Sessions first.
+func (s *Store) SearchSessionChunks(ctx context.Context, sessionID, query string, limit int) ([]Entry, error) {
+	return s.searchSessionChunkText(ctx, sessionID, []string{query}, nil, nil, limit, "session_bm25")
+}
+
+func (s *Store) searchSessionChunkText(ctx context.Context, sessionID string, queries, extraTerms []string, scopes []Scope, limit int, reason string) ([]Entry, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 64
+	}
+	best := map[string]Entry{}
+	for _, query := range normalizeStrings(append(append([]string(nil), queries...), extraTerms...)) {
+		ftsQuery := sanitizeFTSQuery(query)
+		if ftsQuery == "" {
+			continue
+		}
+		clauses, args := []string{"memory_chunk_fts MATCH ?", "c.session_id=?", "c.archived_at=''"}, []any{ftsQuery, sessionID}
+		if scopeSQL, scopeArgs := scopedClauses(scopes, "c."); scopeSQL != "" {
+			clauses = append(clauses, "("+scopeSQL+")")
+			args = append(args, scopeArgs...)
+		}
+		args = append(args, limit)
+		rows, err := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, bm25(memory_chunk_fts)
+			FROM memory_chunk_fts JOIN memory_evidence_chunks c ON c.chunk_id=memory_chunk_fts.chunk_id
+			WHERE `+strings.Join(clauses, " AND ")+` ORDER BY bm25(memory_chunk_fts) LIMIT ?`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			chunk, rank, scanErr := scanChunk(rows)
+			if scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			entry := chunkEntry(chunk, -rank, reason)
+			if prior, ok := best[entry.MemoryID]; !ok || entry.Score > prior.Score {
+				best[entry.MemoryID] = entry
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return sortedChunkEntries(best, limit), nil
+}
+
+func (s *Store) searchSessionChunkVector(ctx context.Context, sessionID string, embedding []float32, model string, scopes []Scope, limit int) ([]Entry, error) {
+	if strings.TrimSpace(sessionID) == "" || len(embedding) == 0 || strings.TrimSpace(model) == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 64
+	}
+	blob, err := vector.EncodeEmbedding(embedding)
+	if err != nil {
+		return nil, err
+	}
+	clauses, args := []string{"e.model=?", "e.dimensions=?", "c.session_id=?", "c.archived_at=''"}, []any{model, len(embedding), sessionID}
+	if scopeSQL, scopeArgs := scopedClauses(scopes, "c."); scopeSQL != "" {
+		clauses = append(clauses, "("+scopeSQL+")")
+		args = append(args, scopeArgs...)
+	}
+	queryArgs := append(append([]any(nil), args...), blob, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, vec_cosine(e.embedding, ?)
+		FROM memory_chunk_embeddings e JOIN memory_evidence_chunks c ON c.chunk_id=e.chunk_id
+		WHERE `+strings.Join(clauses, " AND ")+` ORDER BY vec_cosine(e.embedding, ?) DESC LIMIT ?`,
+		reorderChunkVectorArgs(queryArgs)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []Entry
+	for rows.Next() {
+		chunk, score, scanErr := scanChunk(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		entries = append(entries, chunkEntry(chunk, score, "session_vector"))
+	}
+	return entries, rows.Err()
+}
+
+func (s *Store) searchSessionChunkEntities(ctx context.Context, sessionID string, queries, entities []string, scopes []Scope, limit int) ([]Entry, error) {
+	entries, err := s.searchSessionChunkText(ctx, sessionID, queries, entities, scopes, limit, "session_entity")
+	if err != nil {
+		return nil, err
+	}
+	best := make(map[string]Entry, len(entries))
+	for _, entry := range entries {
+		best[entry.MemoryID] = entry
+	}
+	terms := normalizeEntityTerms(entities)
+	if len(terms) == 0 {
+		return sortedChunkEntries(best, limit), nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(terms)), ",")
+	args := make([]any, 0, len(terms)+len(scopes)*2+2)
+	for _, term := range terms {
+		args = append(args, normalizeEntityValue(term))
+	}
+	clauses := []string{"ce.normalized_entity IN (" + marks + ")", "c.session_id=?", "c.archived_at=''"}
+	args = append(args, sessionID)
+	if scopeSQL, scopeArgs := scopedClauses(scopes, "c."); scopeSQL != "" {
+		clauses = append(clauses, "("+scopeSQL+")")
+		args = append(args, scopeArgs...)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, ce.confidence
+		FROM memory_chunk_entities ce JOIN memory_evidence_chunks c ON c.chunk_id=ce.chunk_id
+		WHERE `+strings.Join(clauses, " AND ")+` ORDER BY ce.confidence DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		chunk, score, scanErr := scanChunk(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		entry := chunkEntry(chunk, score+1, "session_entity")
+		if prior, ok := best[entry.MemoryID]; !ok || entry.Score > prior.Score {
+			best[entry.MemoryID] = entry
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return sortedChunkEntries(best, limit), nil
+}
+
+func (s *Store) searchSessionChunkTemporal(ctx context.Context, sessionID string, queries []string, constraints []TemporalConstraint, scopes []Scope, limit int) ([]Entry, error) {
+	entries, err := s.searchSessionChunkText(ctx, sessionID, queries, nil, scopes, limit, "session_temporal")
+	if err != nil {
+		return nil, err
+	}
+	best := map[string]Entry{}
+	for _, entry := range entries {
+		if temporalEntryAllowed(entry, constraints) {
+			best[entry.MemoryID] = entry
+		}
+	}
+	if len(constraints) > 0 {
+		clauses, args := []string{"c.session_id=?", "c.archived_at=''"}, []any{sessionID}
+		if scopeSQL, scopeArgs := scopedClauses(scopes, "c."); scopeSQL != "" {
+			clauses = append(clauses, "("+scopeSQL+")")
+			args = append(args, scopeArgs...)
+		}
+		args = append(args, maxInt(limit*4, 64))
+		rows, queryErr := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, 0 FROM memory_evidence_chunks c
+			WHERE `+strings.Join(clauses, " AND ")+` ORDER BY c.occurred_at DESC LIMIT ?`, args...)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		for rows.Next() {
+			chunk, _, scanErr := scanChunk(rows)
+			if scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			entry := chunkEntry(chunk, 1, "session_temporal")
+			if temporalEntryAllowed(entry, constraints) {
+				best[entry.MemoryID] = entry
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return sortedChunkEntries(best, limit), nil
+}
+
 func (s *Store) searchChunkText(ctx context.Context, queries, extraTerms []string, scopes []Scope, limit int, reason string) ([]Entry, error) {
 	if limit <= 0 {
 		limit = 40
@@ -193,7 +369,7 @@ func (s *Store) searchChunkText(ctx context.Context, queries, extraTerms []strin
 			continue
 		}
 		scopeSQL, scopeArgs := scopedClauses(scopes, "c.")
-		clauses := []string{"memory_chunk_fts MATCH ?"}
+		clauses := []string{"memory_chunk_fts MATCH ?", "c.archived_at=''"}
 		args := []any{ftsQuery}
 		if scopeSQL != "" {
 			clauses = append(clauses, "("+scopeSQL+")")
@@ -247,7 +423,7 @@ func (s *Store) SearchChunkEntities(ctx context.Context, queries, entities []str
 	for _, entity := range normalized {
 		args = append(args, entity)
 	}
-	where := "ce.normalized_entity IN (" + marks + ")"
+	where := "ce.normalized_entity IN (" + marks + ") AND c.archived_at=''"
 	if scopeSQL, scopeArgs := scopedClauses(scopes, "c."); scopeSQL != "" {
 		where += " AND (" + scopeSQL + ")"
 		args = append(args, scopeArgs...)
@@ -289,9 +465,9 @@ func (s *Store) SearchChunkTemporal(ctx context.Context, queries []string, const
 	}
 	if len(constraints) > 0 {
 		scopeSQL, scopeArgs := scopedClauses(scopes, "c.")
-		query := `SELECT ` + chunkColumns + `, 0 FROM memory_evidence_chunks c`
+		query := `SELECT ` + chunkColumns + `, 0 FROM memory_evidence_chunks c WHERE c.archived_at=''`
 		if scopeSQL != "" {
-			query += " WHERE " + scopeSQL
+			query += " AND " + scopeSQL
 		}
 		query += " ORDER BY c.occurred_at DESC LIMIT ?"
 		args := append(scopeArgs, maxInt(limit*8, 160))
@@ -334,49 +510,24 @@ func (s *Store) chunksForSessions(ctx context.Context, sessions []sessionRank, q
 	if len(sessions) == 0 {
 		return nil, nil
 	}
-	allowed := map[string]float64{}
+	best := map[string]Entry{}
 	for _, session := range sessions {
-		allowed[sessionScopeKey(session.ScopeType, session.ScopeKey, session.SessionID)] = session.Rank
-	}
-	entries, err := s.SearchChunkBM25(ctx, queries, scopes, maxInt(limit*4, 40))
-	if err != nil {
-		return nil, err
-	}
-	filtered := entries[:0]
-	for _, entry := range entries {
-		rank, ok := allowed[sessionScopeKey(entry.ScopeType, entry.ScopeKey, entry.SourceSessionID)]
-		if !ok {
-			continue
-		}
-		entry.Score += rank
-		entry.MatchReason = "session"
-		filtered = append(filtered, entry)
-	}
-	if len(filtered) == 0 {
-		var clauses []string
-		var args []any
-		for _, session := range sessions {
-			clauses = append(clauses, "(c.scope_type=? AND c.scope_key=? AND c.session_id=?)")
-			args = append(args, session.ScopeType, session.ScopeKey, session.SessionID)
-		}
-		args = append(args, limit)
-		rows, queryErr := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, 0 FROM memory_evidence_chunks c
-			WHERE (`+strings.Join(clauses, " OR ")+`) ORDER BY c.occurred_at LIMIT ?`, args...)
-		if queryErr != nil {
-			return nil, queryErr
-		}
-		for rows.Next() {
-			chunk, _, scanErr := scanChunk(rows)
-			if scanErr != nil {
-				rows.Close()
-				return nil, scanErr
-			}
-			entry := chunkEntry(chunk, allowed[sessionScopeKey(chunk.ScopeType, chunk.ScopeKey, chunk.SessionID)], "session")
-			filtered = append(filtered, entry)
-		}
-		if err := rows.Close(); err != nil {
+		sessionScopes := []Scope{{Type: session.ScopeType, Key: session.ScopeKey}}
+		entries, err := s.searchSessionChunkText(ctx, session.SessionID, queries, nil, sessionScopes,
+			maxInt(limit, 6), "session")
+		if err != nil {
 			return nil, err
 		}
+		for rank, entry := range entries {
+			entry.Score = session.Rank + 1/float64(rank+1)
+			if prior, ok := best[entry.MemoryID]; !ok || entry.Score > prior.Score {
+				best[entry.MemoryID] = entry
+			}
+		}
+	}
+	filtered := make([]Entry, 0, len(best))
+	for _, entry := range best {
+		filtered = append(filtered, entry)
 	}
 	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Score > filtered[j].Score })
 	if limit > 0 && len(filtered) > limit {
@@ -397,7 +548,7 @@ func (s *Store) SearchChunkVector(ctx context.Context, embedding []float32, mode
 		return nil, err
 	}
 	scopeSQL, scopeArgs := scopedClauses(scopes, "c.")
-	clauses := []string{"e.model=?", "e.dimensions=?"}
+	clauses := []string{"e.model=?", "e.dimensions=?", "c.archived_at=''"}
 	args := []any{model, len(embedding)}
 	if scopeSQL != "" {
 		clauses = append(clauses, "("+scopeSQL+")")
@@ -501,7 +652,7 @@ func (s *Store) GetChunks(ctx context.Context, ids []string) ([]EvidenceChunk, e
 		args[index] = ids[index]
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+chunkColumns+`, 0 FROM memory_evidence_chunks c
-		WHERE c.chunk_id IN (`+marks+`)`, args...)
+		WHERE c.archived_at='' AND c.chunk_id IN (`+marks+`)`, args...)
 	if err != nil {
 		return nil, err
 	}

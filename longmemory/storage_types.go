@@ -124,15 +124,20 @@ type EvidenceChunk struct {
 }
 
 type CoreBlock struct {
-	BlockID     string    `json:"block_id"`
-	ScopeType   ScopeType `json:"scope_type"`
-	ScopeKey    string    `json:"scope_key"`
-	Label       string    `json:"label"`
-	Description string    `json:"description"`
-	Content     string    `json:"content"`
-	ReadOnly    bool      `json:"read_only"`
-	Generation  int       `json:"generation"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	BlockID          string    `json:"block_id"`
+	ScopeType        ScopeType `json:"scope_type"`
+	ScopeKey         string    `json:"scope_key"`
+	Label            string    `json:"label"`
+	Description      string    `json:"description"`
+	Content          string    `json:"content"`
+	ReadOnly         bool      `json:"read_only"`
+	Generation       int       `json:"generation"`
+	Confidence       float64   `json:"confidence"`
+	SourceSessionID  string    `json:"source_session_id,omitempty"`
+	SourceMessageIDs []string  `json:"source_message_ids,omitempty"`
+	FirstObservedAt  time.Time `json:"first_observed_at,omitempty"`
+	LastConfirmedAt  time.Time `json:"last_confirmed_at,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type Job struct {
@@ -233,19 +238,74 @@ type ChannelResult struct {
 }
 
 type RetrievalRun struct {
-	RunID           string          `json:"run_id"`
-	Query           MemoryQuery     `json:"query"`
-	Expansion       QueryExpansion  `json:"expansion"`
-	ExpansionModel  string          `json:"expansion_model,omitempty"`
-	ExpansionError  string          `json:"expansion_error,omitempty"`
-	ChannelResults  []ChannelResult `json:"channel_results"`
-	SelectedIDs     []string        `json:"selected_ids,omitempty"`
-	InjectedIDs     []string        `json:"injected_ids,omitempty"`
-	Evidence        []Evidence      `json:"evidence,omitempty"`
-	StopReason      string          `json:"stop_reason"`
-	EstimatedTokens int             `json:"estimated_tokens,omitempty"`
-	DurationMS      int64           `json:"duration_ms"`
-	CreatedAt       time.Time       `json:"created_at"`
+	RunID                       string                    `json:"run_id"`
+	Query                       MemoryQuery               `json:"query"`
+	Expansion                   QueryExpansion            `json:"expansion"`
+	ExpansionModel              string                    `json:"expansion_model,omitempty"`
+	ExpansionError              string                    `json:"expansion_error,omitempty"`
+	ChannelResults              []ChannelResult           `json:"channel_results"`
+	SelectedIDs                 []string                  `json:"selected_ids,omitempty"`
+	InjectedIDs                 []string                  `json:"injected_ids,omitempty"`
+	Evidence                    []Evidence                `json:"evidence,omitempty"`
+	StopReason                  string                    `json:"stop_reason"`
+	EstimatedTokens             int                       `json:"estimated_tokens,omitempty"`
+	DurationMS                  int64                     `json:"duration_ms"`
+	ReferenceTime               time.Time                 `json:"reference_time,omitempty"`
+	SelectedSessions            []string                  `json:"selected_sessions,omitempty"`
+	GlobalChannelCandidates     map[string]int            `json:"global_channel_candidates,omitempty"`
+	PerSessionChannelCandidates map[string]map[string]int `json:"per_session_channel_candidates,omitempty"`
+	CoverageFacets              []string                  `json:"coverage_facets,omitempty"`
+	CanonicalEntities           []CanonicalEntity         `json:"canonical_entities,omitempty"`
+	CanonicalEvents             []CanonicalEvent          `json:"canonical_events,omitempty"`
+	CacheHit                    bool                      `json:"cache_hit,omitempty"`
+	CacheKeyScope               string                    `json:"cache_key_scope,omitempty"`
+	ExpansionWaitMS             int64                     `json:"expansion_wait_ms,omitempty"`
+	CreatedAt                   time.Time                 `json:"created_at"`
+}
+
+type CanonicalEntity struct {
+	EntityID     string    `json:"entity_id"`
+	ScopeType    ScopeType `json:"scope_type"`
+	ScopeKey     string    `json:"scope_key"`
+	Name         string    `json:"name"`
+	EntityType   string    `json:"entity_type,omitempty"`
+	Confidence   float64   `json:"confidence"`
+	SourceChunks []string  `json:"source_chunks,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type CanonicalEvent struct {
+	EventID      string            `json:"event_id"`
+	ScopeType    ScopeType         `json:"scope_type"`
+	ScopeKey     string            `json:"scope_key"`
+	Title        string            `json:"title"`
+	Summary      string            `json:"summary"`
+	OccurredAt   time.Time         `json:"occurred_at,omitempty"`
+	ValidFrom    time.Time         `json:"valid_from,omitempty"`
+	ValidUntil   time.Time         `json:"valid_until,omitempty"`
+	Participants []CanonicalEntity `json:"participants,omitempty"`
+	SourceChunks []string          `json:"source_chunks,omitempty"`
+	Confidence   float64           `json:"confidence"`
+}
+
+type CanonicalMerge struct {
+	Entity       *CanonicalEntity `json:"entity,omitempty"`
+	Event        *CanonicalEvent  `json:"event,omitempty"`
+	Aliases      []string         `json:"aliases,omitempty"`
+	SourceChunks []string         `json:"source_chunks,omitempty"`
+}
+
+type TimelineEntry struct {
+	EventID    string    `json:"event_id,omitempty"`
+	DocumentID string    `json:"document_id,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	MessageID  string    `json:"message_id,omitempty"`
+	Role       string    `json:"role,omitempty"`
+	Text       string    `json:"text"`
+	OccurredAt time.Time `json:"occurred_at,omitempty"`
+	ValidFrom  time.Time `json:"valid_from,omitempty"`
+	ValidUntil time.Time `json:"valid_until,omitempty"`
 }
 
 type MemoryCatalog struct {
@@ -298,8 +358,11 @@ type Evidence struct {
 
 type EvidencePacket struct {
 	Plan            QueryPlan           `json:"plan"`
+	ReferenceTime   time.Time           `json:"reference_time,omitempty"`
 	CoreBlocks      []CoreBlock         `json:"core_blocks"`
 	Evidence        []Evidence          `json:"evidence"`
+	Timeline        []TimelineEntry     `json:"timeline,omitempty"`
+	CanonicalEvents []CanonicalEvent    `json:"canonical_events,omitempty"`
 	EstimatedTokens int                 `json:"estimated_tokens"`
 	Warnings        []string            `json:"warnings,omitempty"`
 	Documents       []RetrievalDocument `json:"documents,omitempty"`

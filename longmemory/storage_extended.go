@@ -110,6 +110,11 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 			content TEXT NOT NULL,
 			read_only INTEGER NOT NULL DEFAULT 0,
 			generation INTEGER NOT NULL DEFAULT 1,
+			confidence REAL NOT NULL DEFAULT 0.5,
+			source_session_id TEXT NOT NULL DEFAULT '',
+			source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+			first_observed_at TEXT NOT NULL DEFAULT '',
+			last_confirmed_at TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL,
 			UNIQUE(scope_type, scope_key, label)
 		);`,
@@ -214,6 +219,52 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 			drop_reason TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY(run_id, memory_id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS memory_canonical_entities (
+			entity_id TEXT PRIMARY KEY,
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			name TEXT NOT NULL,
+			entity_type TEXT NOT NULL DEFAULT '',
+			confidence REAL NOT NULL DEFAULT 0.5,
+			source_chunks_json TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(scope_type, scope_key, name, entity_type)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_entity_aliases (
+			entity_id TEXT NOT NULL,
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			alias TEXT NOT NULL,
+			normalized_alias TEXT NOT NULL,
+			confidence REAL NOT NULL DEFAULT 0.5,
+			source_chunk_id TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(entity_id, normalized_alias)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_events (
+			event_id TEXT PRIMARY KEY,
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			title TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			occurred_at TEXT NOT NULL DEFAULT '',
+			valid_from TEXT NOT NULL DEFAULT '',
+			valid_until TEXT NOT NULL DEFAULT '',
+			confidence REAL NOT NULL DEFAULT 0.5,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_event_participants (
+			event_id TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(event_id, entity_id, role)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_event_sources (
+			event_id TEXT NOT NULL,
+			chunk_id TEXT NOT NULL,
+			PRIMARY KEY(event_id, chunk_id)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_episodes_scope ON memory_episodes(scope_type, scope_key, occurred_at);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_episodes_hash ON memory_episodes(scope_type, scope_key, content_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_facts_key ON memory_facts(scope_type, scope_key, fact_key, status);`,
@@ -229,6 +280,9 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunk_entities_lookup ON memory_chunk_entities(scope_type, scope_key, normalized_entity);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_jobs_ready ON memory_jobs(status, available_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_retrieval_created ON memory_retrieval_runs(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_canonical_entity_lookup ON memory_canonical_entities(scope_type, scope_key, name);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_entity_alias_lookup ON memory_entity_aliases(scope_type, scope_key, normalized_alias);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_events_time ON memory_events(scope_type, scope_key, occurred_at);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -241,13 +295,85 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 	if err := ensureTableColumn(ctx, s.db, "memory_evidence_spans", "role", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrate evidence span role: %w", err)
 	}
+	for _, column := range []struct{ name, definition string }{
+		{"confidence", "REAL NOT NULL DEFAULT 0.5"},
+		{"source_session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"source_message_ids_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"first_observed_at", "TEXT NOT NULL DEFAULT ''"},
+		{"last_confirmed_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureTableColumn(ctx, s.db, "memory_core_blocks", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate core block %s: %w", column.name, err)
+		}
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"temperature", "TEXT NOT NULL DEFAULT 'warm'"},
+		{"retention_expires_at", "TEXT NOT NULL DEFAULT ''"},
+		{"access_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_reinforced_at", "TEXT NOT NULL DEFAULT ''"},
+		{"archived_at", "TEXT NOT NULL DEFAULT ''"},
+		{"archive_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"value_score", "REAL NOT NULL DEFAULT 0.5"},
+		{"value_score_updated_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureTableColumn(ctx, s.db, "memories", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate memory lifecycle %s: %w", column.name, err)
+		}
+	}
+	for _, table := range []string{"memory_episodes", "memory_session_index", "memory_evidence_chunks", "memory_retrieval_runs"} {
+		for _, column := range []struct{ name, definition string }{
+			{"temperature", "TEXT NOT NULL DEFAULT 'warm'"},
+			{"retention_expires_at", "TEXT NOT NULL DEFAULT ''"},
+			{"access_count", "INTEGER NOT NULL DEFAULT 0"},
+			{"last_accessed_at", "TEXT NOT NULL DEFAULT ''"},
+			{"last_reinforced_at", "TEXT NOT NULL DEFAULT ''"},
+			{"archived_at", "TEXT NOT NULL DEFAULT ''"},
+			{"archive_reason", "TEXT NOT NULL DEFAULT ''"},
+			{"pinned", "INTEGER NOT NULL DEFAULT 0"},
+			{"value_score", "REAL NOT NULL DEFAULT 0.5"},
+			{"value_score_updated_at", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			if err := ensureTableColumn(ctx, s.db, table, column.name, column.definition); err != nil {
+				return fmt.Errorf("migrate %s lifecycle %s: %w", table, column.name, err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS memory_lifecycle_events (
+		event_id TEXT PRIMARY KEY,
+		resource_kind TEXT NOT NULL,
+		resource_id TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		old_status TEXT NOT NULL DEFAULT '',
+		new_status TEXT NOT NULL DEFAULT '',
+		old_temperature TEXT NOT NULL DEFAULT '',
+		new_temperature TEXT NOT NULL DEFAULT '',
+		score REAL NOT NULL DEFAULT 0,
+		score_breakdown_json TEXT NOT NULL DEFAULT '{}',
+		reasons_json TEXT NOT NULL DEFAULT '[]',
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("migrate memory lifecycle events: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memory_lifecycle_resource
+		ON memory_lifecycle_events(resource_kind, resource_id, created_at)`); err != nil {
+		return fmt.Errorf("index memory lifecycle events: %w", err)
+	}
 	if _, err := s.BackfillEvidenceChunks(ctx, 0); err != nil {
 		return fmt.Errorf("backfill evidence chunks: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO memory_schema(key, value, updated_at) VALUES ('extended_storage', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 		"complete", formatTime(time.Now().UTC()))
-	return err
+	if err != nil {
+		return err
+	}
+	for _, jobType := range []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "chunk_embedding_backfill"} {
+		if scheduleErr := s.ScheduleBackfill(ctx, jobType); scheduleErr != nil {
+			return scheduleErr
+		}
+	}
+	return nil
 }
 
 func (s *Store) AppendEpisode(ctx context.Context, episode Episode) (*Episode, error) {
@@ -534,7 +660,11 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.bumpIndexGeneration(ctx)
+	return nil
 }
 
 func (s *Store) UpsertEmbedding(ctx context.Context, memoryID, model, contentHash string, embedding []float32) error {
@@ -1066,7 +1196,8 @@ func (s *Store) ListCoreBlocks(ctx context.Context, scopes []Scope) ([]CoreBlock
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT block_id, scope_type, scope_key, label, description, content,
-		read_only, generation, updated_at FROM memory_core_blocks WHERE `+strings.Join(clauses, " OR "), args...)
+		read_only, generation, confidence, source_session_id, source_message_ids_json, first_observed_at,
+		last_confirmed_at, updated_at FROM memory_core_blocks WHERE `+strings.Join(clauses, " OR "), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1075,12 +1206,16 @@ func (s *Store) ListCoreBlocks(ctx context.Context, scopes []Scope) ([]CoreBlock
 	for rows.Next() {
 		var block CoreBlock
 		var readOnly int
-		var updatedAt string
+		var sourceMessages, firstObserved, lastConfirmed, updatedAt string
 		if err := rows.Scan(&block.BlockID, &block.ScopeType, &block.ScopeKey, &block.Label, &block.Description,
-			&block.Content, &readOnly, &block.Generation, &updatedAt); err != nil {
+			&block.Content, &readOnly, &block.Generation, &block.Confidence, &block.SourceSessionID,
+			&sourceMessages, &firstObserved, &lastConfirmed, &updatedAt); err != nil {
 			return nil, err
 		}
 		block.ReadOnly = readOnly != 0
+		block.SourceMessageIDs = fromJSONList(sourceMessages)
+		block.FirstObservedAt = parseTime(firstObserved)
+		block.LastConfirmedAt = parseTime(lastConfirmed)
 		block.UpdatedAt = parseTime(updatedAt)
 		blocks = append(blocks, block)
 	}
@@ -1378,9 +1513,31 @@ func appendEpisodeTx(ctx context.Context, tx *sql.Tx, episode Episode) error {
 }
 
 func upsertEntryTx(ctx context.Context, tx *sql.Tx, entry *Entry) error {
+	wasExisting := false
+	var oldTemperature Temperature
+	var oldStatus Status
 	if existing, _ := getEntryTx(ctx, tx, entry.MemoryID); existing != nil {
+		wasExisting = true
+		oldTemperature, oldStatus = existing.Temperature, existing.Status
 		entry.CreatedAt = existing.CreatedAt
 		entry.LastAccessedAt = existing.LastAccessedAt
+		entry.Temperature = existing.Temperature
+		entry.AccessCount = existing.AccessCount
+		entry.LastReinforcedAt = existing.LastReinforcedAt
+		entry.ArchivedAt = existing.ArchivedAt
+		entry.ArchiveReason = existing.ArchiveReason
+		entry.Pinned = existing.Pinned
+		entry.ValueScore = existing.ValueScore
+		entry.ValueScoreUpdatedAt = existing.ValueScoreUpdatedAt
+		if entry.RetentionExpiresAt.IsZero() {
+			entry.RetentionExpiresAt = existing.RetentionExpiresAt
+		}
+		entry.LastReinforcedAt = time.Now().UTC()
+		entry.Temperature = TemperatureHot
+		if entry.Status == StatusActive {
+			entry.ArchivedAt = time.Time{}
+			entry.ArchiveReason = ""
+		}
 	}
 	now := time.Now().UTC()
 	if entry.CreatedAt.IsZero() {
@@ -1390,19 +1547,28 @@ func upsertEntryTx(ctx context.Context, tx *sql.Tx, entry *Entry) error {
 	if entry.LastAccessedAt.IsZero() {
 		entry.LastAccessedAt = now
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO memories (`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	if entry.Temperature == "" {
+		entry.Temperature = TemperatureWarm
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO memories (`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET scope_type=excluded.scope_type, scope_key=excluded.scope_key,
 		memory_type=excluded.memory_type, title=excluded.title, content=excluded.content, summary=excluded.summary,
 		tags_json=excluded.tags_json, entities_json=excluded.entities_json, importance=excluded.importance,
 		confidence=excluded.confidence, source_session_id=excluded.source_session_id,
 		source_message_ids_json=excluded.source_message_ids_json, source_agent_id=excluded.source_agent_id,
 		source_team_session_id=excluded.source_team_session_id, source_paths_json=excluded.source_paths_json,
-		updated_at=excluded.updated_at, last_accessed_at=excluded.last_accessed_at, valid_from=excluded.valid_from,
+		updated_at=excluded.updated_at, last_accessed_at=excluded.last_accessed_at,
+		temperature=excluded.temperature, retention_expires_at=excluded.retention_expires_at,
+		access_count=excluded.access_count, last_reinforced_at=excluded.last_reinforced_at,
+		archived_at=excluded.archived_at, archive_reason=excluded.archive_reason, pinned=excluded.pinned,
+		value_score=excluded.value_score, value_score_updated_at=excluded.value_score_updated_at, valid_from=excluded.valid_from,
 		valid_until=excluded.valid_until, superseded_by=excluded.superseded_by, status=excluded.status`,
 		entry.MemoryID, entry.ScopeType, entry.ScopeKey, entry.MemoryType, entry.Title, entry.Content, entry.Summary,
 		toJSON(entry.Tags), toJSON(entry.Entities), clamp01(entry.Importance), clamp01(entry.Confidence),
 		entry.SourceSessionID, toJSON(entry.SourceMessageIDs), entry.SourceAgentID, entry.SourceTeamSessionID,
 		toJSON(entry.SourcePaths), formatTime(entry.CreatedAt), formatTime(entry.UpdatedAt), formatTime(entry.LastAccessedAt),
+		entry.Temperature, formatTime(entry.RetentionExpiresAt), entry.AccessCount, formatTime(entry.LastReinforcedAt),
+		formatTime(entry.ArchivedAt), entry.ArchiveReason, entry.Pinned, clamp01(entry.ValueScore), formatTime(entry.ValueScoreUpdatedAt),
 		formatTime(entry.ValidFrom), formatTime(entry.ValidUntil), entry.SupersededBy, entry.Status)
 	if err != nil {
 		return err
@@ -1414,6 +1580,15 @@ func upsertEntryTx(ctx context.Context, tx *sql.Tx, entry *Entry) error {
 		_, err = tx.ExecContext(ctx, `INSERT INTO memory_fts(memory_id, title, content, summary, tags, entities)
 			VALUES (?, ?, ?, ?, ?, ?)`, entry.MemoryID, entry.Title, entry.Content, entry.Summary,
 			strings.Join(entry.Tags, " "), strings.Join(entry.Entities, " "))
+	}
+	if err == nil && wasExisting {
+		err = insertLifecycleEventTx(ctx, tx, LifecycleEvent{ResourceKind: "memory", ResourceID: entry.MemoryID,
+			EventType: "reinforcement", OldStatus: oldStatus, NewStatus: entry.Status,
+			OldTemperature: oldTemperature, NewTemperature: TemperatureHot, Score: entry.ValueScore,
+			Reasons: []string{"memory_upsert"}, CreatedAt: entry.UpdatedAt})
+	}
+	if err == nil && wasExisting && oldStatus != StatusActive && entry.Status == StatusActive {
+		err = reindexMemoryChunksTx(ctx, tx, entry.MemoryID)
 	}
 	return err
 }
@@ -1487,12 +1662,17 @@ func upsertEdgeTx(ctx context.Context, tx *sql.Tx, edge Edge) error {
 
 func upsertCoreBlockTx(ctx context.Context, tx *sql.Tx, block CoreBlock) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO memory_core_blocks(block_id, scope_type, scope_key, label,
-		description, content, read_only, generation, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		description, content, read_only, generation, confidence, source_session_id, source_message_ids_json,
+		first_observed_at, last_confirmed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(scope_type, scope_key, label) DO UPDATE SET description=excluded.description,
 		content=excluded.content, read_only=excluded.read_only, generation=memory_core_blocks.generation+1,
-		updated_at=excluded.updated_at WHERE memory_core_blocks.read_only=0`, block.BlockID, block.ScopeType,
+		confidence=MAX(memory_core_blocks.confidence, excluded.confidence), source_session_id=excluded.source_session_id,
+		source_message_ids_json=excluded.source_message_ids_json,
+		first_observed_at=CASE WHEN memory_core_blocks.first_observed_at='' THEN excluded.first_observed_at ELSE memory_core_blocks.first_observed_at END,
+		last_confirmed_at=excluded.last_confirmed_at, updated_at=excluded.updated_at WHERE memory_core_blocks.read_only=0`, block.BlockID, block.ScopeType,
 		block.ScopeKey, block.Label, block.Description, block.Content, boolInt(block.ReadOnly), block.Generation,
-		formatTime(block.UpdatedAt))
+		block.Confidence, block.SourceSessionID, toJSON(block.SourceMessageIDs), formatTime(block.FirstObservedAt),
+		formatTime(block.LastConfirmedAt), formatTime(block.UpdatedAt))
 	return err
 }
 
@@ -1599,8 +1779,19 @@ func normalizeCoreBlock(block CoreBlock) CoreBlock {
 	if block.Generation <= 0 {
 		block.Generation = 1
 	}
+	if block.Confidence <= 0 {
+		block.Confidence = 0.5
+	}
+	block.Confidence = clamp01(block.Confidence)
+	block.SourceMessageIDs = normalizeStrings(block.SourceMessageIDs)
 	if block.UpdatedAt.IsZero() {
 		block.UpdatedAt = time.Now().UTC()
+	}
+	if block.FirstObservedAt.IsZero() {
+		block.FirstObservedAt = block.UpdatedAt
+	}
+	if block.LastConfirmedAt.IsZero() {
+		block.LastConfirmedAt = block.UpdatedAt
 	}
 	if block.BlockID == "" {
 		block.BlockID = StableID(block.ScopeType, block.ScopeKey, "core", block.Label)

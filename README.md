@@ -49,41 +49,92 @@ Cross-session memory lives in one local SQLite store:
   a persistent cursor. Semantic facts, entities, temporal versions, and
   relations are enriched independently and can resume after a restart.
 - Every query runs BM25, local vector, entity, temporal, Session, and graph
-  retrieval. Results are fused with RRF, deduplicated with MMR, and packed from
-  the original chunks into a small sourced evidence packet.
+  retrieval. Relevant Sessions are then searched again with SQL-level Session
+  constraints, so their supporting chunks are not lost to a global Top-K.
+- Global and per-Session results use equal-weight RRF, coverage-aware MMR, source
+  diversity, and adjacent chunk expansion. No additional reranker model is used.
+- Each turn carries one reference timestamp through expansion, temporal search,
+  timeline assembly, and the hidden answering context. Canonical entities and
+  events connect matching evidence across Sessions while retaining provenance.
 - User, project, Team, agent-type, and Team-agent scopes are isolated. Retrieved
   evidence is transient context and never enters the visible transcript.
 - Facts retain valid-time and observed-time history, so updates supersede old
   values without deleting their sources.
+- Lifecycle management separates fact validity from storage retention. Memories
+  move between `hot`, `warm`, and `cold` based on access and reinforcement; an
+  expired low-value memory is archived after a grace period, never physically
+  deleted by background maintenance. Pins, active dependencies, and unresolved
+  conflicts prevent automatic archival.
 
 `make install` downloads `multilingual-e5-small` from ModelScope into
 `~/.lumina/models/memory/`; `make uninstall` removes it. Use `/Memory`,
 `/MemorySearch`, `/MemoryForget`, `/MemoryExport`, and `/MemoryImport` for local
 governance.
 
+Common tuning fields in `~/.lumina/CONFIG/defaults.json`:
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `memory_session_candidates` | 12 | Relevant Sessions searched in depth |
+| `memory_chunks_per_session` | 6 | Maximum fused chunks retained per Session |
+| `memory_session_chunk_candidates` | 64 | Per-channel candidates inside a Session |
+| `memory_adjacent_chunk_window` | 1 | Neighbor chunks included around a hit |
+| `memory_retrieval_cache_ttl_seconds` | 300 | Scope-safe retrieval cache lifetime |
+| `memory_query_expansion_timeout_seconds` | 2 | Maximum wait for generic query expansion |
+| `memory_lifecycle_enabled` | true | Enable temperature, scoring, and automatic archival |
+| `memory_maintenance_interval_seconds` | 300 | Lifecycle maintenance interval |
+| `memory_hot_access_days` / `memory_warm_access_days` | 30 / 90 | Hot, warm, and cold access windows |
+| `memory_access_recency_half_life_days` | 30 | Half-life for access-recency decay |
+| `memory_archive_grace_days` | 30 | Grace period after retention expires |
+| `memory_archive_value_threshold` | 0.45 | Maximum value score eligible for archival |
+| `memory_value_weights` | See example config | Seven lifecycle value weights |
+| `memory_auto_hard_delete_enabled` | false | Must remain disabled; background hard delete is forbidden |
+
+The four `memory_mmr_*_weight` values control relevance, novelty, facet coverage,
+and source coverage and must add up to `1`. Configuration is hot-reloaded for the
+next turn; `make install` adds new defaults without overwriting existing values.
+
+Lifecycle value combines importance, confidence, access recency and frequency,
+reinforcement, provenance, and dependency strength. `memory_value_weights` must
+be complete, non-negative, and sum to `1`. `memory_auto_hard_delete_enabled`
+must remain `false`; physical deletion always requires an explicit user action.
+The `/Memory` view exposes temperature, value, retention, archive reasons, and
+lifecycle events, with pin, unpin, archive, and restore controls.
+
 ### LongMemEval
 
-Lumina scored **68.4% (342/500)** on the 500-question oracle set. The saved
+Lumina scored **72.8% (364/500)** on the 500-question oracle set. The saved
 answers were evaluated with the official LongMemEval judge prompt and
-`deepseek-v4-pro`. This is not an official GPT-4o leaderboard score.
+`deepseek-v4-pro` through `https://api.deepseek.com`. This is a complete
+500-question run, but it is not an official GPT-4o leaderboard score.
+
+| Question type | Accuracy |
+|---|---:|
+| Single-session assistant | 98.21% |
+| Single-session user | 97.14% |
+| Knowledge update | 85.90% |
+| Temporal reasoning | 69.92% |
+| Single-session preference | 60.00% |
+| Multi-session | 47.37% |
 
 The run also records retrieval quality separately from answer accuracy:
 
 | Retrieval metric | Result |
 |---|---:|
-| Evidence hit rate | 82.7% |
-| Evidence Recall@K | 68.6% |
-| Evidence MRR | 0.438 |
-| Source Session recall | 97.2% |
-| Gold message recall | 69.0% |
-| Injected chunk recall | 68.6% |
-| Injected text coverage | 69.1% |
-| Average memory context | 1,819 tokens (23.9% of input) |
+| Evidence hit rate | 86.43% |
+| Evidence Recall@K | 73.50% |
+| Evidence MRR | 0.443 |
+| Source Session recall | 97.24% |
+| Gold message recall | 73.99% |
+| Injected chunk recall | 73.50% |
+| Injected text coverage | 73.88% |
+| Average memory context | 1,804 tokens (70.84% memory token ratio) |
 
 These metrics are measured from the evidence chunks actually injected into the
-answering model. They show the remaining gap clearly: the correct Session is
-usually found, but selecting the exact supporting messages across Sessions is
-still the main retrieval bottleneck.
+answering model. The high Session recall and lower chunk-level recall show that
+the remaining bottleneck is selecting the decisive evidence inside a relevant
+Session, especially for multi-Session synthesis. Judge choice, reader model,
+retrieval depth, and context budget all affect comparisons with other reports.
 
 Published LongMemEval accuracy, sorted for orientation:
 
@@ -97,7 +148,7 @@ Published LongMemEval accuracy, sorted for orientation:
 | Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
 | HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
-| **LuminaCode** | **68.4%** | DeepSeek Judge, official prompt reused |
+| **LuminaCode** | **72.8%** | DeepSeek Judge, official prompt reused; 500 questions |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
 | Zep | 58.6% | GPT-4o-mini controlled baseline |

@@ -123,7 +123,7 @@ func runMemoryCLI(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("memory archive requires memory_id")
 		}
-		return store.SetStatus(ctx, args[1], longmemory.StatusArchived)
+		return store.Archive(ctx, args[1], "manual_archive")
 	case "approve":
 		if len(args) < 2 {
 			return fmt.Errorf("memory approve requires memory_id")
@@ -230,6 +230,9 @@ func runMemoryCLI(args []string) error {
 		}
 		return writeJSON(os.Stdout, records)
 	case "doctor":
+		if len(cfg.MemoryConfigErrors) > 0 {
+			return fmt.Errorf("invalid memory configuration: %s", strings.Join(cfg.MemoryConfigErrors, "; "))
+		}
 		if !cfg.MemoryEmbeddingEnabled {
 			return fmt.Errorf("memory embedding is disabled")
 		}
@@ -248,8 +251,16 @@ func runMemoryCLI(args []string) error {
 		if len(vectors) != 1 || dimensions != embedder.Dimensions() {
 			return fmt.Errorf("memory embedding self check returned shape %d x %d", len(vectors), dimensions)
 		}
+		catalog, catalogErr := store.InspectCatalog(ctx, nil)
+		if catalogErr != nil {
+			return catalogErr
+		}
 		return writeJSON(os.Stdout, map[string]any{"status": "ready", "model": embedder.Model(),
-			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir})
+			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir,
+			"indexed_memories": catalog.TotalMemories, "indexed_sessions": catalog.TotalSessions,
+			"indexed_chunks": catalog.TotalChunks, "lifecycle_enabled": cfg.MemoryLifecycleEnabled,
+			"maintenance_interval_seconds": cfg.MemoryMaintenanceIntervalSeconds,
+			"archive_value_threshold":      cfg.MemoryArchiveValueThreshold, "auto_hard_delete": false})
 	default:
 		return fmt.Errorf("unknown memory command: %s", args[0])
 	}
@@ -370,6 +381,9 @@ func run(args []string) error {
 	}
 	config.ApplyHarnessDefaults(&cfg)
 	if cfg.LongTermMemoryEnabled {
+		if err := cfg.ValidateMemoryConfig(); err != nil {
+			return err
+		}
 		store, err := longmemory.Open(context.Background(), cfg.LongTermMemoryStore)
 		if err != nil {
 			return fmt.Errorf("open long-term memory store: %w", err)

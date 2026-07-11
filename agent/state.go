@@ -47,9 +47,10 @@ type AgentState struct {
 	MemoryWritesSinceExtraction bool `json:"memory_writes_since_extraction"`
 	MemoryExtractionCursor      int  `json:"memory_extraction_cursor"`
 
-	LastQuery       string    `json:"last_query"`
-	MemoryQueryText string    `json:"memory_query_text,omitempty"`
-	MemoryQueryTime time.Time `json:"memory_query_time,omitempty"`
+	LastQuery               string    `json:"last_query"`
+	MemoryQueryText         string    `json:"memory_query_text,omitempty"`
+	MemoryQueryTime         time.Time `json:"memory_query_time,omitempty"`
+	MemoryQueryTimeExplicit bool      `json:"-"`
 
 	MemorySessionID     string `json:"memory_session_id,omitempty"`
 	MemoryAgentID       string `json:"memory_agent_id,omitempty"`

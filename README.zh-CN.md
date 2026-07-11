@@ -38,37 +38,85 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 
 - 写入先通过持久化 message cursor 提交原始消息和重叠 evidence chunk；事实、
   实体、时间版本和关系独立 enrichment，daemon 重启后可继续。
-- 每次查询固定运行 BM25、本地向量、实体、时间、Session 和图检索，再用
-  RRF 融合、MMR 去重，再从原始 chunk 组装为较小的带来源证据包。
+- 每次查询固定运行 BM25、本地向量、实体、时间、Session 和图检索。Session
+  索引选出相关 Session 后，会在 SQL 层限制 Session 并再次检索 chunk，避免
+  关键证据在全局 Top-K 阶段被其他 Session 挤掉。
+- 全局结果和 Session 内结果通过等权 RRF、coverage-aware MMR、来源多样性和
+  相邻 chunk 扩展统一组装；不增加额外 reranker 模型。
+- 每个 Turn 的参考时间会贯穿查询扩展、时间索引、timeline 和隐藏回答上下文。
+  canonical entity/event 用于连接跨 Session 的同一对象与事件，同时保留来源。
 - user、project、Team、agent type 和 Team agent scope 相互隔离。召回内容是
   临时上下文，不进入可见 transcript。
 - 事实同时保留有效时间和观测时间；新事实会替代旧版本，但不会删除历史来源。
+- 生命周期将事实有效期与存储保留期分开。记忆按访问和再次确认情况在
+  `hot / warm / cold` 间变化；到达保留期、经过宽限期且价值较低时只会归档，
+  不会被后台物理删除。pin、有效依赖和未解决冲突会阻止自动归档。
 
 `make install` 会从 ModelScope 安装 `multilingual-e5-small` 到
 `~/.lumina/models/memory/`，`make uninstall` 会一并删除。使用 `/Memory`、
 `/MemorySearch`、`/MemoryForget`、`/MemoryExport`、`/MemoryImport` 管理记忆。
 
+`~/.lumina/CONFIG/defaults.json` 中常用参数：
+
+| 参数 | 默认值 | 作用 |
+|---|---:|---|
+| `memory_session_candidates` | 12 | 深入检索的相关 Session 数量 |
+| `memory_chunks_per_session` | 6 | 每个 Session 最多保留的融合 chunk |
+| `memory_session_chunk_candidates` | 64 | Session 内每个通道的候选数 |
+| `memory_adjacent_chunk_window` | 1 | 命中 chunk 两侧附带的相邻窗口 |
+| `memory_retrieval_cache_ttl_seconds` | 300 | 按 scope 隔离的召回缓存时间 |
+| `memory_query_expansion_timeout_seconds` | 2 | 通用查询扩展的最大等待时间 |
+| `memory_lifecycle_enabled` | true | 启用温度、评分和自动归档 |
+| `memory_maintenance_interval_seconds` | 300 | 生命周期维护间隔 |
+| `memory_hot_access_days` / `memory_warm_access_days` | 30 / 90 | 热、温、冷记忆的访问窗口 |
+| `memory_access_recency_half_life_days` | 30 | 访问时效评分的指数衰减半衰期 |
+| `memory_archive_grace_days` | 30 | 保留期到期后的归档宽限期 |
+| `memory_archive_value_threshold` | 0.45 | 自动归档的最高价值分数 |
+| `memory_value_weights` | 见示例配置 | 生命周期价值评分的七项权重 |
+| `memory_auto_hard_delete_enabled` | false | 必须保持关闭，禁止后台物理删除 |
+
+四个 `memory_mmr_*_weight` 参数分别控制相关性、新颖性、facet 覆盖和来源覆盖，
+总和必须为 `1`。配置会在下一个 Turn 热加载；`make install` 只补充新默认字段，
+不会覆盖用户已有值。
+
+生命周期价值分由 importance、confidence、访问时效、访问频率、再次确认、
+provenance 和依赖强度组成。`memory_value_weights` 必须完整、非负且总和为 `1`。
+`memory_auto_hard_delete_enabled` 只能为 `false`；物理删除必须由用户在 `/Memory`
+中明确执行。管理视图可查看 temperature、value score、retention、归档原因和
+生命周期事件，并支持 pin、unpin、archive 与 restore。
+
 ### LongMemEval
 
-Lumina 在 500 题 oracle 数据集上的成绩为 **68.4%（342/500）**。保存的答案
-使用 LongMemEval 官方判分 prompt 和 `deepseek-v4-pro` 评估。这不是官方
-GPT-4o leaderboard 成绩。
+Lumina 在 500 题 oracle 数据集上的成绩为 **72.8%（364/500）**。保存的答案
+通过 `https://api.deepseek.com` 使用 LongMemEval 官方判分 prompt 和
+`deepseek-v4-pro` 完成 500 题评估。这不是官方 GPT-4o leaderboard 成绩。
+
+| 题型 | 准确率 |
+|---|---:|
+| Single-session assistant | 98.21% |
+| Single-session user | 97.14% |
+| Knowledge update | 85.90% |
+| Temporal reasoning | 69.92% |
+| Single-session preference | 60.00% |
+| Multi-session | 47.37% |
 
 本次运行同时把检索质量与答案准确率分开统计：
 
 | 检索指标 | 结果 |
 |---|---:|
-| Evidence Hit Rate | 82.7% |
-| Evidence Recall@K | 68.6% |
-| Evidence MRR | 0.438 |
-| Source Session Recall | 97.2% |
-| Gold Message Recall | 69.0% |
-| Injected Chunk Recall | 68.6% |
-| Injected Text Coverage | 69.1% |
-| 平均记忆上下文 | 1,819 tokens（输入的 23.9%） |
+| Evidence Hit Rate | 86.43% |
+| Evidence Recall@K | 73.50% |
+| Evidence MRR | 0.443 |
+| Source Session Recall | 97.24% |
+| Gold Message Recall | 73.99% |
+| Injected Chunk Recall | 73.50% |
+| Injected Text Coverage | 73.88% |
+| 平均记忆上下文 | 1,804 tokens（memory token ratio 70.84%） |
 
-这些指标只统计真正注入回答模型的 evidence chunk。当前主要瓶颈已经不是找到
-正确 Session，而是从跨 Session 内容中稳定选出真正支持答案的消息片段。
+这些指标只统计真正注入回答模型的 evidence chunk。较高的 Session recall 和
+相对较低的 chunk recall 表明，当前主要瓶颈是从相关 Session 内选出决定性证据，
+尤其是跨 Session 综合。不同报告使用的 judge、reader model、检索深度和上下文
+预算不同，横向比较时需要结合评测口径理解。
 
 公开 LongMemEval 成绩按分数排序如下，仅用于定位：
 
@@ -82,7 +130,7 @@ GPT-4o leaderboard 成绩。
 | Hindsight | 91.4% | Gemini 3 Pro；公开 benchmark 仓库 |
 | HydraDB | 90.79% | Gemini 3 Pro；论文报告 |
 | LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
-| **LuminaCode** | **68.4%** | DeepSeek Judge，复用官方 prompt |
+| **LuminaCode** | **72.8%** | DeepSeek Judge，复用官方 prompt；完整 500 题 |
 | Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
 | Mem0 | 62.6% | GPT-4o-mini 同设置 baseline |
 | Zep | 58.6% | GPT-4o-mini 同设置 baseline |

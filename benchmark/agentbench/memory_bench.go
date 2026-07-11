@@ -129,7 +129,7 @@ func RunMemoryBenchmarkSuite(ctx context.Context, options RunnerOptions) (Report
 			report.OfficialMetrics["upstream_evaluator_status"] = "prediction_write_failed"
 			report.OfficialMetrics["upstream_evaluator_error"] = predictionErr.Error()
 		} else {
-			status, output := runLongMemEvalEvaluator(ctx, filepath.Dir(filepath.Dir(datasetPath)), predictionPath, datasetPath)
+			status, output := runLongMemEvalEvaluator(ctx, filepath.Dir(filepath.Dir(datasetPath)), predictionPath, datasetPath, options.Config)
 			report.OfficialMetrics["upstream_evaluator_status"] = status
 			if output != "" {
 				report.OfficialMetrics["upstream_evaluator_output"] = output
@@ -167,13 +167,25 @@ func writeLongMemEvalPredictions(outputDir string, generatedAt time.Time, result
 	return path, file.Sync()
 }
 
-func runLongMemEvalEvaluator(ctx context.Context, benchmarkDir, predictionPath, datasetPath string) (string, string) {
-	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
-		return "not_run_missing_openai_api_key", ""
-	}
+func runLongMemEvalEvaluator(ctx context.Context, benchmarkDir, predictionPath, datasetPath string, cfg config.Config) (string, string) {
 	metricModel := strings.TrimSpace(os.Getenv("LONGMEMEVAL_EVAL_MODEL"))
 	if metricModel == "" {
-		metricModel = "gpt-4o"
+		metricModel = "deepseek-v4-pro"
+	}
+	apiKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(cfg.FallbackAPIKey)
+	}
+	if apiKey == "" {
+		return "not_run_missing_deepseek_api_key", ""
+	}
+	baseURL := strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL"))
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(cfg.FallbackAPIBaseURL)
+	}
+	baseURL = strings.TrimSuffix(strings.TrimSuffix(baseURL, "/"), "/anthropic")
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com"
 	}
 	evaluator := filepath.Join(benchmarkDir, "src", "evaluation", "evaluate_qa.py")
 	if _, err := os.Stat(evaluator); err != nil {
@@ -185,7 +197,8 @@ func runLongMemEvalEvaluator(ctx context.Context, benchmarkDir, predictionPath, 
 	}
 	command := exec.CommandContext(ctx, python, evaluator, metricModel, predictionPath, datasetPath)
 	command.Dir = benchmarkDir
-	command.Env = append(os.Environ(), "PYTHONPATH="+benchmarkDir)
+	command.Env = append(os.Environ(), "PYTHONPATH="+benchmarkDir, "DEEPSEEK_API_KEY="+apiKey,
+		"DEEPSEEK_BASE_URL="+baseURL)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "failed", strings.TrimSpace(string(output) + "\n" + err.Error())

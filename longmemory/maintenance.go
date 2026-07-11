@@ -234,9 +234,7 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 	result.Consolidated = consolidated.Consolidated
 	result.Linked = consolidated.Linked
 	result.Promoted = consolidated.Promoted
-	archived, err := s.archiveExpiredLowValue(ctx)
-	result.Archived = archived
-	return result, err
+	return result, nil
 }
 
 func (s *Store) sessionsMissingEmbedding(ctx context.Context, model string, limit int) ([]Entry, error) {
@@ -295,6 +293,13 @@ func (s *Store) Consolidate(ctx context.Context, embeddingModel string, limit in
 				continue
 			}
 			if !sameMemoryNamespace(entries[left], entries[right]) || !isSemanticDuplicate(entries[left], entries[right], embeddings) {
+				continue
+			}
+			conflicts, conflictErr := s.memoriesConflict(ctx, entries[left].MemoryID, entries[right].MemoryID)
+			if conflictErr != nil {
+				return result, conflictErr
+			}
+			if conflicts {
 				continue
 			}
 			canonical, duplicate := chooseCanonicalMemory(entries[left], entries[right])
@@ -363,6 +368,14 @@ func (s *Store) mergeDuplicateMemory(ctx context.Context, canonical, duplicate E
 	canonical.SourcePaths = normalizeStrings(append(canonical.SourcePaths, duplicate.SourcePaths...))
 	canonical.Importance = maxMemoryFloat(canonical.Importance, duplicate.Importance)
 	canonical.Confidence = maxMemoryFloat(canonical.Confidence, duplicate.Confidence)
+	canonical.AccessCount += duplicate.AccessCount
+	if duplicate.LastAccessedAt.After(canonical.LastAccessedAt) {
+		canonical.LastAccessedAt = duplicate.LastAccessedAt
+	}
+	if duplicate.LastReinforcedAt.After(canonical.LastReinforcedAt) {
+		canonical.LastReinforcedAt = duplicate.LastReinforcedAt
+	}
+	canonical.Temperature = TemperatureHot
 	if canonical.SourceSessionID == "" {
 		canonical.SourceSessionID = duplicate.SourceSessionID
 	}
@@ -406,11 +419,43 @@ func (s *Store) mergeDuplicateMemory(ctx context.Context, canonical, duplicate E
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id=?`, duplicate.MemoryID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_chunk_fts WHERE chunk_id IN
+		(SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`, duplicate.MemoryID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence_chunks SET archived_at=?, archive_reason=?, temperature=?
+		WHERE parent_memory_id=?`, formatTime(time.Now().UTC()), "superseded", TemperatureCold, duplicate.MemoryID); err != nil {
+		return err
+	}
 	if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: canonical.ScopeType, ScopeKey: canonical.ScopeKey,
 		FromID: duplicate.MemoryID, ToID: canonical.MemoryID, Type: EdgeDerivedFrom, Weight: 1, Confidence: canonical.Confidence})); err != nil {
 		return err
 	}
+	if err := insertLifecycleEventTx(ctx, tx, LifecycleEvent{ResourceKind: "memory", ResourceID: duplicate.MemoryID,
+		EventType: "supersede", OldStatus: duplicate.Status, NewStatus: StatusSuperseded,
+		OldTemperature: duplicate.Temperature, NewTemperature: duplicate.Temperature,
+		Score: duplicate.ValueScore, Reasons: []string{"consolidated_into:" + canonical.MemoryID}, CreatedAt: time.Now().UTC()}); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func (s *Store) memoriesConflict(ctx context.Context, leftID, rightID string) (bool, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_edges WHERE edge_type=? AND
+		((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND (valid_until='' OR valid_until>?)`,
+		EdgeContradicts, leftID, rightID, rightID, leftID, formatTime(time.Now().UTC())).Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return true, nil
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_facts l JOIN memory_facts r
+		ON l.fact_key=r.fact_key WHERE l.memory_id=? AND r.memory_id=? AND l.object<>r.object
+		AND l.status=? AND r.status=?`, leftID, rightID, StatusActive, StatusActive).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *Store) linkRelatedMemories(ctx context.Context, entries []Entry, maxLinks int) (int, error) {
@@ -572,21 +617,6 @@ func (s *Store) enrichLegacyMemory(ctx context.Context, entry Entry) (bool, erro
 		span.SessionID, span.MessageID, span.Role, firstString(entry.SourcePaths), span.Text, span.StartRune, span.EndRune,
 		formatTime(span.OccurredAt), span.ContentHash)
 	return err == nil, err
-}
-
-func (s *Store) archiveExpiredLowValue(ctx context.Context) (int, error) {
-	now := formatTime(time.Now().UTC())
-	result, err := s.db.ExecContext(ctx, `UPDATE memories SET status=?, updated_at=?
-		WHERE status=? AND valid_until<>'' AND valid_until<? AND importance<0.35 AND confidence<0.6`,
-		StatusArchived, now, StatusActive, now)
-	if err != nil {
-		return 0, err
-	}
-	affected, _ := result.RowsAffected()
-	if affected > 0 {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id IN (SELECT memory_id FROM memories WHERE status=?)`, StatusArchived)
-	}
-	return int(affected), nil
 }
 
 func normalizeJob(job Job) Job {

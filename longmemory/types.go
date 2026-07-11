@@ -34,42 +34,59 @@ const (
 	StatusSuperseded Status = "superseded"
 )
 
+type Temperature string
+
+const (
+	TemperatureHot  Temperature = "hot"
+	TemperatureWarm Temperature = "warm"
+	TemperatureCold Temperature = "cold"
+)
+
 type Scope struct {
 	Type ScopeType `json:"scope_type"`
 	Key  string    `json:"scope_key"`
 }
 
 type Entry struct {
-	MemoryID            string     `json:"memory_id"`
-	ScopeType           ScopeType  `json:"scope_type"`
-	ScopeKey            string     `json:"scope_key"`
-	MemoryType          MemoryType `json:"memory_type"`
-	Title               string     `json:"title"`
-	Content             string     `json:"content"`
-	Summary             string     `json:"summary"`
-	Tags                []string   `json:"tags"`
-	Entities            []string   `json:"entities"`
-	Importance          float64    `json:"importance"`
-	Confidence          float64    `json:"confidence"`
-	SourceSessionID     string     `json:"source_session_id"`
-	SourceMessageIDs    []string   `json:"source_message_ids"`
-	SourceAgentID       string     `json:"source_agent_id"`
-	SourceTeamSessionID string     `json:"source_team_session_id"`
-	SourcePaths         []string   `json:"source_paths"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	LastAccessedAt      time.Time  `json:"last_accessed_at"`
-	ValidFrom           time.Time  `json:"valid_from"`
-	ValidUntil          time.Time  `json:"valid_until"`
-	SupersededBy        string     `json:"superseded_by"`
-	Status              Status     `json:"status"`
-	Score               float64    `json:"score,omitempty"`
-	MatchReason         string     `json:"match_reason,omitempty"`
-	DocumentKind        string     `json:"document_kind,omitempty"`
-	ParentID            string     `json:"parent_id,omitempty"`
-	MessageID           string     `json:"message_id,omitempty"`
-	Role                string     `json:"role,omitempty"`
-	OccurredAt          time.Time  `json:"occurred_at,omitempty"`
+	MemoryID            string      `json:"memory_id"`
+	ScopeType           ScopeType   `json:"scope_type"`
+	ScopeKey            string      `json:"scope_key"`
+	MemoryType          MemoryType  `json:"memory_type"`
+	Title               string      `json:"title"`
+	Content             string      `json:"content"`
+	Summary             string      `json:"summary"`
+	Tags                []string    `json:"tags"`
+	Entities            []string    `json:"entities"`
+	Importance          float64     `json:"importance"`
+	Confidence          float64     `json:"confidence"`
+	SourceSessionID     string      `json:"source_session_id"`
+	SourceMessageIDs    []string    `json:"source_message_ids"`
+	SourceAgentID       string      `json:"source_agent_id"`
+	SourceTeamSessionID string      `json:"source_team_session_id"`
+	SourcePaths         []string    `json:"source_paths"`
+	CreatedAt           time.Time   `json:"created_at"`
+	UpdatedAt           time.Time   `json:"updated_at"`
+	LastAccessedAt      time.Time   `json:"last_accessed_at"`
+	Temperature         Temperature `json:"temperature"`
+	RetentionExpiresAt  time.Time   `json:"retention_expires_at"`
+	AccessCount         int64       `json:"access_count"`
+	LastReinforcedAt    time.Time   `json:"last_reinforced_at"`
+	ArchivedAt          time.Time   `json:"archived_at"`
+	ArchiveReason       string      `json:"archive_reason"`
+	Pinned              bool        `json:"pinned"`
+	ValueScore          float64     `json:"value_score"`
+	ValueScoreUpdatedAt time.Time   `json:"value_score_updated_at"`
+	ValidFrom           time.Time   `json:"valid_from"`
+	ValidUntil          time.Time   `json:"valid_until"`
+	SupersededBy        string      `json:"superseded_by"`
+	Status              Status      `json:"status"`
+	Score               float64     `json:"score,omitempty"`
+	MatchReason         string      `json:"match_reason,omitempty"`
+	DocumentKind        string      `json:"document_kind,omitempty"`
+	ParentID            string      `json:"parent_id,omitempty"`
+	MessageID           string      `json:"message_id,omitempty"`
+	Role                string      `json:"role,omitempty"`
+	OccurredAt          time.Time   `json:"occurred_at,omitempty"`
 }
 
 type Candidate struct {
@@ -94,6 +111,7 @@ type Candidate struct {
 	SourcePaths         []string   `json:"source_paths"`
 	ValidFrom           time.Time  `json:"valid_from"`
 	ValidUntil          time.Time  `json:"valid_until"`
+	RetentionExpiresAt  time.Time  `json:"retention_expires_at"`
 }
 
 type SearchOptions struct {

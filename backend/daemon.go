@@ -70,6 +70,11 @@ func RunDaemonCLI(args []string) error {
 	}
 	cfg := config.GetConfig()
 	if cfg.LongTermMemoryEnabled {
+		if err := cfg.ValidateMemoryConfig(); err != nil {
+			return err
+		}
+	}
+	if cfg.LongTermMemoryEnabled {
 		store, err := longmemory.Open(context.Background(), cfg.LongTermMemoryStore)
 		if err != nil {
 			return fmt.Errorf("open long-term memory store: %w", err)
@@ -240,12 +245,34 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 		if !cfg.LongTermMemoryEnabled {
 			return
 		}
+		if len(cfg.MemoryConfigErrors) > 0 {
+			fmt.Fprintf(os.Stderr, "lumina-backend memory configuration invalid: %s\n", strings.Join(cfg.MemoryConfigErrors, "; "))
+			return
+		}
 		store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance store: %v\n", err)
 			return
 		}
 		defer store.Close()
+		if cfg.MemoryLifecycleEnabled {
+			policy := memoryLifecyclePolicy(cfg)
+			if _, err := store.BackfillLifecycle(ctx, policy, time.Now().UTC()); err != nil {
+				fmt.Fprintf(os.Stderr, "lumina-backend memory lifecycle migration: %v\n", err)
+				return
+			}
+			decisions, err := store.PreviewMaintenance(ctx, policy, time.Now().UTC())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "lumina-backend memory lifecycle preview: %v\n", err)
+				return
+			}
+			if applied, err := store.ApplyMaintenance(ctx, decisions); err != nil {
+				fmt.Fprintf(os.Stderr, "lumina-backend memory lifecycle apply: %v\n", err)
+				return
+			} else if applied > 0 {
+				fmt.Fprintf(os.Stderr, "lumina-backend memory lifecycle: applied=%d\n", applied)
+			}
+		}
 		extractionJobs, _ := store.ClaimJobs(ctx, []string{"extraction"}, 8)
 		if len(extractionJobs) > 0 {
 			controller := agent.NewExtractionController(cfg, coretools.NewToolRegistry())
@@ -258,6 +285,15 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 				}
 			}
 		}
+		backfillJobs, _ := store.ClaimJobs(ctx, []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill"}, 8)
+		for _, job := range backfillJobs {
+			if err := store.RunBackfillJob(ctx, job); err != nil {
+				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
+				fmt.Fprintf(os.Stderr, "lumina-backend memory backfill: %v\n", err)
+			} else {
+				_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
+			}
+		}
 		if !cfg.MemoryEmbeddingEnabled {
 			return
 		}
@@ -266,7 +302,7 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
 			return
 		}
-		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "consolidation", "migration_backfill"}, 32)
+		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "chunk_embedding_backfill", "consolidation", "migration_backfill"}, 32)
 		if result, err := store.RunMaintenance(ctx, embedder, 32); err != nil {
 			for _, job := range jobs {
 				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
@@ -285,13 +321,17 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 		}
 	}
 	run()
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
 	for {
+		interval := config.GetConfig().MemoryMaintenanceIntervalSeconds
+		if interval <= 0 {
+			interval = 300
+		}
+		timer := time.NewTimer(time.Duration(interval) * time.Second)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			run()
 		}
 	}
@@ -1028,10 +1068,71 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			return nil, toRPCError("memory_store_open_failed", err)
 		}
 		defer store.Close()
-		if err := store.SetStatus(ctx, p.MemoryID, longmemory.StatusArchived); err != nil {
+		if err := store.Archive(ctx, p.MemoryID, "manual_archive"); err != nil {
 			return nil, toRPCError("memory_archive_failed", err)
 		}
 		return map[string]any{"archived": true}, nil
+	case "memory.pin", "memory.unpin":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		pinned := req.Method == "memory.pin"
+		if err := store.Pin(ctx, p.MemoryID, pinned); err != nil {
+			return nil, toRPCError("memory_pin_failed", err)
+		}
+		return map[string]any{"pinned": pinned}, nil
+	case "memory.lifecycle":
+		var p struct {
+			MemoryID string `json:"memory_id"`
+			Limit    int    `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		decision, err := store.CalculateLifecycle(ctx, p.MemoryID, memoryLifecyclePolicy(config.GetConfig()), time.Now().UTC())
+		if err != nil {
+			return nil, toRPCError("memory_lifecycle_failed", err)
+		}
+		events, err := store.ListLifecycleEvents(ctx, p.MemoryID, p.Limit)
+		if err != nil {
+			return nil, toRPCError("memory_lifecycle_events_failed", err)
+		}
+		return map[string]any{"decision": decision, "events": events}, nil
+	case "memory.maintenance.preview", "memory.maintenance.run":
+		store, err := s.openMemoryStore(ctx)
+		if err != nil {
+			return nil, toRPCError("memory_store_open_failed", err)
+		}
+		defer store.Close()
+		cfg := config.GetConfig()
+		if len(cfg.MemoryConfigErrors) > 0 {
+			return nil, toRPCError("memory_config_invalid", fmt.Errorf("%s", strings.Join(cfg.MemoryConfigErrors, "; ")))
+		}
+		policy := memoryLifecyclePolicy(cfg)
+		if _, err := store.BackfillLifecycle(ctx, policy, time.Now().UTC()); err != nil {
+			return nil, toRPCError("memory_lifecycle_migration_failed", err)
+		}
+		decisions, err := store.PreviewMaintenance(ctx, policy, time.Now().UTC())
+		if err != nil {
+			return nil, toRPCError("memory_maintenance_preview_failed", err)
+		}
+		applied := 0
+		if req.Method == "memory.maintenance.run" {
+			applied, err = store.ApplyMaintenance(ctx, decisions)
+			if err != nil {
+				return nil, toRPCError("memory_maintenance_run_failed", err)
+			}
+		}
+		return map[string]any{"decisions": decisions, "applied": applied}, nil
 	case "memory.approve":
 		var p struct {
 			MemoryID string `json:"memory_id"`
@@ -1262,6 +1363,28 @@ func parseMemoryFilterTime(text string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func memoryLifecyclePolicy(cfg config.Config) longmemory.LifecyclePolicy {
+	policy := longmemory.DefaultLifecyclePolicy()
+	policy.Enabled = cfg.MemoryLifecycleEnabled
+	policy.HotAccessDays = cfg.MemoryHotAccessDays
+	policy.WarmAccessDays = cfg.MemoryWarmAccessDays
+	policy.AccessRecencyHalfLife = cfg.MemoryAccessRecencyHalfLifeDays
+	policy.ArchiveGraceDays = cfg.MemoryArchiveGraceDays
+	policy.ArchiveValueThreshold = cfg.MemoryArchiveValueThreshold
+	policy.RetentionDays = longmemory.RetentionPolicy{}
+	for memoryType, days := range cfg.MemoryRetentionDays {
+		policy.RetentionDays[longmemory.MemoryType(memoryType)] = days
+	}
+	weights := cfg.MemoryValueWeights
+	policy.Weights = longmemory.ValueWeights{
+		Importance: weights["importance"], Confidence: weights["confidence"],
+		AccessRecency: weights["access_recency"], AccessFrequency: weights["access_frequency"],
+		Reinforcement: weights["reinforcement"], ProvenanceStrength: weights["provenance_strength"],
+		DependencyStrength: weights["dependency_strength"],
+	}
+	return policy
 }
 
 func ImportMemoryCandidates(ctx context.Context, store *longmemory.Store, path string, candidates []longmemory.Candidate) (int, error) {

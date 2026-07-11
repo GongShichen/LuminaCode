@@ -980,7 +980,8 @@ export class LuminaTui {
       const typ = item?.memory_type || "?";
       const status = item?.status || "?";
       const title = item?.title || item?.summary || "";
-      this.taskLines.push(`memory: ${id} [${status}] ${scope} ${typ} - ${title}`);
+      const temperature = item?.temperature || "warm";
+      this.taskLines.push(`memory: ${id} [${status}/${temperature}] ${scope} ${typ} - ${title}`);
     }
     this.renderTasks(true);
   }
@@ -999,10 +1000,11 @@ export class LuminaTui {
     this.menu.setItems(list.map((item) => {
       const id = String(item?.memory_id || "unknown");
       const status = String(item?.status || "?");
+      const temperature = String(item?.temperature || "warm");
       const scope = `${item?.scope_type || "?"}/${item?.scope_key || "?"}`;
       const typ = String(item?.memory_type || "?");
       const title = escapeBlessedTags(String(item?.title || item?.summary || ""));
-      return `${id}  [${status}] ${scope} ${typ}  ${title}`;
+      return `${id}  [${status}/${temperature}] ${scope} ${typ}  ${title}`;
     }));
     this.menu.select(0);
     this.menu.show();
@@ -1012,12 +1014,17 @@ export class LuminaTui {
 
   private async showMemoryDetail(memoryID: string): Promise<void> {
     try {
-      const item = await this.rpc.call("memory.get", { memory_id: memoryID });
+      const [item, lifecycle] = await Promise.all([
+        this.rpc.call("memory.get", { memory_id: memoryID }),
+        this.rpc.call("memory.lifecycle", { memory_id: memoryID, limit: 12 }),
+      ]);
+      const events = Array.isArray(lifecycle?.events) ? lifecycle.events : [];
       const lines = [
         `{${tuiTheme.brand}-fg}${escapeBlessedTags(item?.title || memoryID)}{/${tuiTheme.brand}-fg}`,
         "",
         `ID: ${item?.memory_id || memoryID}`,
         `Status: ${item?.status || "?"}`,
+        `Temperature: ${item?.temperature || "warm"}  Value: ${Number(item?.value_score || 0).toFixed(3)}  Pinned: ${item?.pinned ? "yes" : "no"}`,
         `Scope: ${item?.scope_type || "?"}/${item?.scope_key || "?"}`,
         `Type: ${item?.memory_type || "?"}`,
         `Importance: ${item?.importance ?? "?"}  Confidence: ${item?.confidence ?? "?"}`,
@@ -1025,12 +1032,19 @@ export class LuminaTui {
         `Source agent: ${item?.source_agent_id || "-"}`,
         `Updated: ${item?.updated_at || "-"}`,
         `Valid until: ${item?.valid_until || "-"}`,
+        `Retention expires: ${item?.retention_expires_at || "-"}`,
+        `Accesses: ${item?.access_count ?? 0}  Last accessed: ${item?.last_accessed_at || "-"}`,
+        `Last reinforced: ${item?.last_reinforced_at || "-"}`,
+        `Archived: ${item?.archived_at || "-"}  Reason: ${item?.archive_reason || "-"}`,
         "",
-        `{${tuiTheme.muted}-fg}[a] approve  [r] restore  [x] archive  [d] delete  [h] hard delete  [p] prioritize  [l] deprioritize  [esc] close{/${tuiTheme.muted}-fg}`,
+        `{${tuiTheme.muted}-fg}[n] pin  [u] unpin  [a] approve  [r] restore  [x] archive  [d] delete  [h] hard delete  [p] prioritize  [l] deprioritize  [esc] close{/${tuiTheme.muted}-fg}`,
         "",
         escapeBlessedTags(item?.summary || ""),
         "",
         escapeBlessedTags(item?.content || ""),
+        "",
+        `{${tuiTheme.brand}-fg}Lifecycle events{/${tuiTheme.brand}-fg}`,
+        ...events.map((event: any) => `${event?.created_at || "-"}  ${event?.event_type || "?"}  ${event?.old_status || "-"}/${event?.old_temperature || "-"} -> ${event?.new_status || "-"}/${event?.new_temperature || "-"}`),
       ];
       this.modal.setContent(lines.join("\n"));
       this.modal.scrollTo(0);
@@ -1039,6 +1053,8 @@ export class LuminaTui {
       this.requestRender(true);
       const run = (fn: () => Promise<void>) => void fn();
       this.setModalHandlers({
+        n: () => run(() => this.applyMemoryModalAction("memory.pin", memoryID)),
+        u: () => run(() => this.applyMemoryModalAction("memory.unpin", memoryID)),
         a: () => run(() => this.applyMemoryModalAction("memory.approve", memoryID)),
         r: () => run(() => this.applyMemoryModalAction("memory.restore", memoryID)),
         x: () => run(() => this.applyMemoryModalAction("memory.archive", memoryID)),

@@ -28,6 +28,7 @@ func (HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prompt 
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.MemoryQueryTime = queryTime
+	state.MemoryQueryTimeExplicit = true
 	if cfg.Yolo && state.PermissionState != nil {
 		state.PermissionState.YoloMode = true
 	}

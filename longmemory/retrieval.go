@@ -9,28 +9,44 @@ import (
 )
 
 type HybridSearchOptions struct {
-	FTSCandidates       int
-	VectorCandidates    int
-	GraphCandidates     int
-	GraphMaxHops        int
-	RRFK                int
-	MMRLambda           float64
-	MaxItems            int
-	CoreContextTokens   int
-	TargetContextTokens int
-	MaxContextTokens    int
-	LocalTimeout        time.Duration
-	SessionID           string
-	TeamSessionID       string
-	AgentID             string
-	ExcludeIDs          map[string]struct{}
-	ExpansionModel      string
-	ExpansionError      string
-	NeighborChunks      int
+	FTSCandidates          int
+	VectorCandidates       int
+	GraphCandidates        int
+	GraphMaxHops           int
+	RRFK                   int
+	MMRLambda              float64
+	MMRRelevanceWeight     float64
+	MMRNoveltyWeight       float64
+	MMRFacetWeight         float64
+	MMRSourceWeight        float64
+	SessionRetrieval       bool
+	SessionCandidates      int
+	ChunksPerSession       int
+	SessionChunkCandidates int
+	MaxItems               int
+	CoreContextTokens      int
+	TargetContextTokens    int
+	MaxContextTokens       int
+	LocalTimeout           time.Duration
+	SessionID              string
+	TeamSessionID          string
+	AgentID                string
+	ExcludeIDs             map[string]struct{}
+	ExpansionModel         string
+	ExpansionError         string
+	ExpansionWaitMS        int64
+	NeighborChunks         int
+	ReferenceTime          time.Time
+	CoverageFacets         []string
+	CanonicalEntityEnabled bool
+	CanonicalEventEnabled  bool
+	CacheEnabled           bool
+	CacheTTL               time.Duration
+	SuppressTrace          bool
 }
 
 func (s *Store) BuildEvidencePacket(ctx context.Context, plan QueryPlan, selected []CandidateScore, blocks []CoreBlock, opts HybridSearchOptions) (EvidencePacket, error) {
-	packet := EvidencePacket{Plan: plan}
+	packet := EvidencePacket{Plan: plan, ReferenceTime: opts.ReferenceTime}
 	coreBudget := minInt(opts.CoreContextTokens, opts.MaxContextTokens)
 	for _, block := range blocks {
 		cost := estimateTokens(block.Label + " " + block.Content)
@@ -130,7 +146,37 @@ func (s *Store) BuildEvidencePacket(ctx context.Context, plan QueryPlan, selecte
 		}
 		appendEntry(entry, item.FusedScore, sourceChunks)
 	}
+	packet.Timeline = timelineFromDocuments(packet.Documents)
 	return packet, nil
+}
+
+func timelineFromDocuments(documents []RetrievalDocument) []TimelineEntry {
+	timeline := make([]TimelineEntry, 0, len(documents))
+	for _, document := range documents {
+		timeline = append(timeline, TimelineEntry{DocumentID: document.DocumentID, SessionID: document.SessionID,
+			MessageID: document.MessageID, Role: document.Role, Text: document.Text, OccurredAt: document.OccurredAt,
+			ValidFrom: document.ValidFrom, ValidUntil: document.ValidUntil})
+	}
+	sort.SliceStable(timeline, func(i, j int) bool {
+		left, right := timeline[i].OccurredAt, timeline[j].OccurredAt
+		if left.IsZero() {
+			left = timeline[i].ValidFrom
+		}
+		if right.IsZero() {
+			right = timeline[j].ValidFrom
+		}
+		if left.Equal(right) {
+			return timeline[i].DocumentID < timeline[j].DocumentID
+		}
+		if left.IsZero() {
+			return false
+		}
+		if right.IsZero() {
+			return true
+		}
+		return left.Before(right)
+	})
+	return timeline
 }
 
 func mergeNeighborChunkText(chunks []EvidenceChunk) string {
@@ -176,6 +222,19 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 	if opts.MMRLambda <= 0 || opts.MMRLambda > 1 {
 		opts.MMRLambda = 0.75
 	}
+	if opts.MMRRelevanceWeight+opts.MMRNoveltyWeight+opts.MMRFacetWeight+opts.MMRSourceWeight <= 0 {
+		opts.MMRRelevanceWeight, opts.MMRNoveltyWeight = 0.60, 0.20
+		opts.MMRFacetWeight, opts.MMRSourceWeight = 0.15, 0.05
+	}
+	if opts.SessionCandidates <= 0 {
+		opts.SessionCandidates = 12
+	}
+	if opts.ChunksPerSession <= 0 {
+		opts.ChunksPerSession = 6
+	}
+	if opts.SessionChunkCandidates <= 0 {
+		opts.SessionChunkCandidates = 64
+	}
 	if opts.MaxItems <= 0 {
 		opts.MaxItems = 8
 	}
@@ -189,6 +248,83 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 		opts.MaxContextTokens = 6000
 	}
 	return opts
+}
+
+func selectWithCoverageMMR(candidates []CandidateScore, limit int, opts HybridSearchOptions, embeddings map[string][]float32) []CandidateScore {
+	if limit <= 0 || len(candidates) == 0 {
+		return nil
+	}
+	selected := make([]CandidateScore, 0, minInt(limit, len(candidates)))
+	selectedIDs, coveredFacets, coveredSessions := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+	for len(selected) < limit {
+		best, bestScore := -1, math.Inf(-1)
+		for index := range candidates {
+			candidate := candidates[index]
+			if _, ok := selectedIDs[candidate.MemoryID]; ok {
+				continue
+			}
+			maxSimilarity := 0.0
+			for _, prior := range selected {
+				similarity := cosineSimilarity(embeddings[candidate.MemoryID], embeddings[prior.MemoryID])
+				if candidate.Entry.SourceSessionID != "" && candidate.Entry.SourceSessionID == prior.Entry.SourceSessionID {
+					similarity = math.Max(similarity, 0.65)
+				}
+				maxSimilarity = math.Max(maxSimilarity, similarity)
+			}
+			facetGain := candidateFacetGain(candidate, opts.CoverageFacets, coveredFacets)
+			sourceGain := 0.0
+			if candidate.Entry.SourceSessionID != "" {
+				if _, seen := coveredSessions[candidate.Entry.SourceSessionID]; !seen {
+					sourceGain = 1
+				}
+			}
+			relevance := candidate.FusedScore * float64(maxInt(opts.RRFK, 1))
+			score := opts.MMRRelevanceWeight*relevance + opts.MMRNoveltyWeight*(1-maxSimilarity) +
+				opts.MMRFacetWeight*facetGain + opts.MMRSourceWeight*sourceGain
+			if score > bestScore {
+				best, bestScore = index, score
+			}
+		}
+		if best < 0 {
+			break
+		}
+		chosen := candidates[best]
+		selected = append(selected, chosen)
+		selectedIDs[chosen.MemoryID] = struct{}{}
+		if chosen.Entry.SourceSessionID != "" {
+			coveredSessions[chosen.Entry.SourceSessionID] = struct{}{}
+		}
+		markCandidateFacets(chosen, opts.CoverageFacets, coveredFacets)
+	}
+	return selected
+}
+
+func candidateFacetGain(candidate CandidateScore, facets []string, covered map[string]struct{}) float64 {
+	if len(facets) == 0 {
+		return 0
+	}
+	text := strings.ToLower(candidate.Entry.Title + " " + candidate.Entry.Summary + " " + candidate.Entry.Content + " " + strings.Join(candidate.Entry.Entities, " "))
+	gain := 0
+	for _, facet := range facets {
+		key := strings.ToLower(strings.TrimSpace(facet))
+		if key == "" {
+			continue
+		}
+		if _, seen := covered[key]; !seen && strings.Contains(text, key) {
+			gain++
+		}
+	}
+	return float64(gain) / float64(len(facets))
+}
+
+func markCandidateFacets(candidate CandidateScore, facets []string, covered map[string]struct{}) {
+	text := strings.ToLower(candidate.Entry.Title + " " + candidate.Entry.Summary + " " + candidate.Entry.Content + " " + strings.Join(candidate.Entry.Entities, " "))
+	for _, facet := range facets {
+		key := strings.ToLower(strings.TrimSpace(facet))
+		if key != "" && strings.Contains(text, key) {
+			covered[key] = struct{}{}
+		}
+	}
 }
 
 func candidateSlice(values map[string]*CandidateScore) []CandidateScore {

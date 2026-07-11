@@ -83,6 +83,15 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			last_accessed_at TEXT NOT NULL,
+			temperature TEXT NOT NULL DEFAULT 'warm',
+			retention_expires_at TEXT NOT NULL DEFAULT '',
+			access_count INTEGER NOT NULL DEFAULT 0,
+			last_reinforced_at TEXT NOT NULL DEFAULT '',
+			archived_at TEXT NOT NULL DEFAULT '',
+			archive_reason TEXT NOT NULL DEFAULT '',
+			pinned INTEGER NOT NULL DEFAULT 0,
+			value_score REAL NOT NULL DEFAULT 0.5,
+			value_score_updated_at TEXT NOT NULL DEFAULT '',
 			valid_from TEXT NOT NULL DEFAULT '',
 			valid_until TEXT NOT NULL DEFAULT '',
 			superseded_by TEXT NOT NULL DEFAULT '',
@@ -123,9 +132,31 @@ func (s *Store) Upsert(ctx context.Context, candidate Candidate) (*Entry, error)
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	wasExisting := false
+	var oldTemperature Temperature
+	var oldStatus Status
 	if existing, _ := s.getTx(ctx, tx, entry.MemoryID); existing != nil {
+		wasExisting = true
+		oldTemperature, oldStatus = existing.Temperature, existing.Status
 		entry.CreatedAt = existing.CreatedAt
 		entry.LastAccessedAt = existing.LastAccessedAt
+		entry.Temperature = existing.Temperature
+		entry.AccessCount = existing.AccessCount
+		entry.LastReinforcedAt = existing.LastReinforcedAt
+		entry.ArchivedAt = existing.ArchivedAt
+		entry.ArchiveReason = existing.ArchiveReason
+		entry.Pinned = existing.Pinned
+		entry.ValueScore = existing.ValueScore
+		entry.ValueScoreUpdatedAt = existing.ValueScoreUpdatedAt
+		if entry.RetentionExpiresAt.IsZero() {
+			entry.RetentionExpiresAt = existing.RetentionExpiresAt
+		}
+		entry.LastReinforcedAt = time.Now().UTC()
+		entry.Temperature = TemperatureHot
+		if entry.Status == StatusActive {
+			entry.ArchivedAt = time.Time{}
+			entry.ArchiveReason = ""
+		}
 	}
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now().UTC()
@@ -134,11 +165,16 @@ func (s *Store) Upsert(ctx context.Context, candidate Candidate) (*Entry, error)
 	if entry.LastAccessedAt.IsZero() {
 		entry.LastAccessedAt = entry.UpdatedAt
 	}
+	if entry.Temperature == "" {
+		entry.Temperature = TemperatureWarm
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO memories (
 		memory_id, scope_type, scope_key, memory_type, title, content, summary, tags_json, entities_json,
 		importance, confidence, source_session_id, source_message_ids_json, source_agent_id, source_team_session_id,
-		source_paths_json, created_at, updated_at, last_accessed_at, valid_from, valid_until, superseded_by, status
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		source_paths_json, created_at, updated_at, last_accessed_at, temperature, retention_expires_at, access_count,
+		last_reinforced_at, archived_at, archive_reason, pinned, value_score, value_score_updated_at,
+		valid_from, valid_until, superseded_by, status
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(memory_id) DO UPDATE SET
 		scope_type=excluded.scope_type, scope_key=excluded.scope_key, memory_type=excluded.memory_type,
 		title=excluded.title, content=excluded.content, summary=excluded.summary, tags_json=excluded.tags_json,
@@ -146,11 +182,17 @@ func (s *Store) Upsert(ctx context.Context, candidate Candidate) (*Entry, error)
 		source_session_id=excluded.source_session_id, source_message_ids_json=excluded.source_message_ids_json,
 		source_agent_id=excluded.source_agent_id, source_team_session_id=excluded.source_team_session_id,
 		source_paths_json=excluded.source_paths_json, updated_at=excluded.updated_at, last_accessed_at=excluded.last_accessed_at,
+		temperature=excluded.temperature, retention_expires_at=excluded.retention_expires_at,
+		access_count=excluded.access_count, last_reinforced_at=excluded.last_reinforced_at,
+		archived_at=excluded.archived_at, archive_reason=excluded.archive_reason, pinned=excluded.pinned,
+		value_score=excluded.value_score, value_score_updated_at=excluded.value_score_updated_at,
 		valid_from=excluded.valid_from, valid_until=excluded.valid_until, superseded_by=excluded.superseded_by, status=excluded.status`,
 		entry.MemoryID, entry.ScopeType, entry.ScopeKey, entry.MemoryType, entry.Title, entry.Content, entry.Summary,
 		toJSON(entry.Tags), toJSON(entry.Entities), clamp01(entry.Importance), clamp01(entry.Confidence),
 		entry.SourceSessionID, toJSON(entry.SourceMessageIDs), entry.SourceAgentID, entry.SourceTeamSessionID, toJSON(entry.SourcePaths),
-		formatTime(entry.CreatedAt), formatTime(entry.UpdatedAt), formatTime(entry.LastAccessedAt), formatTime(entry.ValidFrom),
+		formatTime(entry.CreatedAt), formatTime(entry.UpdatedAt), formatTime(entry.LastAccessedAt), entry.Temperature,
+		formatTime(entry.RetentionExpiresAt), entry.AccessCount, formatTime(entry.LastReinforcedAt), formatTime(entry.ArchivedAt),
+		entry.ArchiveReason, entry.Pinned, clamp01(entry.ValueScore), formatTime(entry.ValueScoreUpdatedAt), formatTime(entry.ValidFrom),
 		formatTime(entry.ValidUntil), entry.SupersededBy, entry.Status); err != nil {
 		return nil, err
 	}
@@ -169,6 +211,18 @@ func (s *Store) Upsert(ctx context.Context, candidate Candidate) (*Entry, error)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if wasExisting && oldStatus != StatusActive && entry.Status == StatusActive {
+		if err := s.reindexMemory(ctx, entry.MemoryID); err != nil {
+			return nil, err
+		}
+	}
+	if wasExisting {
+		_ = s.recordLifecycleEvent(context.WithoutCancel(ctx), LifecycleEvent{ResourceKind: "memory", ResourceID: entry.MemoryID,
+			EventType: "reinforcement", OldStatus: oldStatus, NewStatus: entry.Status,
+			OldTemperature: oldTemperature, NewTemperature: TemperatureHot, Score: entry.ValueScore,
+			Reasons: []string{"memory_upsert"}, CreatedAt: entry.UpdatedAt})
+	}
+	s.bumpIndexGeneration(ctx)
 	return &entry, nil
 }
 
@@ -331,24 +385,7 @@ func appendUniqueEntries(entries []Entry, extra []Entry) []Entry {
 }
 
 func (s *Store) MarkAccess(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	now := formatTime(time.Now().UTC())
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, id := range ids {
-		if strings.TrimSpace(id) == "" {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memories SET last_accessed_at = ? WHERE memory_id = ?`, now, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return s.RecordAccess(ctx, ids)
 }
 
 func (s *Store) SetStatus(ctx context.Context, id string, status Status) error {
@@ -367,10 +404,12 @@ func (s *Store) SetStatus(ctx context.Context, id string, status Status) error {
 	}
 	if status != StatusActive {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id = ?`, id)
-	} else if entry, getErr := s.Get(ctx, id); getErr == nil && entry != nil {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id = ?`, id)
-		_, _ = s.db.ExecContext(ctx, `INSERT INTO memory_fts(memory_id, title, content, summary, tags, entities) VALUES (?, ?, ?, ?, ?, ?)`,
-			entry.MemoryID, entry.Title, entry.Content, entry.Summary, strings.Join(entry.Tags, " "), strings.Join(entry.Entities, " "))
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_chunk_fts WHERE chunk_id IN
+			(SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`, id)
+		_, _ = s.db.ExecContext(ctx, `UPDATE memory_evidence_chunks SET archived_at=?, archive_reason=?, temperature=?
+			WHERE parent_memory_id=?`, formatTime(time.Now().UTC()), "status_"+string(status), TemperatureCold, id)
+	} else if err := s.reindexMemory(ctx, id); err != nil {
+		return err
 	}
 	return nil
 }
@@ -394,7 +433,7 @@ func (s *Store) Approve(ctx context.Context, id string) error {
 }
 
 func (s *Store) Restore(ctx context.Context, id string) error {
-	return s.SetStatus(ctx, id, StatusActive)
+	return s.RestoreLifecycle(ctx, id)
 }
 
 func (s *Store) Deprioritize(ctx context.Context, id string) error {
@@ -413,7 +452,7 @@ func (s *Store) SupersedeWith(ctx context.Context, oldID string, candidate Candi
 }
 
 func (s *Store) ApplyRetention(candidate Candidate, policy RetentionPolicy, now time.Time) Candidate {
-	if !candidate.ValidUntil.IsZero() || len(policy) == 0 {
+	if !candidate.RetentionExpiresAt.IsZero() || len(policy) == 0 {
 		return candidate
 	}
 	days, ok := policy[candidate.MemoryType]
@@ -426,10 +465,7 @@ func (s *Store) ApplyRetention(candidate Candidate, policy RetentionPolicy, now 
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	candidate.ValidUntil = now.AddDate(0, 0, days)
-	if candidate.ValidFrom.IsZero() {
-		candidate.ValidFrom = now
-	}
+	candidate.RetentionExpiresAt = now.AddDate(0, 0, days)
 	return candidate
 }
 
@@ -462,11 +498,21 @@ func (s *Store) UpdateLifecycle(ctx context.Context, id string, validFrom, valid
 
 func (s *Store) Delete(ctx context.Context, id string, hard bool) error {
 	if hard {
+		existing, err := s.Get(ctx, id)
+		if err != nil {
+			return err
+		}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
+		if err := insertLifecycleEventTx(ctx, tx, LifecycleEvent{ResourceKind: "memory", ResourceID: id,
+			EventType: "hard_delete", OldStatus: existing.Status, NewStatus: StatusDeleted,
+			OldTemperature: existing.Temperature, NewTemperature: existing.Temperature,
+			Score: existing.ValueScore, CreatedAt: time.Now().UTC()}); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id = ?`, id); err != nil {
 			return err
 		}
@@ -508,9 +554,24 @@ func (s *Store) Delete(ctx context.Context, id string, hard bool) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE memory_id = ?`, id); err != nil {
 			return err
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.bumpIndexGeneration(ctx)
+		return nil
 	}
-	return s.SetStatus(ctx, id, StatusDeleted)
+	entry, getErr := s.Get(ctx, id)
+	if getErr != nil {
+		return getErr
+	}
+	err := s.SetStatus(ctx, id, StatusDeleted)
+	if err == nil {
+		_ = s.recordLifecycleEvent(context.WithoutCancel(ctx), LifecycleEvent{ResourceKind: "memory", ResourceID: id,
+			EventType: "soft_delete", OldStatus: entry.Status, NewStatus: StatusDeleted,
+			OldTemperature: entry.Temperature, NewTemperature: entry.Temperature, Score: entry.ValueScore, CreatedAt: time.Now().UTC()})
+		s.bumpIndexGeneration(ctx)
+	}
+	return err
 }
 
 func (s *Store) Supersede(ctx context.Context, oldID, newID string) error {
@@ -520,6 +581,13 @@ func (s *Store) Supersede(ctx context.Context, oldID, newID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE memories SET status = ?, superseded_by = ?, updated_at = ? WHERE memory_id = ?`, StatusSuperseded, newID, formatTime(time.Now().UTC()), oldID)
 	if err == nil {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id = ?`, oldID)
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM memory_chunk_fts WHERE chunk_id IN
+			(SELECT chunk_id FROM memory_evidence_chunks WHERE parent_memory_id=?)`, oldID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE memory_evidence_chunks SET archived_at=?, archive_reason=?, temperature=?
+			WHERE parent_memory_id=?`, formatTime(time.Now().UTC()), "superseded", TemperatureCold, oldID)
+		_ = s.recordLifecycleEvent(context.WithoutCancel(ctx), LifecycleEvent{ResourceKind: "memory", ResourceID: oldID,
+			EventType: "supersede", OldStatus: StatusActive, NewStatus: StatusSuperseded,
+			Reasons: []string{"superseded_by:" + newID}, CreatedAt: time.Now().UTC()})
 	}
 	return err
 }
@@ -605,11 +673,14 @@ func normalizeCandidate(c Candidate) Entry {
 		SourcePaths:         normalizeStrings(c.SourcePaths),
 		ValidFrom:           c.ValidFrom,
 		ValidUntil:          c.ValidUntil,
+		RetentionExpiresAt:  c.RetentionExpiresAt,
+		Temperature:         TemperatureHot,
+		ValueScore:          0.5,
 		Status:              status,
 	}
 }
 
-const memoryColumns = `memory_id, scope_type, scope_key, memory_type, title, content, summary, tags_json, entities_json, importance, confidence, source_session_id, source_message_ids_json, source_agent_id, source_team_session_id, source_paths_json, created_at, updated_at, last_accessed_at, valid_from, valid_until, superseded_by, status`
+const memoryColumns = `memory_id, scope_type, scope_key, memory_type, title, content, summary, tags_json, entities_json, importance, confidence, source_session_id, source_message_ids_json, source_agent_id, source_team_session_id, source_paths_json, created_at, updated_at, last_accessed_at, temperature, retention_expires_at, access_count, last_reinforced_at, archived_at, archive_reason, pinned, value_score, value_score_updated_at, valid_from, valid_until, superseded_by, status`
 
 func prefixedMemoryColumns(prefix string) string {
 	parts := strings.Split(memoryColumns, ", ")
@@ -733,8 +804,8 @@ func clipRunes(text string, maxRunes int) string {
 func scanEntry(row interface{ Scan(dest ...any) error }) (*Entry, error) {
 	var e Entry
 	var tags, entities, messageIDs, sourcePaths string
-	var created, updated, accessed, validFrom, validUntil string
-	if err := row.Scan(&e.MemoryID, &e.ScopeType, &e.ScopeKey, &e.MemoryType, &e.Title, &e.Content, &e.Summary, &tags, &entities, &e.Importance, &e.Confidence, &e.SourceSessionID, &messageIDs, &e.SourceAgentID, &e.SourceTeamSessionID, &sourcePaths, &created, &updated, &accessed, &validFrom, &validUntil, &e.SupersededBy, &e.Status); err != nil {
+	var created, updated, accessed, retentionExpires, reinforced, archived, valueUpdated, validFrom, validUntil string
+	if err := row.Scan(&e.MemoryID, &e.ScopeType, &e.ScopeKey, &e.MemoryType, &e.Title, &e.Content, &e.Summary, &tags, &entities, &e.Importance, &e.Confidence, &e.SourceSessionID, &messageIDs, &e.SourceAgentID, &e.SourceTeamSessionID, &sourcePaths, &created, &updated, &accessed, &e.Temperature, &retentionExpires, &e.AccessCount, &reinforced, &archived, &e.ArchiveReason, &e.Pinned, &e.ValueScore, &valueUpdated, &validFrom, &validUntil, &e.SupersededBy, &e.Status); err != nil {
 		return nil, err
 	}
 	e.Tags = fromJSONList(tags)
@@ -744,6 +815,10 @@ func scanEntry(row interface{ Scan(dest ...any) error }) (*Entry, error) {
 	e.CreatedAt = parseTime(created)
 	e.UpdatedAt = parseTime(updated)
 	e.LastAccessedAt = parseTime(accessed)
+	e.RetentionExpiresAt = parseTime(retentionExpires)
+	e.LastReinforcedAt = parseTime(reinforced)
+	e.ArchivedAt = parseTime(archived)
+	e.ValueScoreUpdatedAt = parseTime(valueUpdated)
 	e.ValidFrom = parseTime(validFrom)
 	e.ValidUntil = parseTime(validUntil)
 	return &e, nil
@@ -766,9 +841,9 @@ func scanEntriesWithRank(rows *sql.Rows) ([]Entry, error) {
 	for rows.Next() {
 		var e Entry
 		var tags, entities, messageIDs, sourcePaths string
-		var created, updated, accessed, validFrom, validUntil string
+		var created, updated, accessed, retentionExpires, reinforced, archived, valueUpdated, validFrom, validUntil string
 		var rank float64
-		if err := rows.Scan(&e.MemoryID, &e.ScopeType, &e.ScopeKey, &e.MemoryType, &e.Title, &e.Content, &e.Summary, &tags, &entities, &e.Importance, &e.Confidence, &e.SourceSessionID, &messageIDs, &e.SourceAgentID, &e.SourceTeamSessionID, &sourcePaths, &created, &updated, &accessed, &validFrom, &validUntil, &e.SupersededBy, &e.Status, &rank); err != nil {
+		if err := rows.Scan(&e.MemoryID, &e.ScopeType, &e.ScopeKey, &e.MemoryType, &e.Title, &e.Content, &e.Summary, &tags, &entities, &e.Importance, &e.Confidence, &e.SourceSessionID, &messageIDs, &e.SourceAgentID, &e.SourceTeamSessionID, &sourcePaths, &created, &updated, &accessed, &e.Temperature, &retentionExpires, &e.AccessCount, &reinforced, &archived, &e.ArchiveReason, &e.Pinned, &e.ValueScore, &valueUpdated, &validFrom, &validUntil, &e.SupersededBy, &e.Status, &rank); err != nil {
 			return nil, err
 		}
 		e.Tags = fromJSONList(tags)
@@ -778,6 +853,10 @@ func scanEntriesWithRank(rows *sql.Rows) ([]Entry, error) {
 		e.CreatedAt = parseTime(created)
 		e.UpdatedAt = parseTime(updated)
 		e.LastAccessedAt = parseTime(accessed)
+		e.RetentionExpiresAt = parseTime(retentionExpires)
+		e.LastReinforcedAt = parseTime(reinforced)
+		e.ArchivedAt = parseTime(archived)
+		e.ValueScoreUpdatedAt = parseTime(valueUpdated)
 		e.ValidFrom = parseTime(validFrom)
 		e.ValidUntil = parseTime(validUntil)
 		e.Score = -rank

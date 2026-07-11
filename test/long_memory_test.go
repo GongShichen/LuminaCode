@@ -117,6 +117,21 @@ func TestLongMemoryGovernanceAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !entry.ValidUntil.IsZero() {
+		t.Fatalf("retention must not overwrite fact validity: %#v", entry.ValidUntil)
+	}
+	if entry.RetentionExpiresAt.IsZero() {
+		t.Fatal("retention expiry was not stored separately")
+	}
+	policy := longmemory.DefaultLifecyclePolicy()
+	policy.ArchiveGraceDays = 0
+	decisions, err := store.PreviewMaintenance(ctx, policy, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyMaintenance(ctx, decisions); err != nil {
+		t.Fatal(err)
+	}
 	found, err := store.Search(ctx, longmemory.SearchOptions{Query: "old incident", Limit: 5})
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +139,7 @@ func TestLongMemoryGovernanceAndExpiry(t *testing.T) {
 	if len(found) != 0 {
 		t.Fatalf("expired memory should not be recalled by default: %#v", found)
 	}
-	found, err = store.Search(ctx, longmemory.SearchOptions{Query: "old incident", Limit: 5, IncludeExpired: true})
+	found, err = store.Search(ctx, longmemory.SearchOptions{Query: "old incident", Limit: 5, IncludeExpired: true, IncludeInactive: true})
 	if err != nil {
 		t.Fatal(err)
 	}

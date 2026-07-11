@@ -56,40 +56,85 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 		AgentID:       memoryAgentType(state),
 	}
 	catalog, catalogErr := store.InspectCatalog(ctx, scopes)
-	expansion, expansionModel, expansionError := expandMemoryQuery(ctx, cfg, memoryQuery, catalog, expansionFactory)
-	if catalogErr != nil {
-		if expansionError != "" {
-			expansionError += "; "
-		}
-		expansionError += "inspect memory catalog: " + catalogErr.Error()
-	}
 	var embedder longmemory.Embedder
 	if cfg.MemoryEmbeddingEnabled {
 		if local, embedErr := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir); embedErr == nil {
 			embedder = local
 		}
 	}
-	result, err := store.SearchAllChannels(ctx, memoryQuery, expansion, embedder, longmemory.HybridSearchOptions{
-		FTSCandidates:       cfg.MemoryFTSCandidates,
-		VectorCandidates:    cfg.MemoryVectorCandidates,
-		GraphCandidates:     cfg.MemoryGraphCandidates,
-		GraphMaxHops:        cfg.MemoryGraphMaxHops,
-		RRFK:                cfg.MemoryRRFK,
-		MMRLambda:           cfg.MemoryMMRLambda,
-		MaxItems:            limit,
-		CoreContextTokens:   cfg.MemoryCoreContextTokens,
-		TargetContextTokens: cfg.MemoryContextTargetTokens,
-		MaxContextTokens:    cfg.MemoryContextMaxTokens,
-		LocalTimeout:        time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
-		SessionID:           cfgSessionID(state),
-		TeamSessionID:       state.MemoryTeamSessionID,
-		AgentID:             memoryAgentType(state),
-		ExcludeIDs:          memory.RecalledMemoryIDs(state.Messages),
-		ExpansionModel:      expansionModel,
-		ExpansionError:      expansionError,
-		NeighborChunks:      cfg.MemoryEvidenceNeighborChunks,
-	})
-	if err != nil || (len(result.Packet.Evidence) == 0 && len(result.Packet.CoreBlocks) == 0) {
+	searchOptions := func(expansionModel, expansionError string, waitMS int64) longmemory.HybridSearchOptions {
+		return longmemory.HybridSearchOptions{
+			FTSCandidates:          cfg.MemoryFTSCandidates,
+			VectorCandidates:       cfg.MemoryVectorCandidates,
+			GraphCandidates:        cfg.MemoryGraphCandidates,
+			GraphMaxHops:           cfg.MemoryGraphMaxHops,
+			RRFK:                   cfg.MemoryRRFK,
+			MMRLambda:              cfg.MemoryMMRLambda,
+			MMRRelevanceWeight:     cfg.MemoryMMRRelevanceWeight,
+			MMRNoveltyWeight:       cfg.MemoryMMRNoveltyWeight,
+			MMRFacetWeight:         cfg.MemoryMMRFacetCoverageWeight,
+			MMRSourceWeight:        cfg.MemoryMMRSourceCoverageWeight,
+			SessionRetrieval:       cfg.MemorySessionRetrievalEnabled,
+			SessionCandidates:      cfg.MemorySessionCandidates,
+			ChunksPerSession:       cfg.MemoryChunksPerSession,
+			SessionChunkCandidates: cfg.MemorySessionChunkCandidates,
+			MaxItems:               limit,
+			CoreContextTokens:      cfg.MemoryCoreContextTokens,
+			TargetContextTokens:    cfg.MemoryContextTargetTokens,
+			MaxContextTokens:       cfg.MemoryContextMaxTokens,
+			LocalTimeout:           time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
+			SessionID:              cfgSessionID(state),
+			TeamSessionID:          state.MemoryTeamSessionID,
+			AgentID:                memoryAgentType(state),
+			ExcludeIDs:             memory.RecalledMemoryIDs(state.Messages),
+			ExpansionModel:         expansionModel,
+			ExpansionError:         expansionError,
+			ExpansionWaitMS:        waitMS,
+			NeighborChunks:         cfg.MemoryAdjacentChunkWindow,
+			ReferenceTime:          queryTime,
+			CanonicalEntityEnabled: cfg.MemoryCanonicalEntityEnabled,
+			CanonicalEventEnabled:  cfg.MemoryCanonicalEventEnabled,
+			CacheEnabled:           cfg.MemoryRetrievalCacheEnabled,
+			CacheTTL:               time.Duration(cfg.MemoryRetrievalCacheTTLSeconds * float64(time.Second)),
+		}
+	}
+	type retrievalResult struct {
+		value longmemory.AllChannelResult
+		err   error
+	}
+	originalCh := make(chan retrievalResult, 1)
+	go func() {
+		baselineOptions := searchOptions("", "", 0)
+		baselineOptions.SuppressTrace = true
+		value, searchErr := store.SearchAllChannels(ctx, memoryQuery, longmemory.QueryExpansion{}, embedder, baselineOptions)
+		originalCh <- retrievalResult{value: value, err: searchErr}
+	}()
+	expansionStarted := time.Now()
+	expansion, expansionModel, expansionError := expandMemoryQuery(ctx, cfg, memoryQuery, catalog, expansionFactory)
+	expansionWaitMS := time.Since(expansionStarted).Milliseconds()
+	if catalogErr != nil {
+		if expansionError != "" {
+			expansionError += "; "
+		}
+		expansionError += "inspect memory catalog: " + catalogErr.Error()
+	}
+	var result longmemory.AllChannelResult
+	var searchErr error
+	if len(expansion.Queries)+len(expansion.Entities)+len(expansion.TemporalConstraints)+len(expansion.RelationTerms) > 0 {
+		result, searchErr = store.SearchAllChannels(ctx, memoryQuery, expansion, embedder,
+			searchOptions(expansionModel, expansionError, expansionWaitMS))
+		original := <-originalCh
+		if searchErr != nil && original.err == nil {
+			result, searchErr = original.value, nil
+		}
+	} else {
+		original := <-originalCh
+		result, searchErr = original.value, original.err
+		result.Run.ExpansionModel, result.Run.ExpansionError, result.Run.ExpansionWaitMS = expansionModel, expansionError, expansionWaitMS
+		result.Trace.Run = &result.Run
+		_ = store.RecordRetrievalTrace(context.WithoutCancel(ctx), result.Trace)
+	}
+	if searchErr != nil {
 		return nil
 	}
 	if len(result.Packet.Evidence) > limit {
@@ -121,6 +166,27 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 			Score:      evidence.Score,
 		})
 	}
+	if len(result.Packet.CanonicalEvents) > 0 {
+		lines := []string{"Canonical event timeline (ordered by event time):"}
+		for _, event := range result.Packet.CanonicalEvents {
+			when := event.OccurredAt
+			if when.IsZero() {
+				when = event.ValidFrom
+			}
+			line := "- " + event.Title
+			if !when.IsZero() {
+				line += " @ " + when.UTC().Format(time.RFC3339)
+			}
+			if strings.TrimSpace(event.Summary) != "" {
+				line += ": " + strings.TrimSpace(event.Summary)
+			}
+			lines = append(lines, line)
+			ids = append(ids, event.SourceChunks...)
+		}
+		recalls = append(recalls, MemoryRecall{Filename: "canonical-event-timeline", FilePath: "longmemory://events",
+			Content: strings.Join(lines, "\n"), MemoryType: memory.MemoryTypeReference,
+			RecallID: "canonical-event-timeline", Score: 1})
+	}
 	_ = store.RecordUsed(ctx, longmemory.UsedRecord{
 		SessionID:     cfgSessionID(state),
 		TeamSessionID: state.MemoryTeamSessionID,
@@ -128,6 +194,14 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 		Query:         query,
 		MemoryIDs:     ids,
 	})
+	reference := "Reference time for this user turn: " + queryTime.UTC().Format(time.RFC3339) +
+		"\nInterpret relative dates and order evidence against this reference time. Use provenance and valid time when evidence conflicts."
+	if len(recalls) == 0 {
+		recalls = append(recalls, MemoryRecall{Filename: "query-reference-time", FilePath: "longmemory://reference-time",
+			Content: reference, MemoryType: memory.MemoryTypeReference, RecallID: "query-reference-time", Score: 1})
+	} else {
+		recalls[0].Content = reference + "\n\n" + recalls[0].Content
+	}
 	return recalls
 }
 
@@ -165,7 +239,14 @@ func recentMemoryContext(messages []map[string]any, maxMessages, maxTokens int) 
 			}
 			cost = remaining
 		}
-		result = append(result, longmemory.MessageExcerpt{Role: role, Text: text})
+		var timestamp time.Time
+		for _, value := range []any{message["timestamp"], metadata["timestamp"]} {
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(stringFromAny(value))); err == nil {
+				timestamp = parsed.UTC()
+				break
+			}
+		}
+		result = append(result, longmemory.MessageExcerpt{Role: role, Text: text, Timestamp: timestamp})
 		tokens += cost
 	}
 	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {

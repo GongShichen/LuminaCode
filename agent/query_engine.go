@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"LuminaCode/agentContext"
 	"LuminaCode/config"
@@ -375,6 +376,13 @@ func (e *CoreExecutionEngine) skillRegistryMessage(skill skills.SkillSpec, promp
 }
 
 func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string) {
+	if !state.MemoryQueryTimeExplicit || state.MemoryQueryTime.IsZero() {
+		state.MemoryQueryTime = queryReferenceTimeFromMessages(state.Messages, normalizedPrompt)
+		if state.MemoryQueryTime.IsZero() {
+			state.MemoryQueryTime = time.Now().UTC()
+		}
+	}
+	state.MemoryQueryTimeExplicit = false
 	if stateHasConsecutiveUserPrompt(state, normalizedPrompt) {
 		state.LastQuery = normalizedPrompt
 		if q.CoreEngine != nil {
@@ -390,12 +398,35 @@ func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string)
 		"content": []map[string]any{{"type": "text", "text": normalizedPrompt}},
 		"metadata": map[string]any{
 			"session_user_turn": state.UserTurnCount,
+			"timestamp":         state.MemoryQueryTime.Format(time.RFC3339Nano),
 		},
 	}
 	state.Messages = append(state.Messages, msg)
 	if q.CoreEngine != nil {
 		q.CoreEngine.LastState = state
 	}
+}
+
+func queryReferenceTimeFromMessages(messages []map[string]any, prompt string) time.Time {
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if strings.ToLower(strings.TrimSpace(stringFromAny(message["role"]))) != "user" ||
+			strings.TrimSpace(visibleMessageText(message["content"])) != strings.TrimSpace(prompt) {
+			continue
+		}
+		for _, value := range []any{message["timestamp"]} {
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(stringFromAny(value))); err == nil {
+				return parsed.UTC()
+			}
+		}
+		if metadata, ok := message["metadata"].(map[string]any); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(stringFromAny(metadata["timestamp"]))); err == nil {
+				return parsed.UTC()
+			}
+		}
+		break
+	}
+	return time.Time{}
 }
 
 func stateHasConsecutiveUserPrompt(state *AgentState, normalizedPrompt string) bool {

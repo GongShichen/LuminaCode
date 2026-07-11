@@ -103,6 +103,9 @@ install: build
 	fi; \
 	rm -rf "$(APP_ROOT)/SYSTEM" "$(APP_ROOT)/TEAM" "$(APP_ROOT)/SKILLS" "$(APP_ROOT)/frontend"; \
 	cp -R ".Lumina/." "$(APP_ROOT)/"; \
+	if [ ! -f "$(APP_ROOT)/CONFIG/defaults.json" ] && [ -f "$(APP_ROOT)/CONFIG/defaults.json.example" ]; then \
+		cp "$(APP_ROOT)/CONFIG/defaults.json.example" "$(APP_ROOT)/CONFIG/defaults.json"; \
+	fi; \
 	cp "setup-searxng.sh" "$(APP_ROOT)/setup-searxng.sh"; \
 	chmod 0755 "$(APP_ROOT)/setup-searxng.sh"; \
 	rm -rf "$(APP_ROOT)/frontend"; \
@@ -110,7 +113,7 @@ install: build
 	cp -R "frontend/dist" "frontend/node_modules" "frontend/package.json" "$(APP_ROOT)/frontend/"; \
 	if [ -n "$$preserved_config" ]; then \
 		mkdir -p "$(APP_ROOT)/CONFIG"; \
-		cp "$$preserved_config" "$(APP_ROOT)/CONFIG/defaults.json"; \
+		python3 -c 'import json,pathlib,sys; t,u=map(pathlib.Path,sys.argv[1:]); d=json.loads(t.read_text()); d.update(json.loads(u.read_text())); t.write_text(json.dumps(d,ensure_ascii=False,indent=2)+"\n")' "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
 		rm -f "$$preserved_config"; \
 	fi; \
 	if APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh configure; then \

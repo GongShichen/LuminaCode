@@ -125,6 +125,32 @@ func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []S
 	if limit <= 0 {
 		limit = 40
 	}
+	sessions, err := s.rankSessions(ctx, queries, scopes, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	chunkEntries, err := s.chunksForSessions(ctx, sessions, queries, scopes, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := s.memoriesForSessions(ctx, sessions, scopes, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries = appendUniqueEntries(chunkEntries, entries)
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+func (s *Store) rankSessions(ctx context.Context, queries []string, scopes []Scope, limit int) ([]sessionRank, error) {
+	if limit <= 0 {
+		limit = 12
+	}
 	ranked := map[string]sessionRank{}
 	for _, query := range normalizeStrings(queries) {
 		ftsQuery := sanitizeFTSQuery(query)
@@ -136,7 +162,8 @@ func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []S
 			searchScopes = []Scope{{}}
 		}
 		for _, scope := range searchScopes {
-			clauses := []string{"memory_session_fts MATCH ?"}
+			clauses := []string{"memory_session_fts MATCH ?", `EXISTS (SELECT 1 FROM memory_evidence_chunks c
+				WHERE c.session_id=s.session_id AND c.scope_type=s.scope_type AND c.scope_key=s.scope_key AND c.archived_at='')`}
 			args := []any{ftsQuery}
 			if scope.Type != "" && strings.TrimSpace(scope.Key) != "" {
 				clauses = append([]string{"s.scope_type=?", "s.scope_key=?"}, clauses...)
@@ -177,19 +204,7 @@ func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []S
 	if len(sessions) > limit {
 		sessions = sessions[:limit]
 	}
-	chunkEntries, err := s.chunksForSessions(ctx, sessions, queries, scopes, limit)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := s.memoriesForSessions(ctx, sessions, scopes, limit)
-	if err != nil {
-		return nil, err
-	}
-	entries = appendUniqueEntries(chunkEntries, entries)
-	if len(entries) > limit {
-		entries = entries[:limit]
-	}
-	return entries, nil
+	return sessions, nil
 }
 
 func (s *Store) memoriesForSessions(ctx context.Context, sessions []sessionRank, scopes []Scope, limit int) ([]Entry, error) {
@@ -267,8 +282,10 @@ func (s *Store) sessionEntriesBySessionIDs(ctx context.Context, sessions []sessi
 		args = append(args, id)
 	}
 	scopeSQL, scopeArgs := scopedClauses(scopes, "")
-	query := `SELECT index_id, scope_type, scope_key, session_id, summary, keyphrases_json, entities_json,
-		roles_json, started_at, ended_at FROM memory_session_index WHERE session_id IN (` + marks + `)`
+	query := `SELECT s.index_id, s.scope_type, s.scope_key, s.session_id, s.summary, s.keyphrases_json, s.entities_json,
+		s.roles_json, s.started_at, s.ended_at FROM memory_session_index s WHERE s.session_id IN (` + marks + `)
+		AND EXISTS (SELECT 1 FROM memory_evidence_chunks c WHERE c.session_id=s.session_id
+		AND c.scope_type=s.scope_type AND c.scope_key=s.scope_key AND c.archived_at='')`
 	if scopeSQL != "" {
 		query += " AND (" + scopeSQL + ")"
 		args = append(args, scopeArgs...)
@@ -303,9 +320,10 @@ func (s *Store) sessionEntriesByIndexIDs(ctx context.Context, ids []string) ([]E
 	for index, id := range ids {
 		args[index] = id
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT index_id, scope_type, scope_key, session_id, summary,
-		keyphrases_json, entities_json, roles_json, started_at, ended_at FROM memory_session_index
-		WHERE index_id IN (`+marks+`)`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.index_id, s.scope_type, s.scope_key, s.session_id, s.summary,
+		s.keyphrases_json, s.entities_json, s.roles_json, s.started_at, s.ended_at FROM memory_session_index s
+		WHERE s.index_id IN (`+marks+`) AND EXISTS (SELECT 1 FROM memory_evidence_chunks c
+		WHERE c.session_id=s.session_id AND c.scope_type=s.scope_type AND c.scope_key=s.scope_key AND c.archived_at='')`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +407,7 @@ func (s *Store) SearchTemporal(ctx context.Context, queries []string, constraint
 
 func temporalEntryAllowed(entry Entry, constraints []TemporalConstraint) bool {
 	if len(constraints) == 0 {
-		return !entry.ValidFrom.IsZero() || !entry.ValidUntil.IsZero()
+		return !entry.ValidFrom.IsZero() || !entry.ValidUntil.IsZero() || !entry.OccurredAt.IsZero() || !entry.CreatedAt.IsZero()
 	}
 	for _, constraint := range constraints {
 		point := entry.ValidFrom
