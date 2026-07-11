@@ -74,7 +74,13 @@ GPT-4o leaderboard 成绩。
 
 | 系统 | 准确率 | 公开评测设置 |
 |---|---:|---|
+| Exabase M-1 | 96.4% | Gemini 3 Flash，Top 50；厂商公开结果 |
+| Mastra Observational Memory | 94.87% | GPT-5-mini；实现和 runner 开源 |
 | Mem0 Platform | 94.8% | Mem0 当前 benchmark，Top 50 |
+| Honcho | 92.6% | 公开报告；完整运行配置未披露 |
+| Engram | 91.6% | GPT-5 composer、GPT-4o judge；公开 prompt 和运行产物 |
+| Hindsight | 91.4% | Gemini 3 Pro；公开 benchmark 仓库 |
+| HydraDB | 90.79% | Gemini 3 Pro；论文报告 |
 | LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
 | **LuminaCode** | **68.4%** | DeepSeek Judge，复用官方 prompt |
 | Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
@@ -85,8 +91,15 @@ GPT-4o leaderboard 成绩。
 
 来源：[LongMemEval](https://github.com/xiaowu0162/longmemeval)、
 [Mem0 benchmark](https://github.com/mem0ai/memory-benchmarks)、
-[LiCoMemory 论文](https://aclanthology.org/2026.findings-acl.1835/)。不同报告的
-reader、检索深度和 judge 不完全一致，因此这不是严格同口径排行榜。
+[LiCoMemory 论文](https://aclanthology.org/2026.findings-acl.1835/)、
+[Mastra Observational Memory](https://mastra.ai/research/observational-memory)、
+[Hindsight benchmark](https://github.com/vectorize-io/hindsight-benchmarks)、
+[Engram benchmark](https://lumetra.io/engram-on-longmemeval/)、
+[HydraDB 论文](https://research.hydradb.com/hydradb.pdf)、
+[Honcho](https://github.com/plastic-labs/honcho) 以及
+[Exabase M-1 公告](https://www.prnewswire.com/news-releases/exabase-achieves-highest-reported-score-on-leading-ai-memory-benchmark-using-a-smaller-cheaper-model-302780919.html)。Exabase 和 Honcho
+使用公开报告分数，但完整复现材料相对有限。不同报告的 reader、检索深度、
+上下文预算和 judge 不完全一致，因此这不是严格同口径排行榜。
 
 ## Agent Team
 

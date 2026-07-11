@@ -89,7 +89,13 @@ Published LongMemEval accuracy, sorted for orientation:
 
 | System | Accuracy | Reported evaluation |
 |---|---:|---|
+| Exabase M-1 | 96.4% | Gemini 3 Flash, Top 50; vendor-reported |
+| Mastra Observational Memory | 94.87% | GPT-5-mini; open implementation and runner |
 | Mem0 Platform | 94.8% | Mem0 current benchmark, Top 50 |
+| Honcho | 92.6% | Publicly reported; full run configuration not disclosed |
+| Engram | 91.6% | GPT-5 composer, GPT-4o judge; prompt and run artifacts published |
+| Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
+| HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
 | **LuminaCode** | **68.4%** | DeepSeek Judge, official prompt reused |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
@@ -99,10 +105,18 @@ Published LongMemEval accuracy, sorted for orientation:
 | MemOS | 51.2% | GPT-4o-mini controlled baseline |
 
 Sources: [LongMemEval](https://github.com/xiaowu0162/longmemeval),
-[Mem0 benchmark](https://github.com/mem0ai/memory-benchmarks), and the
-[LiCoMemory paper](https://aclanthology.org/2026.findings-acl.1835/). Reader,
-retrieval depth, and judge differ across reports, so this table is not a strict
-apples-to-apples leaderboard.
+[Mem0 benchmark](https://github.com/mem0ai/memory-benchmarks),
+[LiCoMemory paper](https://aclanthology.org/2026.findings-acl.1835/),
+[Mastra Observational Memory](https://mastra.ai/research/observational-memory),
+[Hindsight benchmarks](https://github.com/vectorize-io/hindsight-benchmarks),
+[Engram benchmark](https://lumetra.io/engram-on-longmemeval/),
+[HydraDB paper](https://research.hydradb.com/hydradb.pdf),
+[Honcho](https://github.com/plastic-labs/honcho), and the
+[Exabase M-1 announcement](https://www.prnewswire.com/news-releases/exabase-achieves-highest-reported-score-on-leading-ai-memory-benchmark-using-a-smaller-cheaper-model-302780919.html).
+Exabase and Honcho
+scores are included as publicly reported results with less complete reproduction
+material. Reader, retrieval depth, context budget, and judge differ across
+reports, so this table is not a strict apples-to-apples leaderboard.
 
 ## Agent Team
 
