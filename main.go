@@ -75,7 +75,7 @@ func runMemoryCLI(args []string) error {
 		return writeJSON(os.Stdout, items)
 	case "search":
 		flags := flag.NewFlagSet("memory search", flag.ContinueOnError)
-		limit := flags.Int("limit", cfg.MemoryRecallMaxItems, "max items")
+		limit := flags.Int("limit", cfg.MemoryAtomMaxSelected, "max items")
 		includeInactive := flags.Bool("all", false, "include inactive memories")
 		includeExpired := flags.Bool("expired", false, "include expired memories")
 		scopeType := flags.String("scope-type", "", "filter by scope type")
@@ -258,9 +258,15 @@ func runMemoryCLI(args []string) error {
 		return writeJSON(os.Stdout, map[string]any{"status": "ready", "model": embedder.Model(),
 			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir,
 			"indexed_memories": catalog.TotalMemories, "indexed_sessions": catalog.TotalSessions,
-			"indexed_chunks": catalog.TotalChunks, "lifecycle_enabled": cfg.MemoryLifecycleEnabled,
-			"maintenance_interval_seconds": cfg.MemoryMaintenanceIntervalSeconds,
-			"archive_value_threshold":      cfg.MemoryArchiveValueThreshold, "auto_hard_delete": false})
+			"indexed_chunks": catalog.TotalChunks, "indexed_atoms": catalog.TotalAtoms,
+			"embedding_batch_size":                cfg.MemoryEmbeddingBatchSize,
+			"embedding_batch_wait_ms":             cfg.MemoryEmbeddingBatchWaitMS,
+			"embedding_execution_timeout_seconds": cfg.MemoryEmbeddingExecutionTimeout,
+			"coverage_max_facets":                 cfg.MemoryCoverageMaxFacets,
+			"coverage_completion_rounds":          cfg.MemoryCoverageCompletionRounds,
+			"lifecycle_enabled":                   cfg.MemoryLifecycleEnabled,
+			"maintenance_interval_seconds":        cfg.MemoryMaintenanceIntervalSeconds,
+			"archive_value_threshold":             cfg.MemoryArchiveValueThreshold, "auto_hard_delete": false})
 	default:
 		return fmt.Errorf("unknown memory command: %s", args[0])
 	}

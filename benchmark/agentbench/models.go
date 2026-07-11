@@ -102,6 +102,7 @@ type MemoryHit struct {
 	Rank            int      `json:"rank"`
 	MemoryID        string   `json:"memory_id"`
 	DocumentKind    string   `json:"document_kind,omitempty"`
+	ParentID        string   `json:"parent_id,omitempty"`
 	MessageID       string   `json:"message_id,omitempty"`
 	Title           string   `json:"title"`
 	SourceSessionID string   `json:"source_session_id,omitempty"`

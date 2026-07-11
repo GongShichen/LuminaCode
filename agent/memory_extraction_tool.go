@@ -26,6 +26,7 @@ type extractMemoryCandidateInput struct {
 	Entities         []string              `json:"entities"`
 	Importance       float64               `json:"importance"`
 	Confidence       float64               `json:"confidence"`
+	EpistemicStatus  string                `json:"epistemic_status,omitempty" jsonschema:"enum=reported,enum=observed,enum=derived,enum=suggested,enum=hypothetical,enum=questioned"`
 	SourceMessageIDs []string              `json:"source_message_ids" jsonschema:"required,minItems=1"`
 	SourcePaths      []string              `json:"source_paths,omitempty"`
 }
@@ -114,6 +115,7 @@ func (t *extractMemoryBatchTool) batchJSON() (string, bool, error) {
 			Title: input.Title, Summary: input.Summary, Content: input.Content,
 			Tags: append([]string(nil), input.Tags...), Entities: append([]string(nil), input.Entities...),
 			Importance: input.Importance, Confidence: input.Confidence,
+			EpistemicStatus:  input.EpistemicStatus,
 			SourceMessageIDs: append([]string(nil), input.SourceMessageIDs...), SourcePaths: append([]string(nil), input.SourcePaths...),
 		})
 	}

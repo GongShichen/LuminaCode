@@ -535,9 +535,9 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 	teamAgentID, _ := s.ExtraContext["team_agent_id"].(string)
 	teamName, _ := s.ExtraContext["team_name"].(string)
 	scopes := longmemory.RuntimeScopes(s.Config.CWD, agentType, teamName, teamAgentID)
-	limit := s.Config.MemoryRecallMaxItems
+	limit := s.Config.MemoryAtomMaxSelected
 	if limit <= 0 {
-		limit = 8
+		limit = 32
 	}
 	memoryQuery := longmemory.MemoryQuery{Text: strings.TrimSpace(query), Timestamp: time.Now().UTC(), Scopes: scopes,
 		SessionID: s.sessionIDForMemoryUse(), TeamSessionID: teamID, AgentID: agentType}
@@ -555,7 +555,10 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 	var embedder longmemory.Embedder
 	if s.Config.MemoryEmbeddingEnabled {
 		if local, embedErr := longmemory.SharedLocalEmbedder(s.Config.MemoryEmbeddingModel, s.Config.MemoryEmbeddingModelDir); embedErr == nil {
-			embedder = local
+			embedder = longmemory.SharedEmbeddingScheduler(local, longmemory.EmbeddingSchedulerOptions{
+				BatchSize: s.Config.MemoryEmbeddingBatchSize, BatchWait: time.Duration(s.Config.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
+				QueryCacheEntries: s.Config.MemoryEmbeddingQueryCacheEntries,
+				ExecutionTimeout:  time.Duration(s.Config.MemoryEmbeddingExecutionTimeout * float64(time.Second))})
 		}
 	}
 	result, err := store.SearchAllChannels(ctx, memoryQuery, expansion, embedder, longmemory.HybridSearchOptions{
@@ -564,7 +567,6 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 		GraphCandidates:     s.Config.MemoryGraphCandidates,
 		GraphMaxHops:        s.Config.MemoryGraphMaxHops,
 		RRFK:                s.Config.MemoryRRFK,
-		MMRLambda:           s.Config.MemoryMMRLambda,
 		MaxItems:            limit,
 		CoreContextTokens:   s.Config.MemoryCoreContextTokens,
 		TargetContextTokens: s.Config.MemoryContextTargetTokens,
@@ -577,6 +579,16 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 		ExpansionModel:      expansionModel,
 		ExpansionError:      expansionError,
 		NeighborChunks:      s.Config.MemoryEvidenceNeighborChunks,
+		AtomMaxSelected:     limit, CoverageMaxFacets: s.Config.MemoryCoverageMaxFacets,
+		CoverageCompletionRounds:      s.Config.MemoryCoverageCompletionRounds,
+		CoverageRelevanceWeight:       s.Config.MemoryCoverageRelevanceWeight,
+		CoverageFacetWeight:           s.Config.MemoryCoverageFacetWeight,
+		CoverageProvenanceWeight:      s.Config.MemoryCoverageProvenanceWeight,
+		CoverageSourceWeight:          s.Config.MemoryCoverageSourceWeight,
+		CoverageCoherenceWeight:       s.Config.MemoryCoverageCoherenceWeight,
+		EvidencePrimaryBudgetRatio:    s.Config.MemoryEvidencePrimaryBudgetRatio,
+		EvidenceCompletionBudgetRatio: s.Config.MemoryEvidenceCompletionBudgetRatio,
+		EvidenceContextBudgetRatio:    s.Config.MemoryEvidenceContextBudgetRatio,
 	})
 	if err != nil {
 		return longmemory.EvidencePacket{}, nil

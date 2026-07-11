@@ -136,34 +136,28 @@ function Write-LuminaDefaults {
         $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
         Copy-Item -LiteralPath $Path -Destination "$Path.bak.$timestamp" -Force
     }
-    $config = [ordered]@{
-        api_key = $ApiKey
-        api_base_url = $BaseUrl
-        api_model = $Model
-        api_type = $ApiType
-        api_max_tokens = $MaxTokens
-        api_stream_idle_timeout_seconds = 180.0
-        web_search_enabled = $true
-        web_search_provider = "searxng"
-        web_search_base_url = "http://127.0.0.1:8888"
-        web_search_max_results = 10
-        web_search_timeout_seconds = 20.0
-        web_fetch_enabled = $true
-        web_fetch_require_search_result = $true
-        web_fetch_max_chars = 80000
-        web_fetch_timeout_seconds = 20.0
-        web_fetch_user_agent = "LuminaCode/1.0"
-        session_dir = "~/.Lumina/sessions"
-        session_memory_enabled = $true
-        auto_memory_enabled = $true
-        skills_enabled = $true
-        bundled_skills_dir = ".Lumina/SKILLS"
-        system_prompt_path = ".Lumina/SYSTEM/system-prompt.md"
-        memory_extraction_prompt_path = ".Lumina/SYSTEM/extraction_system.md"
-        worktree_base_ref = "HEAD"
-        worktree_dir = ".Lumina/worktrees"
+    if (Test-Path $Path) {
+        $config = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    } else {
+        $config = @{}
     }
-    $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding UTF8
+    $config["api_key"] = $ApiKey
+    $config["api_base_url"] = $BaseUrl
+    $config["api_model"] = $Model
+    $config["api_type"] = $ApiType
+    $config["api_max_tokens"] = $MaxTokens
+    $config["api_stream_idle_timeout_seconds"] = 180.0
+    $config["web_search_enabled"] = $true
+    $config["web_search_provider"] = "searxng"
+    $config["web_search_base_url"] = "http://127.0.0.1:8888"
+    $config["web_search_max_results"] = 10
+    $config["web_search_timeout_seconds"] = 20.0
+    $config["web_fetch_enabled"] = $true
+    $config["web_fetch_require_search_result"] = $true
+    $config["web_fetch_max_chars"] = 80000
+    $config["web_fetch_timeout_seconds"] = 20.0
+    $config["web_fetch_user_agent"] = "LuminaCode/1.0"
+    $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
 function Merge-WebDefaults {

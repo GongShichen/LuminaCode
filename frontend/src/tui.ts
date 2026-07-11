@@ -866,6 +866,13 @@ export class LuminaTui {
     try {
       const result = await this.rpc.call("memory.search", { session_id: this.sessionID, query, limit: 12 });
       this.showMemoryMenu(`memory.search: ${query}`, result?.items);
+      const run = result?.retrieval_trace?.run;
+      if (run) {
+        const channels = Array.isArray(run.channel_results) ? run.channel_results.length : 0;
+        const selectedAtoms = Array.isArray(run.coverage_ledger?.selected) ? run.coverage_ledger.selected.length : 0;
+        const uncovered = Array.isArray(run.coverage_ledger?.uncovered) ? run.coverage_ledger.uncovered.length : 0;
+        this.taskLines.push(`memory.trace: channels=${channels} atoms=${selectedAtoms} uncovered=${uncovered} vector_batches=${run.embedding_trace?.batches || 0}`);
+      }
     } catch (err) {
       this.taskLines.push(`memory.search: ${String(err)}`);
       this.renderTasks(true);

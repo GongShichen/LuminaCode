@@ -37,9 +37,9 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 		return nil
 	}
 	defer store.Close()
-	limit := cfg.MemoryRecallMaxItems
+	limit := cfg.MemoryAtomMaxSelected
 	if limit <= 0 {
-		limit = 8
+		limit = 32
 	}
 	scopes := longmemory.RuntimeScopes(cfg.CWD, memoryAgentType(state), state.MemoryTeamName, memoryTeamAgentID(state))
 	queryTime := state.MemoryQueryTime
@@ -58,44 +58,48 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 	catalog, catalogErr := store.InspectCatalog(ctx, scopes)
 	var embedder longmemory.Embedder
 	if cfg.MemoryEmbeddingEnabled {
-		if local, embedErr := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir); embedErr == nil {
-			embedder = local
-		}
+		embedder = configuredMemoryEmbedder(cfg)
 	}
 	searchOptions := func(expansionModel, expansionError string, waitMS int64) longmemory.HybridSearchOptions {
 		return longmemory.HybridSearchOptions{
-			FTSCandidates:          cfg.MemoryFTSCandidates,
-			VectorCandidates:       cfg.MemoryVectorCandidates,
-			GraphCandidates:        cfg.MemoryGraphCandidates,
-			GraphMaxHops:           cfg.MemoryGraphMaxHops,
-			RRFK:                   cfg.MemoryRRFK,
-			MMRLambda:              cfg.MemoryMMRLambda,
-			MMRRelevanceWeight:     cfg.MemoryMMRRelevanceWeight,
-			MMRNoveltyWeight:       cfg.MemoryMMRNoveltyWeight,
-			MMRFacetWeight:         cfg.MemoryMMRFacetCoverageWeight,
-			MMRSourceWeight:        cfg.MemoryMMRSourceCoverageWeight,
-			SessionRetrieval:       cfg.MemorySessionRetrievalEnabled,
-			SessionCandidates:      cfg.MemorySessionCandidates,
-			ChunksPerSession:       cfg.MemoryChunksPerSession,
-			SessionChunkCandidates: cfg.MemorySessionChunkCandidates,
-			MaxItems:               limit,
-			CoreContextTokens:      cfg.MemoryCoreContextTokens,
-			TargetContextTokens:    cfg.MemoryContextTargetTokens,
-			MaxContextTokens:       cfg.MemoryContextMaxTokens,
-			LocalTimeout:           time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
-			SessionID:              cfgSessionID(state),
-			TeamSessionID:          state.MemoryTeamSessionID,
-			AgentID:                memoryAgentType(state),
-			ExcludeIDs:             memory.RecalledMemoryIDs(state.Messages),
-			ExpansionModel:         expansionModel,
-			ExpansionError:         expansionError,
-			ExpansionWaitMS:        waitMS,
-			NeighborChunks:         cfg.MemoryAdjacentChunkWindow,
-			ReferenceTime:          queryTime,
-			CanonicalEntityEnabled: cfg.MemoryCanonicalEntityEnabled,
-			CanonicalEventEnabled:  cfg.MemoryCanonicalEventEnabled,
-			CacheEnabled:           cfg.MemoryRetrievalCacheEnabled,
-			CacheTTL:               time.Duration(cfg.MemoryRetrievalCacheTTLSeconds * float64(time.Second)),
+			FTSCandidates:                 cfg.MemoryFTSCandidates,
+			VectorCandidates:              cfg.MemoryVectorCandidates,
+			GraphCandidates:               cfg.MemoryGraphCandidates,
+			GraphMaxHops:                  cfg.MemoryGraphMaxHops,
+			RRFK:                          cfg.MemoryRRFK,
+			SessionRetrieval:              cfg.MemorySessionRetrievalEnabled,
+			SessionCandidates:             cfg.MemorySessionCandidates,
+			ChunksPerSession:              cfg.MemoryChunksPerSession,
+			SessionChunkCandidates:        cfg.MemorySessionChunkCandidates,
+			MaxItems:                      limit,
+			CoreContextTokens:             cfg.MemoryCoreContextTokens,
+			TargetContextTokens:           cfg.MemoryContextTargetTokens,
+			MaxContextTokens:              cfg.MemoryContextMaxTokens,
+			LocalTimeout:                  time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
+			SessionID:                     cfgSessionID(state),
+			TeamSessionID:                 state.MemoryTeamSessionID,
+			AgentID:                       memoryAgentType(state),
+			ExcludeIDs:                    memory.RecalledMemoryIDs(state.Messages),
+			ExpansionModel:                expansionModel,
+			ExpansionError:                expansionError,
+			ExpansionWaitMS:               waitMS,
+			NeighborChunks:                cfg.MemoryAdjacentChunkWindow,
+			ReferenceTime:                 queryTime,
+			CanonicalEntityEnabled:        cfg.MemoryCanonicalEntityEnabled,
+			CanonicalEventEnabled:         cfg.MemoryCanonicalEventEnabled,
+			CacheEnabled:                  cfg.MemoryRetrievalCacheEnabled,
+			CacheTTL:                      time.Duration(cfg.MemoryRetrievalCacheTTLSeconds * float64(time.Second)),
+			AtomMaxSelected:               cfg.MemoryAtomMaxSelected,
+			CoverageMaxFacets:             cfg.MemoryCoverageMaxFacets,
+			CoverageCompletionRounds:      cfg.MemoryCoverageCompletionRounds,
+			CoverageRelevanceWeight:       cfg.MemoryCoverageRelevanceWeight,
+			CoverageFacetWeight:           cfg.MemoryCoverageFacetWeight,
+			CoverageProvenanceWeight:      cfg.MemoryCoverageProvenanceWeight,
+			CoverageSourceWeight:          cfg.MemoryCoverageSourceWeight,
+			CoverageCoherenceWeight:       cfg.MemoryCoverageCoherenceWeight,
+			EvidencePrimaryBudgetRatio:    cfg.MemoryEvidencePrimaryBudgetRatio,
+			EvidenceCompletionBudgetRatio: cfg.MemoryEvidenceCompletionBudgetRatio,
+			EvidenceContextBudgetRatio:    cfg.MemoryEvidenceContextBudgetRatio,
 		}
 	}
 	type retrievalResult struct {
@@ -120,7 +124,7 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 	}
 	var result longmemory.AllChannelResult
 	var searchErr error
-	if len(expansion.Queries)+len(expansion.Entities)+len(expansion.TemporalConstraints)+len(expansion.RelationTerms) > 0 {
+	if len(expansion.Queries)+len(expansion.Entities)+len(expansion.TemporalConstraints)+len(expansion.RelationTerms)+len(expansion.ProvenanceHints) > 0 {
 		result, searchErr = store.SearchAllChannels(ctx, memoryQuery, expansion, embedder,
 			searchOptions(expansionModel, expansionError, expansionWaitMS))
 		original := <-originalCh
@@ -136,9 +140,6 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 	}
 	if searchErr != nil {
 		return nil
-	}
-	if len(result.Packet.Evidence) > limit {
-		result.Packet.Evidence = result.Packet.Evidence[:limit]
 	}
 	var ids []string
 	recalls := make([]MemoryRecall, 0, len(result.Packet.Evidence)+1)
@@ -203,6 +204,19 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 		recalls[0].Content = reference + "\n\n" + recalls[0].Content
 	}
 	return recalls
+}
+
+func configuredMemoryEmbedder(cfg config.Config) longmemory.Embedder {
+	local, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+	if err != nil {
+		return nil
+	}
+	return longmemory.SharedEmbeddingScheduler(local, longmemory.EmbeddingSchedulerOptions{
+		BatchSize:         cfg.MemoryEmbeddingBatchSize,
+		BatchWait:         time.Duration(cfg.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
+		QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
+		ExecutionTimeout:  time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second)),
+	})
 }
 
 func recentMemoryContext(messages []map[string]any, maxMessages, maxTokens int) []longmemory.MessageExcerpt {
@@ -299,6 +313,9 @@ func formatLongTermEvidence(evidence longmemory.Evidence) string {
 	}
 	if role := strings.TrimSpace(stringFromAny(evidence.Metadata["role"])); role != "" {
 		parts = append(parts, "Provenance role: "+role)
+	}
+	if status := strings.TrimSpace(stringFromAny(evidence.Metadata["epistemic_status"])); status != "" {
+		parts = append(parts, "Epistemic status: "+status)
 	}
 	if !evidence.OccurredAt.IsZero() {
 		parts = append(parts, "Occurred at: "+evidence.OccurredAt.Format(time.RFC3339))

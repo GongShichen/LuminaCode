@@ -47,6 +47,8 @@ func expandMemoryQuery(ctx context.Context, cfg config.Config, query longmemory.
 		"Use the ExpandMemoryQuery tool exactly once. Preserve uncertainty and do not invent facts."
 	tool := memoryExpansionToolSchema(cfg.MemoryQueryExpansionMaxQueries)
 	var input map[string]any
+	var textOutput strings.Builder
+	parseMode := "tool_call"
 	var streamErr error
 	for result := range client.StreamChat(expansionCtx, system,
 		[]map[string]any{{"role": "user", "content": string(encoded)}}, []map[string]any{tool}, nil) {
@@ -62,17 +64,26 @@ func expandMemoryQuery(ctx context.Context, cfg config.Config, query longmemory.
 			strings.EqualFold(stringFromAny(result.Event["name"]), "ExpandMemoryQuery") {
 			input, _ = result.Event["input"].(map[string]any)
 		}
+		if eventType := stringFromAny(result.Event["type"]); eventType == "text" || eventType == "text_delta" || eventType == "content_block_delta" {
+			textOutput.WriteString(stringFromAny(result.Event["text"]))
+		}
 	}
 	if streamErr != nil {
 		return longmemory.QueryExpansion{}, model, streamErr.Error()
 	}
 	if input == nil {
-		return longmemory.QueryExpansion{}, model, "query expansion model did not call ExpandMemoryQuery"
+		if parsed := parseExpansionJSONContent(textOutput.String()); parsed != nil {
+			input = parsed
+			parseMode = "json_content"
+		} else {
+			return longmemory.QueryExpansion{}, model, "query expansion model returned neither ExpandMemoryQuery nor valid JSON content"
+		}
 	}
 	expansion, err := parseQueryExpansion(input, cfg.MemoryQueryExpansionMaxQueries)
 	if err != nil {
 		return longmemory.QueryExpansion{}, model, err.Error()
 	}
+	expansion.ParseMode = parseMode
 	return expansion, model, ""
 }
 
@@ -103,6 +114,8 @@ func memoryExpansionToolSchema(maxQueries int) map[string]any {
 						}}},
 				"relation_terms": map[string]any{"type": "array", "maxItems": 16,
 					"items": map[string]any{"type": "string"}},
+				"provenance_hints": map[string]any{"type": "array", "maxItems": 8,
+					"items": map[string]any{"type": "string"}},
 			},
 		},
 	}
@@ -113,9 +126,10 @@ func parseQueryExpansion(input map[string]any, maxQueries int) (longmemory.Query
 		maxQueries = 5
 	}
 	expansion := longmemory.QueryExpansion{
-		Queries:       stringList(input["queries"], maxQueries),
-		Entities:      stringList(input["entities"], 16),
-		RelationTerms: stringList(input["relation_terms"], 16),
+		Queries:         stringList(input["queries"], maxQueries),
+		Entities:        stringList(input["entities"], 16),
+		RelationTerms:   stringList(input["relation_terms"], 16),
+		ProvenanceHints: stringList(input["provenance_hints"], 8),
 	}
 	if rawConstraints, ok := input["temporal_constraints"].([]any); ok {
 		if len(rawConstraints) > 4 {
@@ -143,6 +157,30 @@ func parseQueryExpansion(input map[string]any, maxQueries int) (longmemory.Query
 		}
 	}
 	return expansion, nil
+}
+
+func parseExpansionJSONContent(value string) map[string]any {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```json")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	start, end := strings.Index(value, "{"), strings.LastIndex(value, "}")
+	if start < 0 || end < start {
+		return nil
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(value[start:end+1]), &result); err != nil {
+		return nil
+	}
+	allowed := map[string]bool{"queries": true, "entities": true, "temporal_constraints": true,
+		"relation_terms": true, "provenance_hints": true}
+	for key := range result {
+		if !allowed[key] {
+			delete(result, key)
+		}
+	}
+	return result
 }
 
 func parseExpansionTime(value any) (time.Time, error) {

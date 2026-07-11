@@ -146,6 +146,14 @@ func upsertChunkEntityTx(ctx context.Context, tx *sql.Tx, chunk EvidenceChunk, e
 		normalized_entity, original_text, entity_type, confidence) VALUES (?, ?, ?, ?, ?, '', ?)
 		ON CONFLICT(chunk_id, normalized_entity) DO UPDATE SET original_text=excluded.original_text,
 		confidence=excluded.confidence`, chunk.ChunkID, chunk.ScopeType, chunk.ScopeKey, normalized, entity, clamp01(confidence))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO memory_atom_entities(atom_id, scope_type, scope_key,
+		normalized_entity, original_text, entity_type, confidence)
+		SELECT atom_id, scope_type, scope_key, ?, ?, '', ? FROM memory_evidence_atoms WHERE chunk_id=?
+		ON CONFLICT(atom_id, normalized_entity) DO UPDATE SET original_text=excluded.original_text,
+		confidence=excluded.confidence`, normalized, entity, clamp01(confidence), chunk.ChunkID)
 	return err
 }
 

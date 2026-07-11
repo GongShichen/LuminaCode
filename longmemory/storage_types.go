@@ -123,6 +123,25 @@ type EvidenceChunk struct {
 	ContentHash    string    `json:"content_hash"`
 }
 
+type EvidenceAtom struct {
+	AtomID          string    `json:"atom_id"`
+	ChunkID         string    `json:"chunk_id"`
+	MessageID       string    `json:"message_id"`
+	SessionID       string    `json:"session_id"`
+	ScopeType       ScopeType `json:"scope_type"`
+	ScopeKey        string    `json:"scope_key"`
+	Role            string    `json:"role"`
+	Text            string    `json:"text"`
+	StartRune       int       `json:"start_rune"`
+	EndRune         int       `json:"end_rune"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	ValidFrom       time.Time `json:"valid_from"`
+	ValidUntil      time.Time `json:"valid_until"`
+	Entities        []string  `json:"entities,omitempty"`
+	EpistemicStatus string    `json:"epistemic_status"`
+	ContentHash     string    `json:"content_hash"`
+}
+
 type CoreBlock struct {
 	BlockID          string    `json:"block_id"`
 	ScopeType        ScopeType `json:"scope_type"`
@@ -193,6 +212,16 @@ type QueryExpansion struct {
 	Entities            []string             `json:"entities,omitempty"`
 	TemporalConstraints []TemporalConstraint `json:"temporal_constraints,omitempty"`
 	RelationTerms       []string             `json:"relation_terms,omitempty"`
+	ProvenanceHints     []string             `json:"provenance_hints,omitempty"`
+	ParseMode           string               `json:"-"`
+}
+
+type SignalContribution struct {
+	Channel      string  `json:"channel"`
+	SignalFamily string  `json:"signal_family"`
+	Rank         int     `json:"rank"`
+	Score        float64 `json:"score"`
+	Native       bool    `json:"native"`
 }
 
 type RetrievalCandidate struct {
@@ -216,17 +245,18 @@ type RetrievalCandidate struct {
 }
 
 type RetrievalDocument struct {
-	DocumentID string    `json:"document_id"`
-	Kind       string    `json:"kind"`
-	ParentID   string    `json:"parent_id,omitempty"`
-	Scope      Scope     `json:"scope"`
-	SessionID  string    `json:"session_id,omitempty"`
-	MessageID  string    `json:"message_id,omitempty"`
-	Role       string    `json:"role,omitempty"`
-	Text       string    `json:"text"`
-	OccurredAt time.Time `json:"occurred_at,omitempty"`
-	ValidFrom  time.Time `json:"valid_from,omitempty"`
-	ValidUntil time.Time `json:"valid_until,omitempty"`
+	DocumentID      string    `json:"document_id"`
+	Kind            string    `json:"kind"`
+	ParentID        string    `json:"parent_id,omitempty"`
+	Scope           Scope     `json:"scope"`
+	SessionID       string    `json:"session_id,omitempty"`
+	MessageID       string    `json:"message_id,omitempty"`
+	Role            string    `json:"role,omitempty"`
+	Text            string    `json:"text"`
+	OccurredAt      time.Time `json:"occurred_at,omitempty"`
+	ValidFrom       time.Time `json:"valid_from,omitempty"`
+	ValidUntil      time.Time `json:"valid_until,omitempty"`
+	EpistemicStatus string    `json:"epistemic_status,omitempty"`
 }
 
 type ChannelResult struct {
@@ -255,6 +285,12 @@ type RetrievalRun struct {
 	GlobalChannelCandidates     map[string]int            `json:"global_channel_candidates,omitempty"`
 	PerSessionChannelCandidates map[string]map[string]int `json:"per_session_channel_candidates,omitempty"`
 	CoverageFacets              []string                  `json:"coverage_facets,omitempty"`
+	CoverageLedger              CoverageLedger            `json:"coverage_ledger,omitempty"`
+	ResidualSweepCandidates     int                       `json:"residual_sweep_candidates,omitempty"`
+	NativeChannelCandidates     map[string]int            `json:"native_channel_candidates,omitempty"`
+	DuplicateSignalSuppression  int                       `json:"duplicate_signal_suppression,omitempty"`
+	EmbeddingTrace              EmbeddingTrace            `json:"embedding_trace,omitempty"`
+	QueryExpansionParseMode     string                    `json:"query_expansion_parse_mode,omitempty"`
 	CanonicalEntities           []CanonicalEntity         `json:"canonical_entities,omitempty"`
 	CanonicalEvents             []CanonicalEvent          `json:"canonical_events,omitempty"`
 	CacheHit                    bool                      `json:"cache_hit,omitempty"`
@@ -313,6 +349,7 @@ type MemoryCatalog struct {
 	TotalEpisodes int            `json:"total_episodes"`
 	TotalSessions int            `json:"total_sessions"`
 	TotalChunks   int            `json:"total_chunks"`
+	TotalAtoms    int            `json:"total_atoms"`
 	TotalEntities int            `json:"total_entities"`
 	TotalFacts    int            `json:"total_facts"`
 	TotalEdges    int            `json:"total_edges"`
@@ -323,15 +360,41 @@ type MemoryCatalog struct {
 }
 
 type CandidateScore struct {
-	DocumentID    string             `json:"document_id,omitempty"`
-	MemoryID      string             `json:"memory_id"`
-	Entry         Entry              `json:"entry"`
-	ChannelRanks  map[string]int     `json:"channel_ranks"`
-	ChannelScores map[string]float64 `json:"channel_scores"`
-	FusedScore    float64            `json:"fused_score"`
-	GraphScore    float64            `json:"graph_score"`
-	Selected      bool               `json:"selected"`
-	DropReason    string             `json:"drop_reason,omitempty"`
+	DocumentID    string               `json:"document_id,omitempty"`
+	MemoryID      string               `json:"memory_id"`
+	Entry         Entry                `json:"entry"`
+	ChannelRanks  map[string]int       `json:"channel_ranks"`
+	ChannelScores map[string]float64   `json:"channel_scores"`
+	FusedScore    float64              `json:"fused_score"`
+	GraphScore    float64              `json:"graph_score"`
+	Selected      bool                 `json:"selected"`
+	DropReason    string               `json:"drop_reason,omitempty"`
+	Contributions []SignalContribution `json:"signal_contributions,omitempty"`
+}
+
+type CoverageFacet struct {
+	FacetID       string               `json:"facet_id"`
+	Text          string               `json:"text"`
+	Entities      []string             `json:"entities,omitempty"`
+	Relations     []string             `json:"relations,omitempty"`
+	TemporalHints []TemporalConstraint `json:"temporal_hints,omitempty"`
+}
+
+type CoverageDecision struct {
+	DocumentID      string             `json:"document_id"`
+	CoveredFacets   []string           `json:"covered_facets,omitempty"`
+	Utility         float64            `json:"utility"`
+	UtilityPerCost  float64            `json:"utility_per_cost"`
+	EstimatedTokens int                `json:"estimated_tokens"`
+	ScoreBreakdown  map[string]float64 `json:"score_breakdown,omitempty"`
+}
+
+type CoverageLedger struct {
+	Facets     []CoverageFacet     `json:"facets"`
+	CoveredBy  map[string][]string `json:"covered_by"`
+	Selected   []CoverageDecision  `json:"selected"`
+	Uncovered  []string            `json:"uncovered,omitempty"`
+	TokenUsage int                 `json:"token_usage"`
 }
 
 type Evidence struct {
@@ -401,6 +464,8 @@ type ExtractionBatch struct {
 	SessionID        string            `json:"session_id,omitempty"`
 	LastMessageID    string            `json:"last_message_id,omitempty"`
 	LastMessageIndex int               `json:"last_message_index,omitempty"`
+	AtomTargetTokens int               `json:"atom_target_tokens,omitempty"`
+	AtomMaxTokens    int               `json:"atom_max_tokens,omitempty"`
 }
 
 type MemoryEmbedding struct {

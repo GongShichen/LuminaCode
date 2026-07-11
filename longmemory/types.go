@@ -87,6 +87,7 @@ type Entry struct {
 	MessageID           string      `json:"message_id,omitempty"`
 	Role                string      `json:"role,omitempty"`
 	OccurredAt          time.Time   `json:"occurred_at,omitempty"`
+	EpistemicStatus     string      `json:"epistemic_status,omitempty"`
 }
 
 type Candidate struct {
@@ -112,6 +113,7 @@ type Candidate struct {
 	ValidFrom           time.Time  `json:"valid_from"`
 	ValidUntil          time.Time  `json:"valid_until"`
 	RetentionExpiresAt  time.Time  `json:"retention_expires_at"`
+	EpistemicStatus     string     `json:"epistemic_status,omitempty"`
 }
 
 type SearchOptions struct {

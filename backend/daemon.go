@@ -285,7 +285,7 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 				}
 			}
 		}
-		backfillJobs, _ := store.ClaimJobs(ctx, []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill"}, 8)
+		backfillJobs, _ := store.ClaimJobs(ctx, []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "evidence_atom_backfill"}, 8)
 		for _, job := range backfillJobs {
 			if err := store.RunBackfillJob(ctx, job); err != nil {
 				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
@@ -302,13 +302,17 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
 			return
 		}
-		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "chunk_embedding_backfill", "consolidation", "migration_backfill"}, 32)
-		if result, err := store.RunMaintenance(ctx, embedder, 32); err != nil {
+		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "chunk_embedding_backfill", "atom_embedding_backfill", "consolidation", "migration_backfill"}, 32)
+		scheduled := longmemory.SharedEmbeddingScheduler(embedder, longmemory.EmbeddingSchedulerOptions{
+			BatchSize: cfg.MemoryEmbeddingBatchSize, BatchWait: time.Duration(cfg.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
+			QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
+			ExecutionTimeout:  time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second))})
+		if result, err := store.RunMaintenance(ctx, scheduled, 32); err != nil {
 			for _, job := range jobs {
 				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
 			}
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance failed: %v\n", err)
-		} else if result.Embedded+result.ChunkEmbedded+result.SessionEmbedded+result.Enriched+result.Consolidated+
+		} else if result.Embedded+result.ChunkEmbedded+result.AtomEmbedded+result.SessionEmbedded+result.Enriched+result.Consolidated+
 			result.Linked+result.Promoted+result.Archived > 0 {
 			for _, job := range jobs {
 				_ = store.CompleteJob(context.WithoutCancel(ctx), job.JobID)
@@ -940,12 +944,15 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		var embedder longmemory.Embedder
 		if cfg.MemoryEmbeddingEnabled {
 			if local, embedErr := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir); embedErr == nil {
-				embedder = local
+				embedder = longmemory.SharedEmbeddingScheduler(local, longmemory.EmbeddingSchedulerOptions{
+					BatchSize: cfg.MemoryEmbeddingBatchSize, BatchWait: time.Duration(cfg.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
+					QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
+					ExecutionTimeout:  time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second))})
 			}
 		}
 		limit := p.Limit
 		if limit <= 0 {
-			limit = cfg.MemoryRecallMaxItems
+			limit = cfg.MemoryAtomMaxSelected
 		}
 		query := longmemory.MemoryQuery{Text: strings.TrimSpace(p.Query), Timestamp: time.Now().UTC(),
 			Scopes: scopes, SessionID: p.SessionID, AgentID: "main"}
@@ -963,21 +970,27 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		hybrid, err := store.SearchAllChannels(ctx, query, expansion, embedder, longmemory.HybridSearchOptions{
 			FTSCandidates: cfg.MemoryFTSCandidates, VectorCandidates: cfg.MemoryVectorCandidates,
 			GraphCandidates: cfg.MemoryGraphCandidates, GraphMaxHops: cfg.MemoryGraphMaxHops,
-			RRFK: cfg.MemoryRRFK, MMRLambda: cfg.MemoryMMRLambda, MaxItems: limit,
+			RRFK: cfg.MemoryRRFK, MaxItems: limit,
 			CoreContextTokens: cfg.MemoryCoreContextTokens, TargetContextTokens: cfg.MemoryContextTargetTokens,
 			MaxContextTokens: cfg.MemoryContextMaxTokens, LocalTimeout: time.Duration(cfg.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
 			SessionID: p.SessionID, AgentID: "main",
 			ExpansionModel: expansionModel, ExpansionError: expansionError,
-			NeighborChunks: cfg.MemoryEvidenceNeighborChunks,
+			NeighborChunks:  cfg.MemoryEvidenceNeighborChunks,
+			AtomMaxSelected: limit, CoverageMaxFacets: cfg.MemoryCoverageMaxFacets,
+			CoverageCompletionRounds:      cfg.MemoryCoverageCompletionRounds,
+			CoverageRelevanceWeight:       cfg.MemoryCoverageRelevanceWeight,
+			CoverageFacetWeight:           cfg.MemoryCoverageFacetWeight,
+			CoverageProvenanceWeight:      cfg.MemoryCoverageProvenanceWeight,
+			CoverageSourceWeight:          cfg.MemoryCoverageSourceWeight,
+			CoverageCoherenceWeight:       cfg.MemoryCoverageCoherenceWeight,
+			EvidencePrimaryBudgetRatio:    cfg.MemoryEvidencePrimaryBudgetRatio,
+			EvidenceCompletionBudgetRatio: cfg.MemoryEvidenceCompletionBudgetRatio,
+			EvidenceContextBudgetRatio:    cfg.MemoryEvidenceContextBudgetRatio,
 		})
 		if err != nil {
 			return nil, toRPCError("memory_search_failed", err)
 		}
-		entries, err := store.GetMany(ctx, hybrid.Run.InjectedIDs)
-		if err != nil {
-			return nil, toRPCError("memory_search_entries_failed", err)
-		}
-		return map[string]any{"items": entries, "evidence_packet": hybrid.Packet, "retrieval_trace": hybrid.Trace}, nil
+		return map[string]any{"items": hybrid.Packet.Evidence, "evidence_packet": hybrid.Packet, "retrieval_trace": hybrid.Trace}, nil
 	case "memory.facts":
 		var p struct {
 			SessionID string             `json:"session_id"`

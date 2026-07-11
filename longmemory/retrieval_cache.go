@@ -11,14 +11,19 @@ import (
 )
 
 type retrievalCacheEntry struct {
-	packet            EvidencePacket
-	selectedIDs       []string
-	channelResults    []ChannelResult
-	globalCounts      map[string]int
-	perSessionCounts  map[string]map[string]int
-	canonicalEntities []CanonicalEntity
-	canonicalEvents   []CanonicalEvent
-	expiresAt         time.Time
+	packet                     EvidencePacket
+	selectedIDs                []string
+	channelResults             []ChannelResult
+	globalCounts               map[string]int
+	nativeCounts               map[string]int
+	perSessionCounts           map[string]map[string]int
+	coverageLedger             CoverageLedger
+	duplicateSignalSuppression int
+	residualSweepCandidates    int
+	embeddingTrace             EmbeddingTrace
+	canonicalEntities          []CanonicalEntity
+	canonicalEvents            []CanonicalEvent
+	expiresAt                  time.Time
 }
 
 var sharedRetrievalCache = struct {
@@ -44,14 +49,15 @@ func (s *Store) retrievalCacheKey(ctx context.Context, query MemoryQuery, expans
 	}
 	sort.Strings(excludeIDs)
 	optionKey := struct {
-		FTS, Vector, Graph, Hops, RRFK, MaxItems, Sessions, ChunksPerSession, SessionChunks int
-		Relevance, Novelty, Facet, Source                                                   float64
-		CoreTokens, TargetTokens, MaxTokens, Neighbors                                      int
-		CanonicalEntity, CanonicalEvent                                                     bool
-		Exclude                                                                             []string
+		FTS, Vector, Graph, Hops, RRFK, MaxItems, Sessions, ChunksPerSession, SessionChunks     int
+		CoverageRelevance, CoverageFacet, CoverageProvenance, CoverageSource, CoverageCoherence float64
+		CoreTokens, TargetTokens, MaxTokens, Neighbors                                          int
+		CanonicalEntity, CanonicalEvent                                                         bool
+		Exclude                                                                                 []string
 	}{opts.FTSCandidates, opts.VectorCandidates, opts.GraphCandidates, opts.GraphMaxHops, opts.RRFK,
 		opts.MaxItems, opts.SessionCandidates, opts.ChunksPerSession, opts.SessionChunkCandidates,
-		opts.MMRRelevanceWeight, opts.MMRNoveltyWeight, opts.MMRFacetWeight, opts.MMRSourceWeight,
+		opts.CoverageRelevanceWeight, opts.CoverageFacetWeight, opts.CoverageProvenanceWeight,
+		opts.CoverageSourceWeight, opts.CoverageCoherenceWeight,
 		opts.CoreContextTokens, opts.TargetContextTokens, opts.MaxContextTokens, opts.NeighborChunks,
 		opts.CanonicalEntityEnabled, opts.CanonicalEventEnabled, excludeIDs}
 	optionsJSON, _ := json.Marshal(optionKey)
@@ -86,8 +92,11 @@ func putCachedRetrieval(key string, packet EvidencePacket, run RetrievalRun, ttl
 	defer sharedRetrievalCache.Unlock()
 	sharedRetrievalCache.items[key] = retrievalCacheEntry{packet: packet, selectedIDs: append([]string(nil), run.SelectedIDs...),
 		channelResults: append([]ChannelResult(nil), run.ChannelResults...), globalCounts: run.GlobalChannelCandidates,
-		perSessionCounts: run.PerSessionChannelCandidates, canonicalEntities: run.CanonicalEntities,
-		canonicalEvents: run.CanonicalEvents, expiresAt: time.Now().Add(ttl)}
+		nativeCounts: run.NativeChannelCandidates, perSessionCounts: run.PerSessionChannelCandidates,
+		coverageLedger: run.CoverageLedger, duplicateSignalSuppression: run.DuplicateSignalSuppression,
+		residualSweepCandidates: run.ResidualSweepCandidates, embeddingTrace: run.EmbeddingTrace,
+		canonicalEntities: run.CanonicalEntities,
+		canonicalEvents:   run.CanonicalEvents, expiresAt: time.Now().Add(ttl)}
 	if len(sharedRetrievalCache.items) > 512 {
 		now := time.Now()
 		for current, item := range sharedRetrievalCache.items {

@@ -45,26 +45,69 @@ Cross-session memory lives in one local SQLite store:
 ~/.lumina/memory/lumina-memory.sqlite
 ```
 
-- Ingestion first commits original messages and overlapping evidence chunks with
-  a persistent cursor. Semantic facts, entities, temporal versions, and
-  relations are enriched independently and can resume after a restart.
-- Every query runs BM25, local vector, entity, temporal, Session, and graph
-  retrieval. Relevant Sessions are then searched again with SQL-level Session
-  constraints, so their supporting chunks are not lost to a global Top-K.
-- Global and per-Session results use equal-weight RRF, coverage-aware MMR, source
-  diversity, and adjacent chunk expansion. No additional reranker model is used.
-- Each turn carries one reference timestamp through expansion, temporal search,
-  timeline assembly, and the hidden answering context. Canonical entities and
-  events connect matching evidence across Sessions while retaining provenance.
-- User, project, Team, agent-type, and Team-agent scopes are isolated. Retrieved
-  evidence is transient context and never enters the visible transcript.
-- Facts retain valid-time and observed-time history, so updates supersede old
-  values without deleting their sources.
-- Lifecycle management separates fact validity from storage retention. Memories
-  move between `hot`, `warm`, and `cold` based on access and reinforcement; an
-  expired low-value memory is archived after a grace period, never physically
-  deleted by background maintenance. Pins, active dependencies, and unresolved
-  conflicts prevent automatic archival.
+### Storage And Ingestion
+
+- A persistent message cursor commits visible messages before semantic
+  enrichment. Each message is stored as an immutable evidence span, overlapping
+  chunk, and sentence/list/code-aware evidence atom.
+- Evidence atoms target 96 tokens and retain exact message IDs, Session IDs,
+  roles, rune offsets, timestamps, content hashes, and scope metadata. Original
+  messages and chunks remain available for reconstruction and re-indexing.
+- Semantic enrichment produces memories, facts, entities, relations, canonical
+  events, and core blocks. It references source message IDs instead of copying
+  evidence text and runs through recoverable background jobs.
+- SQLite FTS5 indexes memories, Sessions, chunks, and atoms. Local normalized
+  embeddings are stored beside the source records, with content hashes making
+  indexing and backfill idempotent.
+
+### Retrieval And Evidence Assembly
+
+- Every query runs six channels: BM25, local vector, entity, temporal, Session,
+  and graph retrieval. Query expansion can add synonyms, entities, temporal
+  hints, relation terms, and provenance hints, but it cannot select channels,
+  scopes, weights, or memory types.
+- BM25, vector, entity, temporal, and Session retrieval run concurrently. The
+  graph channel expands their fused candidates, while selected Sessions receive
+  an additional SQL-constrained atom search.
+- Channel results are grouped into independent lexical, semantic, entity, time,
+  Session, and relation signal families. Reciprocal-rank fusion counts the best
+  contribution from each family once.
+- The Evidence Ledger builds generic query facets and selects atoms by fused
+  relevance, uncovered-facet gain, epistemic provenance, source contribution,
+  entity/time coherence, and token cost. One residual all-channel sweep can add
+  evidence for uncovered facets.
+- The evidence packet places selected atoms first, merges atoms from the same
+  message in source order, then adds bounded neighboring context. Core blocks
+  use a separate budget. The packet retains source IDs, roles, timestamps,
+  validity intervals, provenance, and timeline entries.
+- Local ONNX inference uses one backend-wide scheduler with separate query and
+  document queues, micro-batching, content/query caches, and execution-time
+  accounting that starts after a batch receives an execution slot.
+
+### Time, Provenance, And Isolation
+
+- Each user turn has one reference timestamp shared by query expansion,
+  temporal indexes, timeline assembly, and the hidden answering context.
+- Facts use valid time (`valid_from` / `valid_until`) and observed time
+  (`observed_at` / `invalidated_at`). Updates retain prior versions and connect
+  them with `supersedes` and `contradicts` relations.
+- Evidence records epistemic status as `reported`, `observed`, `derived`,
+  `suggested`, `hypothetical`, or `questioned`. Canonical entities and events
+  retain every source atom and its scope.
+- User, project, Team, agent-type, and Team-agent scopes are checked by every
+  retrieval channel and graph traversal. Retrieved evidence is transient hidden
+  context and does not enter the visible transcript.
+
+### Lifecycle And Governance
+
+- Fact validity and storage retention are independent. Active memories move
+  between `hot`, `warm`, and `cold` using access and reinforcement signals.
+- Lifecycle value combines importance, confidence, access recency/frequency,
+  reinforcement, provenance strength, and dependency strength. Expired,
+  unpinned, low-value records can be archived after a grace period.
+- Background maintenance never performs physical deletion. Pins, active
+  dependencies, core blocks, and unresolved conflict chains are protected;
+  archived records can be restored and re-indexed.
 
 `make install` downloads `multilingual-e5-small` from ModelScope into
 `~/.lumina/models/memory/`; `make uninstall` removes it. Use `/Memory`,
@@ -78,9 +121,14 @@ Common tuning fields in `~/.lumina/CONFIG/defaults.json`:
 | `memory_session_candidates` | 12 | Relevant Sessions searched in depth |
 | `memory_chunks_per_session` | 6 | Maximum fused chunks retained per Session |
 | `memory_session_chunk_candidates` | 64 | Per-channel candidates inside a Session |
-| `memory_adjacent_chunk_window` | 1 | Neighbor chunks included around a hit |
+| `memory_atom_target_tokens` / `memory_atom_max_tokens` | 96 / 160 | Evidence atom size |
+| `memory_atom_max_selected` | 32 | Safety cap; the token budget determines normal selection |
+| `memory_coverage_max_facets` | 8 | Generic query facets tracked by the Evidence Ledger |
+| `memory_coverage_completion_rounds` | 1 | Residual all-channel coverage sweep count |
+| `memory_adjacent_chunk_window` | 1 | Neighbor atoms considered after direct evidence |
+| `memory_embedding_batch_size` / `memory_embedding_batch_wait_ms` | 32 / 20 | Shared local embedding micro-batch |
 | `memory_retrieval_cache_ttl_seconds` | 300 | Scope-safe retrieval cache lifetime |
-| `memory_query_expansion_timeout_seconds` | 2 | Maximum wait for generic query expansion |
+| `memory_query_expansion_timeout_seconds` | 4 | Maximum wait for generic query expansion |
 | `memory_lifecycle_enabled` | true | Enable temperature, scoring, and automatic archival |
 | `memory_maintenance_interval_seconds` | 300 | Lifecycle maintenance interval |
 | `memory_hot_access_days` / `memory_warm_access_days` | 30 / 90 | Hot, warm, and cold access windows |
@@ -90,8 +138,10 @@ Common tuning fields in `~/.lumina/CONFIG/defaults.json`:
 | `memory_value_weights` | See example config | Seven lifecycle value weights |
 | `memory_auto_hard_delete_enabled` | false | Must remain disabled; background hard delete is forbidden |
 
-The four `memory_mmr_*_weight` values control relevance, novelty, facet coverage,
-and source coverage and must add up to `1`. Configuration is hot-reloaded for the
+The five `memory_coverage_*_weight` values and three
+`memory_evidence_*_budget_ratio` values must each add up to `1`. Deprecated
+`memory_mmr_*` and `memory_recall_max_items` fields are accepted for compatibility
+but no longer control evidence selection. Configuration is hot-reloaded for the
 next turn; `make install` adds new defaults without overwriting existing values.
 
 Lifecycle value combines importance, confidence, access recency and frequency,
@@ -103,38 +153,37 @@ lifecycle events, with pin, unpin, archive, and restore controls.
 
 ### LongMemEval
 
-Lumina scored **72.8% (364/500)** on the 500-question oracle set. The saved
-answers were evaluated with the official LongMemEval judge prompt and
-`deepseek-v4-pro` through `https://api.deepseek.com`. This is a complete
-500-question run, but it is not an official GPT-4o leaderboard score.
+Lumina scored **83.2% (416/500)** on the 500-question oracle set. Answers were
+evaluated with the official LongMemEval judge prompt and `deepseek-v4-pro`
+through `https://api.deepseek.com`. This is a complete black-box run of the
+production ingestion and retrieval path; it is not an official GPT-4o
+leaderboard score.
 
 | Question type | Accuracy |
 |---|---:|
-| Single-session assistant | 98.21% |
 | Single-session user | 97.14% |
-| Knowledge update | 85.90% |
-| Temporal reasoning | 69.92% |
-| Single-session preference | 60.00% |
-| Multi-session | 47.37% |
+| Knowledge update | 92.31% |
+| Single-session assistant | 87.50% |
+| Temporal reasoning | 85.71% |
+| Single-session preference | 73.33% |
+| Multi-session | 68.42% |
 
 The run also records retrieval quality separately from answer accuracy:
 
 | Retrieval metric | Result |
 |---|---:|
-| Evidence hit rate | 86.43% |
-| Evidence Recall@K | 73.50% |
-| Evidence MRR | 0.443 |
-| Source Session recall | 97.24% |
-| Gold message recall | 73.99% |
-| Injected chunk recall | 73.50% |
-| Injected text coverage | 73.88% |
-| Average memory context | 1,804 tokens (70.84% memory token ratio) |
+| Evidence hit rate | 98.54% |
+| Evidence Recall@K | 95.26% |
+| Evidence MRR | 0.374 |
+| Source Session recall | 100.00% |
+| Gold message recall | 95.99% |
+| Injected chunk recall | 95.26% |
+| Injected text coverage | 83.40% |
+| Average memory context | 1,277 tokens (21.10% memory token ratio) |
+| Average retrieval duration | 3.52 seconds |
 
-These metrics are measured from the evidence chunks actually injected into the
-answering model. The high Session recall and lower chunk-level recall show that
-the remaining bottleneck is selecting the decisive evidence inside a relevant
-Session, especially for multi-Session synthesis. Judge choice, reader model,
-retrieval depth, and context budget all affect comparisons with other reports.
+Retrieval metrics are computed from the evidence atom IDs and source spans
+actually injected into the answering model.
 
 Published LongMemEval accuracy, sorted for orientation:
 
@@ -147,8 +196,8 @@ Published LongMemEval accuracy, sorted for orientation:
 | Engram | 91.6% | GPT-5 composer, GPT-4o judge; prompt and run artifacts published |
 | Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
 | HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
+| **LuminaCode** | **83.2%** | DeepSeek Judge, official prompt reused; 500 questions |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
-| **LuminaCode** | **72.8%** | DeepSeek Judge, official prompt reused; 500 questions |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
 | Zep | 58.6% | GPT-4o-mini controlled baseline |

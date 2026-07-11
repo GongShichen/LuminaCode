@@ -49,6 +49,7 @@ func (s *Store) InspectCatalog(ctx context.Context, scopes []Scope) (MemoryCatal
 		"memory_episodes":        &catalog.TotalEpisodes,
 		"memory_session_index":   &catalog.TotalSessions,
 		"memory_evidence_chunks": &catalog.TotalChunks,
+		"memory_evidence_atoms":  &catalog.TotalAtoms,
 		"memory_entities":        &catalog.TotalEntities,
 		"memory_facts":           &catalog.TotalFacts,
 		"memory_edges":           &catalog.TotalEdges,
@@ -81,9 +82,9 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	chunkEntries, chunkErr := s.SearchChunkEntities(ctx, queries, entities, scopes, limit)
-	if chunkErr != nil {
-		return nil, chunkErr
+	atomEntries, atomErr := s.SearchAtomsEntity(ctx, terms, scopes, "", limit)
+	if atomErr != nil {
+		return nil, atomErr
 	}
 	scopeSQL, scopeArgs := scopedClauses(scopes, "e.")
 	clauses := []string{"m.status=?"}
@@ -110,7 +111,7 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 	if err != nil {
 		return nil, err
 	}
-	entries = appendUniqueEntries(chunkEntries, entries)
+	entries = appendUniqueEntries(atomEntries, entries)
 	for index := range entries {
 		entries[index].Score = float64(len(entries) - index)
 		entries[index].MatchReason = "entity"
@@ -132,15 +133,10 @@ func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []S
 	if len(sessions) == 0 {
 		return nil, nil
 	}
-	chunkEntries, err := s.chunksForSessions(ctx, sessions, queries, scopes, limit)
+	entries, err := s.sessionEntriesBySessionIDs(ctx, sessions, scopes)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := s.memoriesForSessions(ctx, sessions, scopes, limit)
-	if err != nil {
-		return nil, err
-	}
-	entries = appendUniqueEntries(chunkEntries, entries)
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
@@ -367,26 +363,48 @@ func (s *Store) SearchTemporal(ctx context.Context, queries []string, constraint
 	if limit <= 0 {
 		limit = 40
 	}
-	combined := map[string]Entry{}
-	chunkEntries, chunkErr := s.SearchChunkTemporal(ctx, queries, constraints, scopes, limit)
-	if chunkErr != nil {
-		return nil, chunkErr
+	if len(constraints) == 0 {
+		return nil, nil
 	}
-	for _, entry := range chunkEntries {
+	combined := map[string]Entry{}
+	atomEntries, atomErr := s.SearchAtomsTemporal(ctx, constraints, scopes, "", limit)
+	if atomErr != nil {
+		return nil, atomErr
+	}
+	for _, entry := range atomEntries {
 		combined[entry.MemoryID] = entry
 	}
-	for _, query := range normalizeStrings(queries) {
-		entries, err := s.Search(ctx, SearchOptions{Query: query, Scopes: scopes, IncludeExpired: true,
-			Limit: limit, MaxCandidates: limit * 2})
-		if err != nil {
-			return nil, err
+	rows, err := s.db.QueryContext(ctx, `SELECT fact_id, memory_id, scope_type, scope_key, subject, predicate,
+		object, qualifiers_json, fact_key, confidence, valid_from, valid_until, observed_at,
+		invalidated_at, superseded_by, status FROM memory_facts WHERE status=? ORDER BY observed_at DESC LIMIT ?`,
+		StatusActive, limit*4)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var fact Fact
+		var qualifiers, validFrom, validUntil, observedAt, invalidatedAt string
+		if scanErr := rows.Scan(&fact.FactID, &fact.MemoryID, &fact.ScopeType, &fact.ScopeKey, &fact.Subject,
+			&fact.Predicate, &fact.Object, &qualifiers, &fact.FactKey, &fact.Confidence, &validFrom,
+			&validUntil, &observedAt, &invalidatedAt, &fact.SupersededBy, &fact.Status); scanErr != nil {
+			rows.Close()
+			return nil, scanErr
 		}
-		for _, entry := range entries {
-			if temporalEntryAllowed(entry, constraints) {
-				entry.MatchReason = "temporal"
-				combined[entry.MemoryID] = entry
-			}
+		if !scopeAllowed(fact.ScopeType, fact.ScopeKey, scopes) {
+			continue
 		}
+		entry := Entry{MemoryID: fact.FactID, ScopeType: fact.ScopeType, ScopeKey: fact.ScopeKey,
+			MemoryType: TypeSemantic, Title: fact.Subject + " " + fact.Predicate, Content: fact.Object,
+			Summary: fact.Object, Confidence: fact.Confidence, ValidFrom: parseTime(validFrom),
+			ValidUntil: parseTime(validUntil), OccurredAt: parseTime(observedAt), Status: fact.Status,
+			Score: fact.Confidence, MatchReason: "temporal", DocumentKind: "fact", ParentID: fact.MemoryID,
+			EpistemicStatus: "derived"}
+		if temporalEntryAllowed(entry, constraints) {
+			combined[entry.MemoryID] = entry
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	entries := make([]Entry, 0, len(combined))
 	for _, entry := range combined {
@@ -443,6 +461,18 @@ func scopedClauses(scopes []Scope, prefix string) (string, []any) {
 		args = append(args, scope.Type, scope.Key)
 	}
 	return strings.Join(clauses, " OR "), args
+}
+
+func scopeAllowed(scopeType ScopeType, scopeKey string, scopes []Scope) bool {
+	if len(scopes) == 0 {
+		return true
+	}
+	for _, scope := range scopes {
+		if scope.Type == scopeType && scope.Key == scopeKey {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeEntityTerms(values []string) []string {

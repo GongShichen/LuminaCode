@@ -204,17 +204,13 @@ func TestMemorySessionIndexAccumulatesAndCreatesNextEventEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]bool{}
-	for _, entry := range sessionHits {
-		seen[entry.MemoryID] = true
-	}
-	if !seen["event-one"] || !seen["event-two"] {
-		t.Fatalf("session index did not accumulate both extraction batches: %#v", sessionHits)
-	}
 	var sessionMemoryID string
 	for _, entry := range sessionHits {
 		if entry.DocumentKind == "session" {
 			sessionMemoryID = entry.MemoryID
+			if !strings.Contains(entry.Content, "selected SQLite") || !strings.Contains(entry.Content, "selected WAL mode") {
+				t.Fatalf("session parent did not accumulate both extraction batches: %#v", entry)
+			}
 			break
 		}
 	}

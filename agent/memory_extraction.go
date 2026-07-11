@@ -482,7 +482,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	batch.CoreBlocks = filteredCoreBlocks
 	if c.Config.MemoryEmbeddingEnabled && len(batch.Memories) > 0 {
 		embeddingPrepared := false
-		if embedder, embedErr := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); embedErr == nil {
+		if embedder := configuredMemoryEmbedder(c.Config); embedder != nil {
 			texts := make([]string, len(batch.Memories))
 			for index, candidate := range batch.Memories {
 				texts[index] = candidate.Title + "\n" + candidate.Summary + "\n" + candidate.Content
@@ -508,7 +508,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		}
 	}
 	if c.Config.MemoryEmbeddingEnabled && len(batch.Chunks) > 0 {
-		if embedder, embedErr := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); embedErr == nil {
+		if embedder := configuredMemoryEmbedder(c.Config); embedder != nil {
 			texts := make([]string, len(batch.Chunks))
 			for index := range batch.Chunks {
 				texts[index] = batch.Chunks[index].Text
@@ -527,7 +527,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		}
 	}
 	if c.Config.MemoryEmbeddingEnabled && batch.Episode != nil && batch.SessionEmbedding == nil {
-		if embedder, embedErr := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); embedErr == nil {
+		if embedder := configuredMemoryEmbedder(c.Config); embedder != nil {
 			if vectors, embedErr := embedder.Embed(ctx, []string{batch.Episode.Content}, longmemory.EmbeddingPassage); embedErr == nil && len(vectors) == 1 {
 				batch.SessionEmbedding = &longmemory.MemoryEmbedding{Model: embedder.Model(),
 					ContentHash: longmemory.StableID(longmemory.ScopeProject, "embedding", "session", batch.Episode.Content), Vector: vectors[0]}
@@ -537,6 +537,8 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	batch.ConsumerID = payload.ConsumerID
 	batch.SessionID = payload.SessionID
 	batch.LastMessageIndex = payload.EndIndex
+	batch.AtomTargetTokens = c.Config.MemoryAtomTargetTokens
+	batch.AtomMaxTokens = c.Config.MemoryAtomMaxTokens
 	if len(payload.MessageIDs) > 0 {
 		batch.LastMessageID = payload.MessageIDs[len(payload.MessageIDs)-1]
 	}
@@ -715,7 +717,8 @@ func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, paylo
 		Content: extractionSearchText(payload.Messages), OccurredAt: extractionOccurredAt(payload.Messages, now), ObservedAt: now,
 	}
 	batch := longmemory.ExtractionBatch{Episode: episode, ConsumerID: payload.ConsumerID + ":ingestion",
-		SessionID: payload.SessionID, LastMessageIndex: payload.EndIndex}
+		SessionID: payload.SessionID, LastMessageIndex: payload.EndIndex,
+		AtomTargetTokens: c.Config.MemoryAtomTargetTokens, AtomMaxTokens: c.Config.MemoryAtomMaxTokens}
 	if len(payload.MessageIDs) > 0 {
 		batch.LastMessageID = payload.MessageIDs[len(payload.MessageIDs)-1]
 	}
@@ -743,7 +746,7 @@ func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, paylo
 		batch.Chunks = append(batch.Chunks, longmemory.BuildEvidenceChunks(span)...)
 	}
 	if c.Config.MemoryEmbeddingEnabled {
-		if embedder, err := longmemory.SharedLocalEmbedder(c.Config.MemoryEmbeddingModel, c.Config.MemoryEmbeddingModelDir); err == nil {
+		if embedder := configuredMemoryEmbedder(c.Config); embedder != nil {
 			if len(batch.Chunks) > 0 {
 				texts := make([]string, len(batch.Chunks))
 				for index := range batch.Chunks {
@@ -826,6 +829,7 @@ Extract only durable cross-session memories. Call ExtractMemoryBatch exactly onc
       "entities": ["entity"],
       "importance": 0.0,
       "confidence": 0.0,
+	  "epistemic_status": "reported|observed|derived|suggested|hypothetical|questioned",
 	  "source_message_ids": ["exact source message_id"],
       "source_paths": ["optional path"]
     }
@@ -861,6 +865,7 @@ Rules:
 - Compare against existing memories. Use create for new knowledge, update to revise the same durable memory in place, supersede when a new memory replaces an outdated one, and ignore for duplicates or weak candidates.
 - For update and supersede, set target_memory_id to the relevant existing memory_id.
 - Every saved memory must include at least one source_message_ids entry copied exactly from the recent conversation. The runtime attaches the original message text; do not reproduce or rewrite evidence text.
+- Label epistemic_status from the cited source: reported for direct reports, observed for tool or system observations, derived for conclusions supported by evidence, suggested for advice, hypothetical for unconfirmed scenarios, and questioned for questions rather than assertions.
 - Facts must use memory_index to reference the zero-based memories array. Extract valid_from/valid_until from the conversation when present; do not use the extraction time as event time.
 - Core blocks are only for compact, repeatedly useful preferences, project invariants, or team policies. Do not copy ordinary episodic details into core blocks.
 - Return {"memories":[]} when nothing should be remembered.`

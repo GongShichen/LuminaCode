@@ -318,9 +318,18 @@ func (s *Store) updateMemoryActivity(ctx context.Context, ids []string, reinforc
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, id := range normalizeStrings(ids) {
+		chunkID, sourceSessionID := id, ""
+		var atomChunkID, atomSessionID string
+		if atomErr := tx.QueryRowContext(ctx, `SELECT chunk_id, session_id FROM memory_evidence_atoms WHERE atom_id=?`, id).
+			Scan(&atomChunkID, &atomSessionID); atomErr == nil {
+			chunkID, sourceSessionID = atomChunkID, atomSessionID
+		} else if atomErr != sql.ErrNoRows {
+			return atomErr
+		}
 		targets := []string{id}
 		var parentID string
-		if err := tx.QueryRowContext(ctx, `SELECT parent_memory_id FROM memory_evidence_chunks WHERE chunk_id=?`, id).Scan(&parentID); err == nil && parentID != "" {
+		if err := tx.QueryRowContext(ctx, `SELECT parent_memory_id, session_id FROM memory_evidence_chunks WHERE chunk_id=?`, chunkID).
+			Scan(&parentID, &sourceSessionID); err == nil && parentID != "" {
 			targets = append(targets, parentID)
 		} else if err != nil && err != sql.ErrNoRows {
 			return err
@@ -354,11 +363,11 @@ func (s *Store) updateMemoryActivity(ctx context.Context, ids []string, reinforc
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence_chunks SET last_accessed_at=?, access_count=access_count+1,
-			temperature=? WHERE chunk_id=?`, formatTime(now), TemperatureHot, id); err != nil {
+			temperature=? WHERE chunk_id=?`, formatTime(now), TemperatureHot, chunkID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_session_index SET last_accessed_at=?, access_count=access_count+1,
-			temperature=? WHERE index_id=?`, formatTime(now), TemperatureHot, id); err != nil {
+			temperature=? WHERE index_id=? OR session_id=?`, formatTime(now), TemperatureHot, id, sourceSessionID); err != nil {
 			return err
 		}
 	}

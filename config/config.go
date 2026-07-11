@@ -85,60 +85,77 @@ type Config struct {
 	TeamDialogueMaxEntries           int
 	TeamArtifactMaxBytes             int64
 
-	ExtractionModel                    *string
-	LongTermMemoryEnabled              bool
-	LongTermMemoryStore                string
-	MemoryContextMaxTokens             int
-	MemoryRecallMaxItems               int
-	MemoryEmbeddingEnabled             bool
-	MemoryEmbeddingModel               string
-	MemoryEmbeddingModelDir            string
-	MemoryFTSCandidates                int
-	MemoryVectorCandidates             int
-	MemoryGraphCandidates              int
-	MemoryGraphMaxHops                 int
-	MemoryRRFK                         int
-	MemoryMMRLambda                    float64
-	MemorySessionRetrievalEnabled      bool
-	MemorySessionCandidates            int
-	MemoryChunksPerSession             int
-	MemorySessionChunkCandidates       int
-	MemoryMMRRelevanceWeight           float64
-	MemoryMMRNoveltyWeight             float64
-	MemoryMMRFacetCoverageWeight       float64
-	MemoryMMRSourceCoverageWeight      float64
-	MemoryCoreContextTokens            int
-	MemoryContextTargetTokens          int
-	MemoryRetrievalLocalTimeoutSeconds float64
-	MemoryEvidenceNeighborChunks       int
-	MemoryAdjacentChunkWindow          int
-	MemoryRetrievalCacheEnabled        bool
-	MemoryRetrievalCacheTTLSeconds     float64
-	MemoryCanonicalEntityEnabled       bool
-	MemoryCanonicalEventEnabled        bool
-	MemoryCanonicalSimilarityThreshold float64
-	MemoryCanonicalConfirmationModel   string
-	MemoryCanonicalConfirmationTimeout float64
-	MemoryConfigErrors                 []string
-	MemoryQueryExpansionEnabled        bool
-	MemoryQueryExpansionModel          string
-	MemoryQueryExpansionTimeoutSeconds float64
-	MemoryQueryExpansionMaxContext     int
-	MemoryQueryExpansionMaxQueries     int
-	MemoryWriteConfirmUserScope        bool
-	MemoryWriteConfirmProcedural       bool
-	MemoryBackgroundExtractionEnabled  bool
-	MemoryBackgroundExtractionInterval int
-	MemoryRetentionDays                map[string]int
-	MemoryLifecycleEnabled             bool
-	MemoryMaintenanceIntervalSeconds   int
-	MemoryHotAccessDays                int
-	MemoryWarmAccessDays               int
-	MemoryAccessRecencyHalfLifeDays    int
-	MemoryArchiveGraceDays             int
-	MemoryArchiveValueThreshold        float64
-	MemoryAutoHardDeleteEnabled        bool
-	MemoryValueWeights                 map[string]float64
+	ExtractionModel                     *string
+	LongTermMemoryEnabled               bool
+	LongTermMemoryStore                 string
+	MemoryContextMaxTokens              int
+	MemoryRecallMaxItems                int
+	MemoryEmbeddingEnabled              bool
+	MemoryEmbeddingModel                string
+	MemoryEmbeddingModelDir             string
+	MemoryFTSCandidates                 int
+	MemoryVectorCandidates              int
+	MemoryGraphCandidates               int
+	MemoryGraphMaxHops                  int
+	MemoryRRFK                          int
+	MemoryMMRLambda                     float64
+	MemorySessionRetrievalEnabled       bool
+	MemorySessionCandidates             int
+	MemoryChunksPerSession              int
+	MemorySessionChunkCandidates        int
+	MemoryMMRRelevanceWeight            float64
+	MemoryMMRNoveltyWeight              float64
+	MemoryMMRFacetCoverageWeight        float64
+	MemoryMMRSourceCoverageWeight       float64
+	MemoryCoreContextTokens             int
+	MemoryContextTargetTokens           int
+	MemoryRetrievalLocalTimeoutSeconds  float64
+	MemoryEvidenceNeighborChunks        int
+	MemoryAdjacentChunkWindow           int
+	MemoryRetrievalCacheEnabled         bool
+	MemoryRetrievalCacheTTLSeconds      float64
+	MemoryCanonicalEntityEnabled        bool
+	MemoryCanonicalEventEnabled         bool
+	MemoryCanonicalSimilarityThreshold  float64
+	MemoryCanonicalConfirmationModel    string
+	MemoryCanonicalConfirmationTimeout  float64
+	MemoryConfigErrors                  []string
+	MemoryQueryExpansionEnabled         bool
+	MemoryQueryExpansionModel           string
+	MemoryQueryExpansionTimeoutSeconds  float64
+	MemoryQueryExpansionMaxContext      int
+	MemoryQueryExpansionMaxQueries      int
+	MemoryWriteConfirmUserScope         bool
+	MemoryWriteConfirmProcedural        bool
+	MemoryBackgroundExtractionEnabled   bool
+	MemoryBackgroundExtractionInterval  int
+	MemoryRetentionDays                 map[string]int
+	MemoryLifecycleEnabled              bool
+	MemoryMaintenanceIntervalSeconds    int
+	MemoryHotAccessDays                 int
+	MemoryWarmAccessDays                int
+	MemoryAccessRecencyHalfLifeDays     int
+	MemoryArchiveGraceDays              int
+	MemoryArchiveValueThreshold         float64
+	MemoryAutoHardDeleteEnabled         bool
+	MemoryValueWeights                  map[string]float64
+	MemoryAtomTargetTokens              int
+	MemoryAtomMaxTokens                 int
+	MemoryAtomMaxSelected               int
+	MemoryCoverageMaxFacets             int
+	MemoryCoverageCompletionRounds      int
+	MemoryCoverageRelevanceWeight       float64
+	MemoryCoverageFacetWeight           float64
+	MemoryCoverageProvenanceWeight      float64
+	MemoryCoverageSourceWeight          float64
+	MemoryCoverageCoherenceWeight       float64
+	MemoryEvidencePrimaryBudgetRatio    float64
+	MemoryEvidenceCompletionBudgetRatio float64
+	MemoryEvidenceContextBudgetRatio    float64
+	MemoryEmbeddingBatchSize            int
+	MemoryEmbeddingBatchWaitMS          int
+	MemoryEmbeddingQueryCacheEntries    int
+	MemoryEmbeddingExecutionTimeout     float64
 
 	SkillsEnabled              bool
 	SkillsDir                  string
@@ -272,7 +289,7 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryAdjacentChunkWindow:          1,
 		MemoryQueryExpansionEnabled:        true,
 		MemoryQueryExpansionModel:          "inherit",
-		MemoryQueryExpansionTimeoutSeconds: 2,
+		MemoryQueryExpansionTimeoutSeconds: 4,
 		MemoryQueryExpansionMaxContext:     3000,
 		MemoryQueryExpansionMaxQueries:     5,
 		MemoryRetrievalCacheEnabled:        true,
@@ -308,6 +325,23 @@ func NewConfigForCWD(cwd string) Config {
 			"access_frequency": 0.10, "reinforcement": 0.10,
 			"provenance_strength": 0.10, "dependency_strength": 0.05,
 		},
+		MemoryAtomTargetTokens:              96,
+		MemoryAtomMaxTokens:                 160,
+		MemoryAtomMaxSelected:               32,
+		MemoryCoverageMaxFacets:             8,
+		MemoryCoverageCompletionRounds:      1,
+		MemoryCoverageRelevanceWeight:       0.45,
+		MemoryCoverageFacetWeight:           0.25,
+		MemoryCoverageProvenanceWeight:      0.15,
+		MemoryCoverageSourceWeight:          0.10,
+		MemoryCoverageCoherenceWeight:       0.05,
+		MemoryEvidencePrimaryBudgetRatio:    0.70,
+		MemoryEvidenceCompletionBudgetRatio: 0.20,
+		MemoryEvidenceContextBudgetRatio:    0.10,
+		MemoryEmbeddingBatchSize:            32,
+		MemoryEmbeddingBatchWaitMS:          20,
+		MemoryEmbeddingQueryCacheEntries:    10000,
+		MemoryEmbeddingExecutionTimeout:     8,
 
 		SkillsEnabled:              true,
 		SkillsDir:                  ".Lumina/PROJECT_SKILLS",
@@ -458,6 +492,23 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryArchiveValueThreshold = fresh.MemoryArchiveValueThreshold
 	updated.MemoryAutoHardDeleteEnabled = fresh.MemoryAutoHardDeleteEnabled
 	updated.MemoryValueWeights = cloneStringFloatMap(fresh.MemoryValueWeights)
+	updated.MemoryAtomTargetTokens = fresh.MemoryAtomTargetTokens
+	updated.MemoryAtomMaxTokens = fresh.MemoryAtomMaxTokens
+	updated.MemoryAtomMaxSelected = fresh.MemoryAtomMaxSelected
+	updated.MemoryCoverageMaxFacets = fresh.MemoryCoverageMaxFacets
+	updated.MemoryCoverageCompletionRounds = fresh.MemoryCoverageCompletionRounds
+	updated.MemoryCoverageRelevanceWeight = fresh.MemoryCoverageRelevanceWeight
+	updated.MemoryCoverageFacetWeight = fresh.MemoryCoverageFacetWeight
+	updated.MemoryCoverageProvenanceWeight = fresh.MemoryCoverageProvenanceWeight
+	updated.MemoryCoverageSourceWeight = fresh.MemoryCoverageSourceWeight
+	updated.MemoryCoverageCoherenceWeight = fresh.MemoryCoverageCoherenceWeight
+	updated.MemoryEvidencePrimaryBudgetRatio = fresh.MemoryEvidencePrimaryBudgetRatio
+	updated.MemoryEvidenceCompletionBudgetRatio = fresh.MemoryEvidenceCompletionBudgetRatio
+	updated.MemoryEvidenceContextBudgetRatio = fresh.MemoryEvidenceContextBudgetRatio
+	updated.MemoryEmbeddingBatchSize = fresh.MemoryEmbeddingBatchSize
+	updated.MemoryEmbeddingBatchWaitMS = fresh.MemoryEmbeddingBatchWaitMS
+	updated.MemoryEmbeddingQueryCacheEntries = fresh.MemoryEmbeddingQueryCacheEntries
+	updated.MemoryEmbeddingExecutionTimeout = fresh.MemoryEmbeddingExecutionTimeout
 	updated.WebSearchEnabled = fresh.WebSearchEnabled
 	updated.WebSearchProvider = fresh.WebSearchProvider
 	updated.WebSearchBaseURL = fresh.WebSearchBaseURL
@@ -633,126 +684,143 @@ func cloneStringFloatMap(values map[string]float64) map[string]float64 {
 }
 
 type luminaDefaults struct {
-	APIKey                             *string            `json:"api_key"`
-	APIBaseURL                         *string            `json:"api_base_url"`
-	APIModel                           *string            `json:"api_model"`
-	APIType                            *string            `json:"api_type"`
-	FallbackAPIEnabled                 *bool              `json:"fallback_api_enabled"`
-	FallbackAPIKey                     *string            `json:"fallback_api_key"`
-	FallbackAPIBaseURL                 *string            `json:"fallback_api_base_url"`
-	FallbackAPIModel                   *string            `json:"fallback_api_model"`
-	FallbackAPIType                    *string            `json:"fallback_api_type"`
-	APIMaxTokens                       *int               `json:"api_max_tokens"`
-	APIStreamIdleTimeoutSeconds        *float64           `json:"api_stream_idle_timeout_seconds"`
-	MaxToolOutputChars                 *int               `json:"max_tool_output_chars"`
-	MaxToolResultCharsAbsolute         *int               `json:"max_tool_result_chars_absolute"`
-	MaxMessageToolResultsChars         *int               `json:"max_message_tool_results_chars"`
-	ShellTimeoutSeconds                *float64           `json:"shell_timeout_seconds"`
-	ShellMaxOutputBytes                *int               `json:"shell_max_output_bytes"`
-	MCPEnabled                         *bool              `json:"mcp_enabled"`
-	MCPPingInterval                    *float64           `json:"mcp_ping_interval"`
-	MCPConnectTimeout                  *float64           `json:"mcp_connect_timeout"`
-	MCPRequestTimeout                  *float64           `json:"mcp_request_timeout"`
-	WebSearchEnabled                   *bool              `json:"web_search_enabled"`
-	WebSearchProvider                  *string            `json:"web_search_provider"`
-	WebSearchBaseURL                   *string            `json:"web_search_base_url"`
-	WebSearchMaxResults                *int               `json:"web_search_max_results"`
-	WebSearchTimeoutSeconds            *float64           `json:"web_search_timeout_seconds"`
-	WebFetchEnabled                    *bool              `json:"web_fetch_enabled"`
-	WebFetchRequireSearch              *bool              `json:"web_fetch_require_search_result"`
-	WebFetchMaxChars                   *int               `json:"web_fetch_max_chars"`
-	WebFetchTimeoutSeconds             *float64           `json:"web_fetch_timeout_seconds"`
-	WebFetchUserAgent                  *string            `json:"web_fetch_user_agent"`
-	ContextCompressThreshold           *float64           `json:"context_compress_threshold"`
-	PromptCacheTTLSeconds              *float64           `json:"prompt_cache_ttl_seconds"`
-	AnthropicCacheEditsEnabled         *bool              `json:"anthropic_cache_edits_enabled"`
-	MaxParentTurns                     *int               `json:"max_parent_turns"`
-	SessionDir                         *string            `json:"session_dir"`
-	SessionMemoryEnabled               *bool              `json:"session_memory_enabled"`
-	SessionMemoryTurnInterval          *int               `json:"session_memory_turn_interval"`
-	SessionMemorySummaryModel          *string            `json:"session_memory_summary_model"`
-	SessionMemorySummaryMaxTokens      *int               `json:"session_memory_summary_max_tokens"`
-	SessionHistoryGetMessageLimit      *int               `json:"session_history_get_message_limit"`
-	SessionMemoryMaxCommits            *int               `json:"session_memory_max_commits"`
-	SessionMemoryMaxMessages           *int               `json:"session_memory_max_messages"`
-	SessionMemoryVacuumAfterEviction   *bool              `json:"session_memory_vacuum_after_eviction"`
-	SessionMaintenanceEnabled          *bool              `json:"session_maintenance_enabled"`
-	SessionMaintenanceMode             *string            `json:"session_maintenance_mode"`
-	SessionRetentionDays               *int               `json:"session_retention_days"`
-	SessionMaxEntries                  *int               `json:"session_max_entries"`
-	SessionMaxDiskBytes                *int64             `json:"session_max_disk_bytes"`
-	SessionHighWaterRatio              *float64           `json:"session_high_water_ratio"`
-	SessionArchiveBeforeDelete         *bool              `json:"session_archive_before_delete"`
-	SessionProtectPinned               *bool              `json:"session_protect_pinned"`
-	TeamTimelineMaxEntries             *int               `json:"team_timeline_max_entries"`
-	TeamDialogueMaxEntries             *int               `json:"team_dialogue_max_entries"`
-	TeamArtifactMaxBytes               *int64             `json:"team_artifact_max_bytes"`
-	ExtractionModel                    *string            `json:"extraction_model"`
-	LongTermMemoryEnabled              *bool              `json:"long_term_memory_enabled"`
-	LongTermMemoryStore                *string            `json:"long_term_memory_store"`
-	MemoryContextMaxTokens             *int               `json:"memory_context_max_tokens"`
-	MemoryRecallMaxItems               *int               `json:"memory_recall_max_items"`
-	MemoryEmbeddingEnabled             *bool              `json:"memory_embedding_enabled"`
-	MemoryEmbeddingModel               *string            `json:"memory_embedding_model"`
-	MemoryEmbeddingModelDir            *string            `json:"memory_embedding_model_dir"`
-	MemoryFTSCandidates                *int               `json:"memory_fts_candidates"`
-	MemoryVectorCandidates             *int               `json:"memory_vector_candidates"`
-	MemoryGraphCandidates              *int               `json:"memory_graph_candidates"`
-	MemoryGraphMaxHops                 *int               `json:"memory_graph_max_hops"`
-	MemoryRRFK                         *int               `json:"memory_rrf_k"`
-	MemoryMMRLambda                    *float64           `json:"memory_mmr_lambda"`
-	MemorySessionRetrievalEnabled      *bool              `json:"memory_session_retrieval_enabled"`
-	MemorySessionCandidates            *int               `json:"memory_session_candidates"`
-	MemoryChunksPerSession             *int               `json:"memory_chunks_per_session"`
-	MemorySessionChunkCandidates       *int               `json:"memory_session_chunk_candidates"`
-	MemoryMMRRelevanceWeight           *float64           `json:"memory_mmr_relevance_weight"`
-	MemoryMMRNoveltyWeight             *float64           `json:"memory_mmr_novelty_weight"`
-	MemoryMMRFacetCoverageWeight       *float64           `json:"memory_mmr_facet_coverage_weight"`
-	MemoryMMRSourceCoverageWeight      *float64           `json:"memory_mmr_source_coverage_weight"`
-	MemoryCoreContextTokens            *int               `json:"memory_core_context_tokens"`
-	MemoryContextTargetTokens          *int               `json:"memory_context_target_tokens"`
-	MemoryRetrievalLocalTimeoutSeconds *float64           `json:"memory_retrieval_local_timeout_seconds"`
-	MemoryAdjacentChunkWindow          *int               `json:"memory_adjacent_chunk_window"`
-	MemoryRetrievalCacheEnabled        *bool              `json:"memory_retrieval_cache_enabled"`
-	MemoryRetrievalCacheTTLSeconds     *float64           `json:"memory_retrieval_cache_ttl_seconds"`
-	MemoryCanonicalEntityEnabled       *bool              `json:"memory_canonical_entity_enabled"`
-	MemoryCanonicalEventEnabled        *bool              `json:"memory_canonical_event_enabled"`
-	MemoryCanonicalSimilarityThreshold *float64           `json:"memory_canonical_similarity_threshold"`
-	MemoryCanonicalConfirmationModel   *string            `json:"memory_canonical_confirmation_model"`
-	MemoryCanonicalConfirmationTimeout *float64           `json:"memory_canonical_confirmation_timeout_seconds"`
-	MemoryQueryExpansionEnabled        *bool              `json:"memory_query_expansion_enabled"`
-	MemoryQueryExpansionModel          *string            `json:"memory_query_expansion_model"`
-	MemoryQueryExpansionTimeoutSeconds *float64           `json:"memory_query_expansion_timeout_seconds"`
-	MemoryQueryExpansionMaxContext     *int               `json:"memory_query_expansion_max_context_tokens"`
-	MemoryQueryExpansionMaxQueries     *int               `json:"memory_query_expansion_max_queries"`
-	MemoryWriteConfirmUserScope        *bool              `json:"memory_write_requires_confirmation_for_user_scope"`
-	MemoryWriteConfirmProcedural       *bool              `json:"memory_write_requires_confirmation_for_procedural"`
-	MemoryBackgroundExtractionEnabled  *bool              `json:"memory_background_extraction_enabled"`
-	MemoryBackgroundExtractionInterval *int               `json:"memory_background_extraction_turn_interval"`
-	MemoryRetentionDays                map[string]int     `json:"memory_retention_days"`
-	MemoryLifecycleEnabled             *bool              `json:"memory_lifecycle_enabled"`
-	MemoryMaintenanceIntervalSeconds   *int               `json:"memory_maintenance_interval_seconds"`
-	MemoryHotAccessDays                *int               `json:"memory_hot_access_days"`
-	MemoryWarmAccessDays               *int               `json:"memory_warm_access_days"`
-	MemoryAccessRecencyHalfLifeDays    *int               `json:"memory_access_recency_half_life_days"`
-	MemoryArchiveGraceDays             *int               `json:"memory_archive_grace_days"`
-	MemoryArchiveValueThreshold        *float64           `json:"memory_archive_value_threshold"`
-	MemoryAutoHardDeleteEnabled        *bool              `json:"memory_auto_hard_delete_enabled"`
-	MemoryValueWeights                 map[string]float64 `json:"memory_value_weights"`
-	SkillsEnabled                      *bool              `json:"skills_enabled"`
-	SkillsDir                          *string            `json:"skills_dir"`
-	UserSkillsDir                      *string            `json:"user_skills_dir"`
-	BundledSkillsDir                   *string            `json:"bundled_skills_dir"`
-	TeamDir                            *string            `json:"team_dir"`
-	SystemPromptPath                   *string            `json:"system_prompt_path"`
-	MemoryExtractionPromptPath         *string            `json:"memory_extraction_prompt_path"`
-	ProjectRootMarkers                 []string           `json:"project_root_markers"`
-	ProjectDocFilenames                []string           `json:"project_doc_filenames"`
-	ProjectDocMaxBytes                 *int               `json:"project_doc_max_bytes"`
-	UIBackend                          *string            `json:"ui_backend"`
-	HarnessMode                        *string            `json:"harness_mode"`
-	WorktreeBaseRef                    *string            `json:"worktree_base_ref"`
-	WorktreeDir                        *string            `json:"worktree_dir"`
+	APIKey                              *string            `json:"api_key"`
+	APIBaseURL                          *string            `json:"api_base_url"`
+	APIModel                            *string            `json:"api_model"`
+	APIType                             *string            `json:"api_type"`
+	FallbackAPIEnabled                  *bool              `json:"fallback_api_enabled"`
+	FallbackAPIKey                      *string            `json:"fallback_api_key"`
+	FallbackAPIBaseURL                  *string            `json:"fallback_api_base_url"`
+	FallbackAPIModel                    *string            `json:"fallback_api_model"`
+	FallbackAPIType                     *string            `json:"fallback_api_type"`
+	APIMaxTokens                        *int               `json:"api_max_tokens"`
+	APIStreamIdleTimeoutSeconds         *float64           `json:"api_stream_idle_timeout_seconds"`
+	MaxToolOutputChars                  *int               `json:"max_tool_output_chars"`
+	MaxToolResultCharsAbsolute          *int               `json:"max_tool_result_chars_absolute"`
+	MaxMessageToolResultsChars          *int               `json:"max_message_tool_results_chars"`
+	ShellTimeoutSeconds                 *float64           `json:"shell_timeout_seconds"`
+	ShellMaxOutputBytes                 *int               `json:"shell_max_output_bytes"`
+	MCPEnabled                          *bool              `json:"mcp_enabled"`
+	MCPPingInterval                     *float64           `json:"mcp_ping_interval"`
+	MCPConnectTimeout                   *float64           `json:"mcp_connect_timeout"`
+	MCPRequestTimeout                   *float64           `json:"mcp_request_timeout"`
+	WebSearchEnabled                    *bool              `json:"web_search_enabled"`
+	WebSearchProvider                   *string            `json:"web_search_provider"`
+	WebSearchBaseURL                    *string            `json:"web_search_base_url"`
+	WebSearchMaxResults                 *int               `json:"web_search_max_results"`
+	WebSearchTimeoutSeconds             *float64           `json:"web_search_timeout_seconds"`
+	WebFetchEnabled                     *bool              `json:"web_fetch_enabled"`
+	WebFetchRequireSearch               *bool              `json:"web_fetch_require_search_result"`
+	WebFetchMaxChars                    *int               `json:"web_fetch_max_chars"`
+	WebFetchTimeoutSeconds              *float64           `json:"web_fetch_timeout_seconds"`
+	WebFetchUserAgent                   *string            `json:"web_fetch_user_agent"`
+	ContextCompressThreshold            *float64           `json:"context_compress_threshold"`
+	PromptCacheTTLSeconds               *float64           `json:"prompt_cache_ttl_seconds"`
+	AnthropicCacheEditsEnabled          *bool              `json:"anthropic_cache_edits_enabled"`
+	MaxParentTurns                      *int               `json:"max_parent_turns"`
+	SessionDir                          *string            `json:"session_dir"`
+	SessionMemoryEnabled                *bool              `json:"session_memory_enabled"`
+	SessionMemoryTurnInterval           *int               `json:"session_memory_turn_interval"`
+	SessionMemorySummaryModel           *string            `json:"session_memory_summary_model"`
+	SessionMemorySummaryMaxTokens       *int               `json:"session_memory_summary_max_tokens"`
+	SessionHistoryGetMessageLimit       *int               `json:"session_history_get_message_limit"`
+	SessionMemoryMaxCommits             *int               `json:"session_memory_max_commits"`
+	SessionMemoryMaxMessages            *int               `json:"session_memory_max_messages"`
+	SessionMemoryVacuumAfterEviction    *bool              `json:"session_memory_vacuum_after_eviction"`
+	SessionMaintenanceEnabled           *bool              `json:"session_maintenance_enabled"`
+	SessionMaintenanceMode              *string            `json:"session_maintenance_mode"`
+	SessionRetentionDays                *int               `json:"session_retention_days"`
+	SessionMaxEntries                   *int               `json:"session_max_entries"`
+	SessionMaxDiskBytes                 *int64             `json:"session_max_disk_bytes"`
+	SessionHighWaterRatio               *float64           `json:"session_high_water_ratio"`
+	SessionArchiveBeforeDelete          *bool              `json:"session_archive_before_delete"`
+	SessionProtectPinned                *bool              `json:"session_protect_pinned"`
+	TeamTimelineMaxEntries              *int               `json:"team_timeline_max_entries"`
+	TeamDialogueMaxEntries              *int               `json:"team_dialogue_max_entries"`
+	TeamArtifactMaxBytes                *int64             `json:"team_artifact_max_bytes"`
+	ExtractionModel                     *string            `json:"extraction_model"`
+	LongTermMemoryEnabled               *bool              `json:"long_term_memory_enabled"`
+	LongTermMemoryStore                 *string            `json:"long_term_memory_store"`
+	MemoryContextMaxTokens              *int               `json:"memory_context_max_tokens"`
+	MemoryRecallMaxItems                *int               `json:"memory_recall_max_items"`
+	MemoryEmbeddingEnabled              *bool              `json:"memory_embedding_enabled"`
+	MemoryEmbeddingModel                *string            `json:"memory_embedding_model"`
+	MemoryEmbeddingModelDir             *string            `json:"memory_embedding_model_dir"`
+	MemoryFTSCandidates                 *int               `json:"memory_fts_candidates"`
+	MemoryVectorCandidates              *int               `json:"memory_vector_candidates"`
+	MemoryGraphCandidates               *int               `json:"memory_graph_candidates"`
+	MemoryGraphMaxHops                  *int               `json:"memory_graph_max_hops"`
+	MemoryRRFK                          *int               `json:"memory_rrf_k"`
+	MemoryMMRLambda                     *float64           `json:"memory_mmr_lambda"`
+	MemorySessionRetrievalEnabled       *bool              `json:"memory_session_retrieval_enabled"`
+	MemorySessionCandidates             *int               `json:"memory_session_candidates"`
+	MemoryChunksPerSession              *int               `json:"memory_chunks_per_session"`
+	MemorySessionChunkCandidates        *int               `json:"memory_session_chunk_candidates"`
+	MemoryMMRRelevanceWeight            *float64           `json:"memory_mmr_relevance_weight"`
+	MemoryMMRNoveltyWeight              *float64           `json:"memory_mmr_novelty_weight"`
+	MemoryMMRFacetCoverageWeight        *float64           `json:"memory_mmr_facet_coverage_weight"`
+	MemoryMMRSourceCoverageWeight       *float64           `json:"memory_mmr_source_coverage_weight"`
+	MemoryCoreContextTokens             *int               `json:"memory_core_context_tokens"`
+	MemoryContextTargetTokens           *int               `json:"memory_context_target_tokens"`
+	MemoryRetrievalLocalTimeoutSeconds  *float64           `json:"memory_retrieval_local_timeout_seconds"`
+	MemoryAdjacentChunkWindow           *int               `json:"memory_adjacent_chunk_window"`
+	MemoryRetrievalCacheEnabled         *bool              `json:"memory_retrieval_cache_enabled"`
+	MemoryRetrievalCacheTTLSeconds      *float64           `json:"memory_retrieval_cache_ttl_seconds"`
+	MemoryCanonicalEntityEnabled        *bool              `json:"memory_canonical_entity_enabled"`
+	MemoryCanonicalEventEnabled         *bool              `json:"memory_canonical_event_enabled"`
+	MemoryCanonicalSimilarityThreshold  *float64           `json:"memory_canonical_similarity_threshold"`
+	MemoryCanonicalConfirmationModel    *string            `json:"memory_canonical_confirmation_model"`
+	MemoryCanonicalConfirmationTimeout  *float64           `json:"memory_canonical_confirmation_timeout_seconds"`
+	MemoryQueryExpansionEnabled         *bool              `json:"memory_query_expansion_enabled"`
+	MemoryQueryExpansionModel           *string            `json:"memory_query_expansion_model"`
+	MemoryQueryExpansionTimeoutSeconds  *float64           `json:"memory_query_expansion_timeout_seconds"`
+	MemoryQueryExpansionMaxContext      *int               `json:"memory_query_expansion_max_context_tokens"`
+	MemoryQueryExpansionMaxQueries      *int               `json:"memory_query_expansion_max_queries"`
+	MemoryWriteConfirmUserScope         *bool              `json:"memory_write_requires_confirmation_for_user_scope"`
+	MemoryWriteConfirmProcedural        *bool              `json:"memory_write_requires_confirmation_for_procedural"`
+	MemoryBackgroundExtractionEnabled   *bool              `json:"memory_background_extraction_enabled"`
+	MemoryBackgroundExtractionInterval  *int               `json:"memory_background_extraction_turn_interval"`
+	MemoryRetentionDays                 map[string]int     `json:"memory_retention_days"`
+	MemoryLifecycleEnabled              *bool              `json:"memory_lifecycle_enabled"`
+	MemoryMaintenanceIntervalSeconds    *int               `json:"memory_maintenance_interval_seconds"`
+	MemoryHotAccessDays                 *int               `json:"memory_hot_access_days"`
+	MemoryWarmAccessDays                *int               `json:"memory_warm_access_days"`
+	MemoryAccessRecencyHalfLifeDays     *int               `json:"memory_access_recency_half_life_days"`
+	MemoryArchiveGraceDays              *int               `json:"memory_archive_grace_days"`
+	MemoryArchiveValueThreshold         *float64           `json:"memory_archive_value_threshold"`
+	MemoryAutoHardDeleteEnabled         *bool              `json:"memory_auto_hard_delete_enabled"`
+	MemoryValueWeights                  map[string]float64 `json:"memory_value_weights"`
+	MemoryAtomTargetTokens              *int               `json:"memory_atom_target_tokens"`
+	MemoryAtomMaxTokens                 *int               `json:"memory_atom_max_tokens"`
+	MemoryAtomMaxSelected               *int               `json:"memory_atom_max_selected"`
+	MemoryCoverageMaxFacets             *int               `json:"memory_coverage_max_facets"`
+	MemoryCoverageCompletionRounds      *int               `json:"memory_coverage_completion_rounds"`
+	MemoryCoverageRelevanceWeight       *float64           `json:"memory_coverage_relevance_weight"`
+	MemoryCoverageFacetWeight           *float64           `json:"memory_coverage_facet_weight"`
+	MemoryCoverageProvenanceWeight      *float64           `json:"memory_coverage_provenance_weight"`
+	MemoryCoverageSourceWeight          *float64           `json:"memory_coverage_source_weight"`
+	MemoryCoverageCoherenceWeight       *float64           `json:"memory_coverage_coherence_weight"`
+	MemoryEvidencePrimaryBudgetRatio    *float64           `json:"memory_evidence_primary_budget_ratio"`
+	MemoryEvidenceCompletionBudgetRatio *float64           `json:"memory_evidence_completion_budget_ratio"`
+	MemoryEvidenceContextBudgetRatio    *float64           `json:"memory_evidence_context_budget_ratio"`
+	MemoryEmbeddingBatchSize            *int               `json:"memory_embedding_batch_size"`
+	MemoryEmbeddingBatchWaitMS          *int               `json:"memory_embedding_batch_wait_ms"`
+	MemoryEmbeddingQueryCacheEntries    *int               `json:"memory_embedding_query_cache_entries"`
+	MemoryEmbeddingExecutionTimeout     *float64           `json:"memory_embedding_execution_timeout_seconds"`
+	SkillsEnabled                       *bool              `json:"skills_enabled"`
+	SkillsDir                           *string            `json:"skills_dir"`
+	UserSkillsDir                       *string            `json:"user_skills_dir"`
+	BundledSkillsDir                    *string            `json:"bundled_skills_dir"`
+	TeamDir                             *string            `json:"team_dir"`
+	SystemPromptPath                    *string            `json:"system_prompt_path"`
+	MemoryExtractionPromptPath          *string            `json:"memory_extraction_prompt_path"`
+	ProjectRootMarkers                  []string           `json:"project_root_markers"`
+	ProjectDocFilenames                 []string           `json:"project_doc_filenames"`
+	ProjectDocMaxBytes                  *int               `json:"project_doc_max_bytes"`
+	UIBackend                           *string            `json:"ui_backend"`
+	HarnessMode                         *string            `json:"harness_mode"`
+	WorktreeBaseRef                     *string            `json:"worktree_base_ref"`
+	WorktreeDir                         *string            `json:"worktree_dir"`
 }
 
 func DefaultJSONKeys() []string {
@@ -954,9 +1022,6 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MemoryContextMaxTokens != nil && *defaults.MemoryContextMaxTokens > 0 {
 		cfg.MemoryContextMaxTokens = *defaults.MemoryContextMaxTokens
 	}
-	if defaults.MemoryRecallMaxItems != nil && *defaults.MemoryRecallMaxItems > 0 {
-		cfg.MemoryRecallMaxItems = *defaults.MemoryRecallMaxItems
-	}
 	if defaults.MemoryEmbeddingEnabled != nil {
 		cfg.MemoryEmbeddingEnabled = *defaults.MemoryEmbeddingEnabled
 	}
@@ -981,19 +1046,12 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MemoryRRFK != nil && *defaults.MemoryRRFK > 0 {
 		cfg.MemoryRRFK = *defaults.MemoryRRFK
 	}
-	if defaults.MemoryMMRLambda != nil && *defaults.MemoryMMRLambda >= 0 && *defaults.MemoryMMRLambda <= 1 {
-		cfg.MemoryMMRLambda = *defaults.MemoryMMRLambda
-	}
 	if defaults.MemorySessionRetrievalEnabled != nil {
 		cfg.MemorySessionRetrievalEnabled = *defaults.MemorySessionRetrievalEnabled
 	}
 	applyPositiveMemoryInt(cfg, "memory_session_candidates", defaults.MemorySessionCandidates, &cfg.MemorySessionCandidates)
 	applyPositiveMemoryInt(cfg, "memory_chunks_per_session", defaults.MemoryChunksPerSession, &cfg.MemoryChunksPerSession)
 	applyPositiveMemoryInt(cfg, "memory_session_chunk_candidates", defaults.MemorySessionChunkCandidates, &cfg.MemorySessionChunkCandidates)
-	applyMemoryWeight(cfg, "memory_mmr_relevance_weight", defaults.MemoryMMRRelevanceWeight, &cfg.MemoryMMRRelevanceWeight)
-	applyMemoryWeight(cfg, "memory_mmr_novelty_weight", defaults.MemoryMMRNoveltyWeight, &cfg.MemoryMMRNoveltyWeight)
-	applyMemoryWeight(cfg, "memory_mmr_facet_coverage_weight", defaults.MemoryMMRFacetCoverageWeight, &cfg.MemoryMMRFacetCoverageWeight)
-	applyMemoryWeight(cfg, "memory_mmr_source_coverage_weight", defaults.MemoryMMRSourceCoverageWeight, &cfg.MemoryMMRSourceCoverageWeight)
 	if defaults.MemoryCoreContextTokens != nil && *defaults.MemoryCoreContextTokens > 0 {
 		cfg.MemoryCoreContextTokens = *defaults.MemoryCoreContextTokens
 	}
@@ -1040,7 +1098,6 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 			cfg.MemoryCanonicalConfirmationTimeout = *defaults.MemoryCanonicalConfirmationTimeout
 		}
 	}
-	validateMemoryWeights(cfg)
 	if defaults.MemoryQueryExpansionEnabled != nil {
 		cfg.MemoryQueryExpansionEnabled = *defaults.MemoryQueryExpansionEnabled
 	}
@@ -1153,6 +1210,39 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 			cfg.MemoryValueWeights = cloneStringFloatMap(defaults.MemoryValueWeights)
 		}
 	}
+	applyPositiveMemoryInt(cfg, "memory_atom_target_tokens", defaults.MemoryAtomTargetTokens, &cfg.MemoryAtomTargetTokens)
+	applyPositiveMemoryInt(cfg, "memory_atom_max_tokens", defaults.MemoryAtomMaxTokens, &cfg.MemoryAtomMaxTokens)
+	applyPositiveMemoryInt(cfg, "memory_atom_max_selected", defaults.MemoryAtomMaxSelected, &cfg.MemoryAtomMaxSelected)
+	applyPositiveMemoryInt(cfg, "memory_coverage_max_facets", defaults.MemoryCoverageMaxFacets, &cfg.MemoryCoverageMaxFacets)
+	if defaults.MemoryCoverageCompletionRounds != nil {
+		if *defaults.MemoryCoverageCompletionRounds < 0 {
+			cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_coverage_completion_rounds must be non-negative")
+		} else {
+			cfg.MemoryCoverageCompletionRounds = *defaults.MemoryCoverageCompletionRounds
+		}
+	}
+	applyMemoryWeight(cfg, "memory_coverage_relevance_weight", defaults.MemoryCoverageRelevanceWeight, &cfg.MemoryCoverageRelevanceWeight)
+	applyMemoryWeight(cfg, "memory_coverage_facet_weight", defaults.MemoryCoverageFacetWeight, &cfg.MemoryCoverageFacetWeight)
+	applyMemoryWeight(cfg, "memory_coverage_provenance_weight", defaults.MemoryCoverageProvenanceWeight, &cfg.MemoryCoverageProvenanceWeight)
+	applyMemoryWeight(cfg, "memory_coverage_source_weight", defaults.MemoryCoverageSourceWeight, &cfg.MemoryCoverageSourceWeight)
+	applyMemoryWeight(cfg, "memory_coverage_coherence_weight", defaults.MemoryCoverageCoherenceWeight, &cfg.MemoryCoverageCoherenceWeight)
+	applyMemoryWeight(cfg, "memory_evidence_primary_budget_ratio", defaults.MemoryEvidencePrimaryBudgetRatio, &cfg.MemoryEvidencePrimaryBudgetRatio)
+	applyMemoryWeight(cfg, "memory_evidence_completion_budget_ratio", defaults.MemoryEvidenceCompletionBudgetRatio, &cfg.MemoryEvidenceCompletionBudgetRatio)
+	applyMemoryWeight(cfg, "memory_evidence_context_budget_ratio", defaults.MemoryEvidenceContextBudgetRatio, &cfg.MemoryEvidenceContextBudgetRatio)
+	applyPositiveMemoryInt(cfg, "memory_embedding_batch_size", defaults.MemoryEmbeddingBatchSize, &cfg.MemoryEmbeddingBatchSize)
+	applyPositiveMemoryInt(cfg, "memory_embedding_batch_wait_ms", defaults.MemoryEmbeddingBatchWaitMS, &cfg.MemoryEmbeddingBatchWaitMS)
+	applyPositiveMemoryInt(cfg, "memory_embedding_query_cache_entries", defaults.MemoryEmbeddingQueryCacheEntries, &cfg.MemoryEmbeddingQueryCacheEntries)
+	if defaults.MemoryEmbeddingExecutionTimeout != nil {
+		if *defaults.MemoryEmbeddingExecutionTimeout <= 0 {
+			cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_embedding_execution_timeout_seconds must be positive")
+		} else {
+			cfg.MemoryEmbeddingExecutionTimeout = *defaults.MemoryEmbeddingExecutionTimeout
+		}
+	}
+	if cfg.MemoryAtomTargetTokens > cfg.MemoryAtomMaxTokens {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_atom_target_tokens must not exceed memory_atom_max_tokens")
+	}
+	validateMemoryWeights(cfg)
 	if defaults.SkillsEnabled != nil {
 		cfg.SkillsEnabled = *defaults.SkillsEnabled
 	}
@@ -1220,11 +1310,14 @@ func applyMemoryWeight(cfg *Config, name string, value *float64, target *float64
 }
 
 func validateMemoryWeights(cfg *Config) {
-	total := cfg.MemoryMMRRelevanceWeight + cfg.MemoryMMRNoveltyWeight +
-		cfg.MemoryMMRFacetCoverageWeight + cfg.MemoryMMRSourceCoverageWeight
-	if math.Abs(total-1) > 1e-9 {
-		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
-			"memory MMR utility weights must sum to 1")
+	coverage := cfg.MemoryCoverageRelevanceWeight + cfg.MemoryCoverageFacetWeight +
+		cfg.MemoryCoverageProvenanceWeight + cfg.MemoryCoverageSourceWeight + cfg.MemoryCoverageCoherenceWeight
+	if math.Abs(coverage-1) > 1e-9 {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory coverage weights must sum to 1")
+	}
+	budget := cfg.MemoryEvidencePrimaryBudgetRatio + cfg.MemoryEvidenceCompletionBudgetRatio + cfg.MemoryEvidenceContextBudgetRatio
+	if math.Abs(budget-1) > 1e-9 {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory evidence budget ratios must sum to 1")
 	}
 }
 

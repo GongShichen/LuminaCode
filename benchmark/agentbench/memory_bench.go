@@ -855,28 +855,35 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 	staleUses := 0
 	for _, id := range usedIDs {
 		entry, err := store.Get(ctx, id)
-		if err != nil || entry == nil {
+		if err == nil && entry != nil {
+			source := strings.TrimSpace(entry.SourceSessionID)
+			if source != "" {
+				seenSources[source] = struct{}{}
+			}
+			stale := entry.Status != longmemory.StatusActive || (!entry.ValidUntil.IsZero() && !entry.ValidUntil.After(time.Now().UTC()))
+			if stale {
+				staleUses++
+			}
+			details = append(details, MemoryHit{Rank: len(details) + 1, MemoryID: entry.MemoryID,
+				DocumentKind: entry.DocumentKind, MessageID: entry.MessageID, Title: entry.Title,
+				SourceSessionID: source, Tags: entry.Tags, Evidence: false, Stale: stale})
 			continue
 		}
-		source := strings.TrimSpace(entry.SourceSessionID)
-		if source != "" {
-			seenSources[source] = struct{}{}
+		if chunks, chunkErr := store.GetChunks(ctx, []string{id}); chunkErr == nil && len(chunks) == 1 {
+			chunk := chunks[0]
+			seenSources[chunk.SessionID] = struct{}{}
+			details = append(details, MemoryHit{Rank: len(details) + 1, MemoryID: chunk.ChunkID,
+				DocumentKind: "chunk", MessageID: chunk.MessageID, Title: "Message " + chunk.MessageID,
+				SourceSessionID: chunk.SessionID})
+			continue
 		}
-		stale := entry.Status != longmemory.StatusActive || (!entry.ValidUntil.IsZero() && !entry.ValidUntil.After(time.Now().UTC()))
-		if stale {
-			staleUses++
+		if atoms, atomErr := store.GetAtoms(ctx, []string{id}); atomErr == nil && len(atoms) == 1 {
+			atom := atoms[0]
+			seenSources[atom.SessionID] = struct{}{}
+			details = append(details, MemoryHit{Rank: len(details) + 1, MemoryID: atom.AtomID,
+				DocumentKind: "atom", ParentID: atom.ChunkID, MessageID: atom.MessageID,
+				Title: "Message " + atom.MessageID, SourceSessionID: atom.SessionID})
 		}
-		details = append(details, MemoryHit{
-			Rank:            len(details) + 1,
-			MemoryID:        entry.MemoryID,
-			DocumentKind:    entry.DocumentKind,
-			MessageID:       entry.MessageID,
-			Title:           entry.Title,
-			SourceSessionID: source,
-			Tags:            entry.Tags,
-			Evidence:        false,
-			Stale:           stale,
-		})
 	}
 	metrics := &MemoryMetrics{
 		RetrievedCount:  len(details),
@@ -952,13 +959,16 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 		metrics.GoldChunkCount = len(goldChunkIDs)
 		metrics.GoldMessageCount = len(goldMessageIDs)
 		metrics.GoldSourceSessionCount = len(goldSources)
-		hitMessages := map[string]struct{}{}
+		hitMessages, hitChunks := map[string]struct{}{}, map[string]struct{}{}
 		for index := range details {
-			_, isGold := goldChunkIDs[details[index].MemoryID]
+			chunkID := details[index].MemoryID
+			if details[index].DocumentKind == "atom" && details[index].ParentID != "" {
+				chunkID = details[index].ParentID
+			}
+			_, isGold := goldChunkIDs[chunkID]
 			details[index].Evidence = isGold
 			if isGold {
-				metrics.EvidenceHitCount++
-				metrics.GoldChunkHitCount++
+				hitChunks[chunkID] = struct{}{}
 				if metrics.FirstEvidenceRank == nil {
 					rank := details[index].Rank
 					metrics.FirstEvidenceRank = &rank
@@ -972,6 +982,7 @@ func collectMemoryMetrics(ctx context.Context, storePath string, input memoryMet
 				seenSources[details[index].SourceSessionID] = struct{}{}
 			}
 		}
+		metrics.EvidenceHitCount, metrics.GoldChunkHitCount = len(hitChunks), len(hitChunks)
 		if metrics.EvidenceTotal > 0 {
 			metrics.EvidenceHit = metrics.EvidenceHitCount > 0
 			metrics.EvidenceRecallAtK = float64(metrics.EvidenceHitCount) / float64(metrics.EvidenceTotal)
@@ -1055,6 +1066,21 @@ func injectedGoldTextCoverage(ctx context.Context, store *longmemory.Store, used
 			covered[chunk.MessageID] = append(covered[chunk.MessageID], runeInterval{start: start, end: end})
 		}
 	}
+	atoms, atomErr := store.GetAtoms(ctx, usedIDs)
+	if atomErr == nil {
+		for _, atom := range atoms {
+			text, ok := goldMessages[atom.MessageID]
+			if !ok {
+				continue
+			}
+			length := len([]rune(strings.TrimSpace(text)))
+			start := maxIntMemoryMetric(0, minIntMemoryMetric(atom.StartRune, length))
+			end := maxIntMemoryMetric(start, minIntMemoryMetric(atom.EndRune, length))
+			if end > start {
+				covered[atom.MessageID] = append(covered[atom.MessageID], runeInterval{start: start, end: end})
+			}
+		}
+	}
 	totalRunes, coveredRunes := 0, 0
 	for messageID, text := range goldMessages {
 		length := len([]rune(strings.TrimSpace(text)))
@@ -1113,10 +1139,17 @@ func estimateMemoryHitTokens(ctx context.Context, store *longmemory.Store, ids [
 		}
 		seen[id] = struct{}{}
 		entry, err := store.Get(ctx, id)
-		if err != nil || entry == nil {
+		if err == nil && entry != nil {
+			runes += len([]rune(entry.Title)) + len([]rune(entry.Summary)) + len([]rune(entry.Content)) + 160
 			continue
 		}
-		runes += len([]rune(entry.Title)) + len([]rune(entry.Summary)) + len([]rune(entry.Content)) + 160
+		if atoms, atomErr := store.GetAtoms(ctx, []string{id}); atomErr == nil && len(atoms) == 1 {
+			runes += len([]rune(atoms[0].Text)) + 80
+			continue
+		}
+		if chunks, chunkErr := store.GetChunks(ctx, []string{id}); chunkErr == nil && len(chunks) == 1 {
+			runes += len([]rune(chunks[0].Text)) + 80
+		}
 	}
 	if runes == 0 {
 		return 0

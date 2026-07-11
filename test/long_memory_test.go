@@ -218,6 +218,7 @@ func TestLongMemoryRecallDoesNotUseCompletionRerank(t *testing.T) {
 	cfg.LongTermMemoryEnabled = true
 	cfg.LongTermMemoryStore = store.Path()
 	cfg.MemoryRecallMaxItems = 1
+	cfg.MemoryAtomMaxSelected = 1
 	state := agent.NewAgentState()
 	state.LastQuery = "alpha preference"
 	state.Messages = []map[string]any{{"role": "user", "content": "alpha preference"}}
@@ -246,6 +247,7 @@ func TestLongMemoryMissingEmbeddingKeepsOtherChannelCandidates(t *testing.T) {
 	cfg.LongTermMemoryEnabled = true
 	cfg.LongTermMemoryStore = filepath.Join(root, "memory.sqlite")
 	cfg.MemoryRecallMaxItems = 1
+	cfg.MemoryAtomMaxSelected = 1
 	cfg.MemoryEmbeddingEnabled = true
 	cfg.MemoryEmbeddingModelDir = filepath.Join(root, "missing-model")
 	state := agent.NewAgentState()

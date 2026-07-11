@@ -173,6 +173,46 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 			confidence REAL NOT NULL DEFAULT 0.5,
 			PRIMARY KEY(chunk_id, normalized_entity)
 		);`,
+		`CREATE TABLE IF NOT EXISTS memory_evidence_atoms (
+			atom_id TEXT PRIMARY KEY,
+			chunk_id TEXT NOT NULL,
+			message_id TEXT NOT NULL DEFAULT '',
+			session_id TEXT NOT NULL DEFAULT '',
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL,
+			start_rune INTEGER NOT NULL DEFAULT 0,
+			end_rune INTEGER NOT NULL DEFAULT 0,
+			occurred_at TEXT NOT NULL DEFAULT '',
+			valid_from TEXT NOT NULL DEFAULT '',
+			valid_until TEXT NOT NULL DEFAULT '',
+			epistemic_status TEXT NOT NULL DEFAULT 'derived',
+			content_hash TEXT NOT NULL
+		);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_atom_fts USING fts5(
+			atom_id UNINDEXED, session_id UNINDEXED, message_id UNINDEXED, role UNINDEXED, text
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_atom_embeddings (
+			atom_id TEXT NOT NULL,
+			model TEXT NOT NULL,
+			dimensions INTEGER NOT NULL,
+			content_hash TEXT NOT NULL,
+			embedding BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(atom_id, model)
+		);`,
+		`CREATE TABLE IF NOT EXISTS memory_atom_entities (
+			atom_id TEXT NOT NULL,
+			scope_type TEXT NOT NULL,
+			scope_key TEXT NOT NULL,
+			normalized_entity TEXT NOT NULL,
+			original_text TEXT NOT NULL,
+			entity_type TEXT NOT NULL DEFAULT '',
+			confidence REAL NOT NULL DEFAULT 0.5,
+			PRIMARY KEY(atom_id, normalized_entity)
+		);`,
 		`CREATE TABLE IF NOT EXISTS memory_jobs (
 			job_id TEXT PRIMARY KEY,
 			kind TEXT NOT NULL,
@@ -278,6 +318,10 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunks_message ON memory_evidence_chunks(scope_type, scope_key, message_id, start_rune);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_chunks_canonical ON memory_evidence_chunks(scope_type, scope_key, session_id, message_id, start_rune, end_rune, content_hash);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_chunk_entities_lookup ON memory_chunk_entities(scope_type, scope_key, normalized_entity);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_atoms_chunk ON memory_evidence_atoms(chunk_id, start_rune);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_atoms_message ON memory_evidence_atoms(scope_type, scope_key, message_id, start_rune);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_atoms_canonical ON memory_evidence_atoms(scope_type, scope_key, chunk_id, start_rune, end_rune, content_hash);`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_atom_entities_lookup ON memory_atom_entities(scope_type, scope_key, normalized_entity);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_jobs_ready ON memory_jobs(status, available_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_retrieval_created ON memory_retrieval_runs(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_canonical_entity_lookup ON memory_canonical_entities(scope_type, scope_key, name);`,
@@ -368,7 +412,7 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, jobType := range []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "chunk_embedding_backfill"} {
+	for _, jobType := range []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "chunk_embedding_backfill", "evidence_atom_backfill", "atom_embedding_backfill"} {
 		if scheduleErr := s.ScheduleBackfill(ctx, jobType); scheduleErr != nil {
 			return scheduleErr
 		}
@@ -408,6 +452,13 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	atomTarget, atomMax := batch.AtomTargetTokens, batch.AtomMaxTokens
+	if atomTarget <= 0 {
+		atomTarget = defaultAtomTargetTokens
+	}
+	if atomMax < atomTarget {
+		atomMax = maxInt(defaultAtomMaxTokens, atomTarget)
+	}
 	var committedEpisode *Episode
 	if batch.Episode != nil {
 		episode := normalizeEpisode(*batch.Episode)
@@ -503,6 +554,15 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
 					return err
 				}
+				for _, atom := range BuildEvidenceAtoms(chunk, atomTarget, atomMax) {
+					if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+						return err
+					}
+					if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
+						FromID: chunk.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+						return err
+					}
+				}
 				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 					ScopeKey: sessionIndex.ScopeKey, FromID: sessionIndex.IndexID, ToID: chunk.ChunkID,
 					Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
@@ -525,6 +585,15 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 		for _, chunk := range batch.Chunks {
 			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
 				return err
+			}
+			for _, atom := range BuildEvidenceAtoms(chunk, atomTarget, atomMax) {
+				if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+					return err
+				}
+				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
+					FromID: chunk.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+					return err
+				}
 			}
 		}
 		for _, embedding := range batch.ChunkEmbeddings {
@@ -551,6 +620,15 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				}
 				for _, entity := range candidate.Entities {
 					if err := upsertChunkEntityTx(ctx, tx, chunk, entity, candidate.Confidence); err != nil {
+						return err
+					}
+				}
+			}
+			if status := normalizeEpistemicStatus(candidate.EpistemicStatus); status != "" {
+				for messageID := range allowedMessages {
+					if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence_atoms SET epistemic_status=?
+						WHERE message_id=? AND scope_type=? AND scope_key=?`, status, messageID,
+						candidate.ScopeType, candidate.ScopeKey); err != nil {
 						return err
 					}
 				}

@@ -178,7 +178,7 @@ func TestEvidenceChunksParticipateInEveryRetrievalChannel(t *testing.T) {
 			t.Fatalf("channel %s did not execute", name)
 		}
 	}
-	if len(result.Packet.Documents) == 0 || result.Packet.Documents[0].Kind != "chunk" ||
+	if len(result.Packet.Documents) == 0 || result.Packet.Documents[0].Kind != "atom" ||
 		!strings.Contains(result.Packet.Documents[0].Text, "SQLite WAL") {
 		t.Fatalf("final packet did not contain original chunk evidence: %#v", result.Packet)
 	}

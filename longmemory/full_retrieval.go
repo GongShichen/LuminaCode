@@ -66,7 +66,9 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		ReferenceTime:               query.Timestamp,
 		GlobalChannelCandidates:     map[string]int{},
 		PerSessionChannelCandidates: map[string]map[string]int{},
+		NativeChannelCandidates:     map[string]int{},
 		CoverageFacets:              normalizeStrings(append(append([]string(nil), expansion.Queries...), append(expansion.Entities, expansion.RelationTerms...)...)),
+		QueryExpansionParseMode:     expansion.ParseMode,
 	}
 	trace := RetrievalTrace{
 		RunID:         run.RunID,
@@ -84,7 +86,12 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 			run.CacheHit, run.CacheKeyScope = true, scopeKey
 			run.ChannelResults = append([]ChannelResult(nil), cached.channelResults...)
 			run.GlobalChannelCandidates = cached.globalCounts
+			run.NativeChannelCandidates = cached.nativeCounts
 			run.PerSessionChannelCandidates = cached.perSessionCounts
+			run.CoverageLedger = cached.coverageLedger
+			run.DuplicateSignalSuppression = cached.duplicateSignalSuppression
+			run.ResidualSweepCandidates = cached.residualSweepCandidates
+			run.EmbeddingTrace = cached.embeddingTrace
 			run.CanonicalEntities, run.CanonicalEvents = cached.canonicalEntities, cached.canonicalEvents
 			run.SelectedIDs = append([]string(nil), cached.selectedIDs...)
 			run.InjectedIDs = evidenceIDs(cached.packet.Evidence)
@@ -108,12 +115,7 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		go func() {
 			defer wait.Done()
 			channelStarted := time.Now()
-			channelCtx, cancel := ctx, func() {}
-			if name == channelVector {
-				channelCtx, cancel = localRetrievalContext(ctx, opts.LocalTimeout)
-			}
-			defer cancel()
-			entries, err := fn(channelCtx)
+			entries, err := fn(ctx)
 			outputs <- baseChannelOutput{name: name, query: strings.Join(queries, " | "), entries: entries,
 				err: err, started: channelStarted, done: time.Now()}
 		}()
@@ -122,7 +124,9 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		return s.searchBM25Queries(channelCtx, queries, query.Scopes, opts)
 	})
 	runChannel(channelVector, func(channelCtx context.Context) ([]Entry, error) {
-		return s.searchVectorQueries(channelCtx, queries, query.Scopes, embedder, opts)
+		vectorCtx, cancel := embeddingRetrievalContext(channelCtx, embedder, opts.LocalTimeout)
+		defer cancel()
+		return s.searchVectorQueries(vectorCtx, queries, query.Scopes, embedder, opts)
 	})
 	runChannel(channelEntity, func(channelCtx context.Context) ([]Entry, error) {
 		return s.SearchEntities(channelCtx, queries, expansion.Entities, query.Scopes, opts.FTSCandidates)
@@ -150,6 +154,7 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 			mergeChannelEntries(combined, output.name, output.entries, opts.RRFK)
 			channelResult.Candidates = retrievalCandidates(output.entries, output.name)
 			run.GlobalChannelCandidates[output.name] = len(output.entries)
+			run.NativeChannelCandidates[output.name] = len(output.entries)
 		}
 		run.ChannelResults = append(run.ChannelResults, channelResult)
 	}
@@ -211,24 +216,32 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	}
 	graphResult.DurationMS = time.Since(graphStarted).Milliseconds()
 	run.ChannelResults = append(run.ChannelResults, graphResult)
-
-	candidates := preferEvidenceChunks(filterExcludedCandidates(candidateSlice(combined), opts.ExcludeIDs))
-	var embeddings map[string][]float32
-	if embedder != nil && len(candidates) > 0 {
-		ids := make([]string, len(candidates))
-		for index := range candidates {
-			ids[index] = candidates[index].MemoryID
+	for _, candidate := range combined {
+		families := map[string]struct{}{}
+		for _, contribution := range candidate.Contributions {
+			families[contribution.SignalFamily] = struct{}{}
 		}
-		loaded, err := s.LoadDocumentEmbeddings(ctx, ids, embedder.Model())
-		if err != nil {
-			warnings = append(warnings, "load candidate embeddings: "+err.Error())
-		} else {
-			embeddings = loaded
+		if len(candidate.ChannelRanks) > len(families) {
+			run.DuplicateSignalSuppression += len(candidate.ChannelRanks) - len(families)
 		}
 	}
+
+	candidates := preferEvidenceAtoms(filterExcludedCandidates(candidateSlice(combined), opts.ExcludeIDs))
 	opts.CoverageFacets = run.CoverageFacets
-	selected := selectWithCoverageMMR(candidates, opts.MaxItems, opts, embeddings)
-	selected = diversifySessions(selected, candidates, opts.MaxItems)
+	facets := BuildCoverageFacets(plan, expansion, opts.CoverageMaxFacets)
+	primaryBudget := int(float64(minInt(opts.TargetContextTokens, opts.MaxContextTokens)) * opts.EvidencePrimaryBudgetRatio)
+	_, initialLedger := BuildCoverageLedger(candidates, facets, opts, primaryBudget)
+	if len(initialLedger.Uncovered) > 0 && opts.CoverageCompletionRounds > 0 {
+		residual := s.searchResidualCoverage(ctx, query, expansion, initialLedger, embedder, opts)
+		run.ResidualSweepCandidates = len(residual)
+		for _, candidate := range residual {
+			mergeCandidateScore(combined, candidate, opts.RRFK)
+		}
+		candidates = preferEvidenceAtoms(filterExcludedCandidates(candidateSlice(combined), opts.ExcludeIDs))
+	}
+	selected, ledger := BuildCoverageLedger(candidates, facets, opts,
+		int(float64(minInt(opts.TargetContextTokens, opts.MaxContextTokens))*(opts.EvidencePrimaryBudgetRatio+opts.EvidenceCompletionBudgetRatio)))
+	run.CoverageLedger = ledger
 	for _, item := range selected {
 		run.SelectedIDs = append(run.SelectedIDs, item.MemoryID)
 		if stored := combined[item.MemoryID]; stored != nil {
@@ -237,7 +250,7 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	}
 	for _, item := range combined {
 		if !item.Selected && item.DropReason == "" {
-			item.DropReason = "lower_fused_or_mmr_score"
+			item.DropReason = "lower_coverage_utility_or_budget"
 		}
 	}
 
@@ -246,7 +259,7 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 		warnings = append(warnings, "core blocks: "+err.Error())
 	}
 	opts.ReferenceTime = query.Timestamp
-	packet, packetErr := s.BuildEvidencePacket(ctx, plan, selected, blocks, opts)
+	packet, packetErr := s.BuildAtomEvidencePacket(ctx, plan, selected, ledger, blocks, opts)
 	if packetErr != nil {
 		warnings = append(warnings, "evidence packet: "+packetErr.Error())
 		run.StopReason = "evidence_packet_error"
@@ -285,6 +298,7 @@ func (s *Store) SearchAllChannels(ctx context.Context, query MemoryQuery, expans
 	run.Evidence = append([]Evidence(nil), packet.Evidence...)
 	run.InjectedIDs = evidenceIDs(packet.Evidence)
 	run.EstimatedTokens = packet.EstimatedTokens
+	run.EmbeddingTrace = EmbeddingStats(embedder)
 	run.DurationMS = time.Since(started).Milliseconds()
 	trace.Candidates = candidateSlice(combined)
 	trace.SelectedIDs = append([]string(nil), run.SelectedIDs...)
@@ -313,38 +327,45 @@ func localRetrievalContext(ctx context.Context, timeout time.Duration) (context.
 	return context.WithTimeout(ctx, timeout)
 }
 
-func preferEvidenceChunks(candidates []CandidateScore) []CandidateScore {
-	chunkMessages := map[string]struct{}{}
-	chunkSessions := map[string]struct{}{}
+func embeddingRetrievalContext(ctx context.Context, embedder Embedder, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, scheduled := embedder.(*ScheduledEmbedder); scheduled {
+		return ctx, func() {}
+	}
+	return localRetrievalContext(ctx, timeout)
+}
+
+func preferEvidenceAtoms(candidates []CandidateScore) []CandidateScore {
+	atomMessages := map[string]struct{}{}
+	atomSessions := map[string]struct{}{}
 	for _, candidate := range candidates {
-		if candidate.Entry.DocumentKind != "chunk" {
+		if candidate.Entry.DocumentKind != "atom" {
 			continue
 		}
 		if candidate.Entry.MessageID != "" {
-			chunkMessages[candidate.Entry.MessageID] = struct{}{}
+			atomMessages[candidate.Entry.MessageID] = struct{}{}
 		}
 		if candidate.Entry.SourceSessionID != "" {
-			chunkSessions[candidate.Entry.SourceSessionID] = struct{}{}
+			atomSessions[candidate.Entry.SourceSessionID] = struct{}{}
 		}
 	}
-	if len(chunkMessages) == 0 && len(chunkSessions) == 0 {
+	if len(atomMessages) == 0 && len(atomSessions) == 0 {
 		return candidates
 	}
 	filtered := make([]CandidateScore, 0, len(candidates))
 	for _, candidate := range candidates {
-		if candidate.Entry.DocumentKind == "chunk" {
+		if candidate.Entry.DocumentKind == "atom" {
 			filtered = append(filtered, candidate)
 			continue
 		}
 		covered := false
 		for _, messageID := range candidate.Entry.SourceMessageIDs {
-			if _, ok := chunkMessages[messageID]; ok {
+			if _, ok := atomMessages[messageID]; ok {
 				covered = true
 				break
 			}
 		}
 		if candidate.Entry.DocumentKind == "session" {
-			_, covered = chunkSessions[candidate.Entry.SourceSessionID]
+			_, covered = atomSessions[candidate.Entry.SourceSessionID]
 		}
 		if !covered {
 			filtered = append(filtered, candidate)
@@ -360,11 +381,17 @@ func (s *Store) searchBM25Queries(ctx context.Context, queries []string, scopes 
 		if err != nil {
 			return nil, err
 		}
-		chunkEntries, err := s.SearchChunkBM25(ctx, []string{query}, scopes, opts.FTSCandidates)
+		atomEntries, err := s.SearchAtomsKeyword(ctx, []string{query}, scopes, "", opts.FTSCandidates)
 		if err != nil {
 			return nil, err
 		}
-		return appendUniqueEntries(chunkEntries, memoryEntries), nil
+		if len(atomEntries) == 0 {
+			atomEntries, err = s.SearchChunkBM25(ctx, []string{query}, scopes, opts.FTSCandidates)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return appendUniqueEntries(atomEntries, memoryEntries), nil
 	})
 }
 
@@ -391,11 +418,17 @@ func (s *Store) searchVectorQueries(ctx context.Context, queries []string, scope
 				if sessionErr != nil {
 					return nil, sessionErr
 				}
-				chunkEntries, chunkErr := s.SearchChunkVector(ctx, vectors[index], embedder.Model(), scopes, opts.VectorCandidates)
-				if chunkErr != nil {
-					return nil, chunkErr
+				atomEntries, atomErr := s.SearchAtomsSemantic(ctx, vectors[index], embedder.Model(), scopes, "", opts.VectorCandidates)
+				if atomErr != nil {
+					return nil, atomErr
 				}
-				return appendUniqueEntries(chunkEntries, appendUniqueEntries(memoryEntries, sessionEntries)), nil
+				if len(atomEntries) == 0 {
+					atomEntries, atomErr = s.SearchChunkVector(ctx, vectors[index], embedder.Model(), scopes, opts.VectorCandidates)
+					if atomErr != nil {
+						return nil, atomErr
+					}
+				}
+				return appendUniqueEntries(atomEntries, appendUniqueEntries(memoryEntries, sessionEntries)), nil
 			}
 		}
 		return nil, nil
@@ -434,13 +467,15 @@ func mergeChannelEntries(combined map[string]*CandidateScore, channel string, en
 		}
 		item.ChannelRanks[channel] = rank + 1
 		item.ChannelScores[channel] = entry.Score
-		item.FusedScore += 1 / float64(rrfK+rank+1)
+		item.Contributions = mergeContributions(item.Contributions, []SignalContribution{{Channel: channel,
+			SignalFamily: channelSignalFamily(channel), Rank: rank + 1, Score: entry.Score, Native: true}})
+		recalculateOrthogonalScore(item, rrfK)
 	}
 }
 
 func mergeSessionScopedCandidates(combined map[string]*CandidateScore, sessions map[string][]CandidateScore, rrfK int) {
 	for _, candidates := range sessions {
-		for rank, candidate := range candidates {
+		for _, candidate := range candidates {
 			item := combined[candidate.MemoryID]
 			if item == nil {
 				copy := candidate
@@ -449,14 +484,88 @@ func mergeSessionScopedCandidates(combined map[string]*CandidateScore, sessions 
 				item = &copy
 				combined[candidate.MemoryID] = item
 			}
-			channel := "session_scoped"
-			if prior, exists := item.ChannelRanks[channel]; !exists || rank+1 < prior {
-				item.ChannelRanks[channel] = rank + 1
+			item.Contributions = mergeContributions(item.Contributions, candidate.Contributions)
+			for channel, channelRank := range candidate.ChannelRanks {
+				if prior, exists := item.ChannelRanks[channel]; !exists || channelRank < prior {
+					item.ChannelRanks[channel] = channelRank
+				}
+				item.ChannelScores[channel] = candidate.ChannelScores[channel]
 			}
-			item.ChannelScores[channel] = candidate.FusedScore
-			item.FusedScore += 1 / float64(maxInt(rrfK, 1)+rank+1)
+			recalculateOrthogonalScore(item, rrfK)
 		}
 	}
+}
+
+func channelSignalFamily(channel string) string {
+	switch channel {
+	case channelBM25:
+		return "lexical"
+	case channelVector:
+		return "semantic"
+	case channelEntity:
+		return "structured_entity"
+	case channelTemporal:
+		return "structured_time"
+	case channelSession:
+		return "session_parent"
+	case channelGraph:
+		return "relation"
+	default:
+		return channel
+	}
+}
+
+func recalculateOrthogonalScore(item *CandidateScore, rrfK int) {
+	if rrfK <= 0 {
+		rrfK = 60
+	}
+	bestByFamily := map[string]SignalContribution{}
+	for _, contribution := range item.Contributions {
+		prior, ok := bestByFamily[contribution.SignalFamily]
+		if !ok || contribution.Rank < prior.Rank {
+			bestByFamily[contribution.SignalFamily] = contribution
+		}
+	}
+	item.FusedScore = 0
+	for _, contribution := range bestByFamily {
+		item.FusedScore += 1 / float64(rrfK+maxInt(contribution.Rank, 1))
+	}
+}
+
+func mergeCandidateScore(combined map[string]*CandidateScore, candidate CandidateScore, rrfK int) {
+	item := combined[candidate.MemoryID]
+	if item == nil {
+		copy := candidate
+		copy.ChannelRanks = cloneStringIntMap(candidate.ChannelRanks)
+		copy.ChannelScores = cloneStringFloatMapMemory(candidate.ChannelScores)
+		copy.Contributions = append([]SignalContribution(nil), candidate.Contributions...)
+		combined[candidate.MemoryID] = &copy
+		return
+	}
+	item.Contributions = mergeContributions(item.Contributions, candidate.Contributions)
+	for channel, rank := range candidate.ChannelRanks {
+		if prior, ok := item.ChannelRanks[channel]; !ok || rank < prior {
+			item.ChannelRanks[channel] = rank
+		}
+		item.ChannelScores[channel] = candidate.ChannelScores[channel]
+	}
+	recalculateOrthogonalScore(item, rrfK)
+}
+
+func cloneStringIntMap(value map[string]int) map[string]int {
+	result := map[string]int{}
+	for key, item := range value {
+		result[key] = item
+	}
+	return result
+}
+
+func cloneStringFloatMapMemory(value map[string]float64) map[string]float64 {
+	result := map[string]float64{}
+	for key, item := range value {
+		result[key] = item
+	}
+	return result
 }
 
 func (s *Store) searchSelectedSessions(ctx context.Context, sessions []sessionRank, queries []string,
@@ -467,8 +576,8 @@ func (s *Store) searchSelectedSessions(ctx context.Context, sessions []sessionRa
 	var vectors [][]float32
 	if embedder != nil {
 		var err error
-		embeddingCtx, cancel := localRetrievalContext(ctx, opts.LocalTimeout)
-		vectors, err = embedder.Embed(embeddingCtx, queries, EmbeddingQuery)
+		embedCtx, cancel := embeddingRetrievalContext(ctx, embedder, opts.LocalTimeout)
+		vectors, err = embedder.Embed(embedCtx, queries, EmbeddingQuery)
 		cancel()
 		if err != nil {
 			warnings = append(warnings, "session vector: "+err.Error())
@@ -508,22 +617,21 @@ func (s *Store) searchOneSelectedSession(ctx context.Context, session sessionRan
 	var warnings []string
 	sessionScopes := []Scope{{Type: session.ScopeType, Key: session.ScopeKey}}
 	channels := map[string][]Entry{}
-	bm25, err := s.searchSessionChunkText(ctx, session.SessionID, queries, nil, sessionScopes,
-		opts.SessionChunkCandidates, "session_bm25")
+	bm25, err := s.SearchAtomsKeyword(ctx, queries, sessionScopes, session.SessionID, opts.SessionChunkCandidates)
 	if err != nil {
 		warnings = append(warnings, session.SessionID+" bm25: "+err.Error())
 	} else {
 		channels[channelBM25] = bm25
 	}
-	entities, err := s.searchSessionChunkEntities(ctx, session.SessionID, queries, expansion.Entities, sessionScopes,
-		opts.SessionChunkCandidates)
+	entities, err := s.SearchAtomsEntity(ctx, append(append([]string(nil), expansion.Entities...), queries...), sessionScopes,
+		session.SessionID, opts.SessionChunkCandidates)
 	if err != nil {
 		warnings = append(warnings, session.SessionID+" entity: "+err.Error())
 	} else {
 		channels[channelEntity] = entities
 	}
-	temporalEntries, err := s.searchSessionChunkTemporal(ctx, session.SessionID, queries,
-		expansion.TemporalConstraints, sessionScopes, opts.SessionChunkCandidates)
+	temporalEntries, err := s.SearchAtomsTemporal(ctx, expansion.TemporalConstraints, sessionScopes,
+		session.SessionID, opts.SessionChunkCandidates)
 	if err != nil {
 		warnings = append(warnings, session.SessionID+" temporal: "+err.Error())
 	} else {
@@ -532,7 +640,7 @@ func (s *Store) searchOneSelectedSession(ctx context.Context, session sessionRan
 	if len(vectors) == len(queries) {
 		var vectorEntries []Entry
 		for _, vector := range vectors {
-			entries, vectorErr := s.searchSessionChunkVector(ctx, session.SessionID, vector, embedder.Model(), sessionScopes,
+			entries, vectorErr := s.SearchAtomsSemantic(ctx, vector, embedder.Model(), sessionScopes, session.SessionID,
 				opts.SessionChunkCandidates)
 			if vectorErr != nil {
 				warnings = append(warnings, session.SessionID+" vector: "+vectorErr.Error())
@@ -554,6 +662,87 @@ func (s *Store) searchOneSelectedSession(ctx context.Context, session sessionRan
 		candidates = candidates[:opts.ChunksPerSession]
 	}
 	return candidates, counts, warnings
+}
+
+func (s *Store) searchResidualCoverage(ctx context.Context, query MemoryQuery, expansion QueryExpansion,
+	ledger CoverageLedger, embedder Embedder, opts HybridSearchOptions) []CandidateScore {
+	uncovered := map[string]struct{}{}
+	for _, facetID := range ledger.Uncovered {
+		uncovered[facetID] = struct{}{}
+	}
+	var queries []string
+	for _, facet := range ledger.Facets {
+		if _, ok := uncovered[facet.FacetID]; ok {
+			queries = append(queries, facet.Text)
+		}
+	}
+	queries = normalizeStrings(append([]string{query.Text}, queries...))
+	if len(queries) == 0 {
+		return nil
+	}
+	type result struct {
+		channel string
+		entries []Entry
+	}
+	output := make(chan result, 5)
+	var wait sync.WaitGroup
+	run := func(channel string, fn func() ([]Entry, error)) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			entries, _ := fn()
+			output <- result{channel: channel, entries: entries}
+		}()
+	}
+	run(channelBM25, func() ([]Entry, error) {
+		return s.SearchAtomsKeyword(ctx, queries, query.Scopes, "", opts.FTSCandidates)
+	})
+	run(channelVector, func() ([]Entry, error) {
+		if embedder == nil {
+			return nil, nil
+		}
+		embedCtx, cancel := embeddingRetrievalContext(ctx, embedder, opts.LocalTimeout)
+		defer cancel()
+		vectors, err := embedder.Embed(embedCtx, queries, EmbeddingQuery)
+		if err != nil {
+			return nil, err
+		}
+		var entries []Entry
+		for _, vector := range vectors {
+			current, searchErr := s.SearchAtomsSemantic(ctx, vector, embedder.Model(), query.Scopes, "", opts.VectorCandidates)
+			if searchErr != nil {
+				return nil, searchErr
+			}
+			entries = appendUniqueEntries(entries, current)
+		}
+		return entries, nil
+	})
+	run(channelEntity, func() ([]Entry, error) {
+		return s.SearchAtomsEntity(ctx, append(append([]string(nil), expansion.Entities...), queries...), query.Scopes, "", opts.FTSCandidates)
+	})
+	run(channelTemporal, func() ([]Entry, error) {
+		return s.SearchAtomsTemporal(ctx, expansion.TemporalConstraints, query.Scopes, "", opts.FTSCandidates)
+	})
+	run(channelSession, func() ([]Entry, error) { return s.SearchSessions(ctx, queries, query.Scopes, opts.SessionCandidates) })
+	go func() { wait.Wait(); close(output) }()
+	combined := map[string]*CandidateScore{}
+	for item := range output {
+		mergeChannelEntries(combined, item.channel, item.entries, opts.RRFK)
+	}
+	stage := candidateSlice(combined)
+	seedLimit := minInt(len(stage), maxInt(opts.GraphCandidates, 8))
+	if seedLimit > 0 {
+		seeds := make([]string, seedLimit)
+		for index := range seeds {
+			seeds[index] = stage[index].MemoryID
+		}
+		if scores, err := s.ExpandGraph(ctx, seeds, query.Scopes, opts.GraphMaxHops, opts.GraphCandidates); err == nil {
+			if entries, loadErr := s.entriesForGraph(ctx, scores); loadErr == nil {
+				mergeChannelEntries(combined, channelGraph, entries, opts.RRFK)
+			}
+		}
+	}
+	return candidateSlice(combined)
 }
 
 func retrievalCandidates(entries []Entry, channel string) []RetrievalCandidate {
@@ -604,48 +793,24 @@ func (s *Store) entriesForGraph(ctx context.Context, scores map[string]float64) 
 		return nil, chunkErr
 	}
 	for _, chunk := range chunks {
+		found[chunk.ChunkID] = struct{}{}
 		entries = append(entries, chunkEntry(chunk, scores[chunk.ChunkID], channelGraph))
+	}
+	missing = missing[:0]
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	atoms, atomErr := s.GetAtoms(ctx, missing)
+	if atomErr != nil {
+		return nil, atomErr
+	}
+	for _, atom := range atoms {
+		entries = append(entries, atomEntry(atom, scores[atom.AtomID], channelGraph))
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
 	return entries, nil
-}
-
-func diversifySessions(selected, candidates []CandidateScore, limit int) []CandidateScore {
-	if limit <= 1 || len(candidates) <= 1 {
-		return selected
-	}
-	result := make([]CandidateScore, 0, minInt(limit, len(candidates)))
-	seenIDs, sessionCounts := map[string]struct{}{}, map[string]int{}
-	maxPerSession := maxInt(1, (limit+1)/2)
-	ordered := append(append([]CandidateScore(nil), selected...), candidates...)
-	for _, candidate := range ordered {
-		if _, exists := seenIDs[candidate.MemoryID]; exists {
-			continue
-		}
-		session := candidate.Entry.SourceSessionID
-		if session != "" && sessionCounts[session] >= maxPerSession {
-			continue
-		}
-		result = append(result, candidate)
-		seenIDs[candidate.MemoryID] = struct{}{}
-		if session != "" {
-			sessionCounts[session]++
-		}
-		if len(result) >= limit {
-			return result
-		}
-	}
-	for _, candidate := range ordered {
-		if _, exists := seenIDs[candidate.MemoryID]; exists {
-			continue
-		}
-		result = append(result, candidate)
-		seenIDs[candidate.MemoryID] = struct{}{}
-		if len(result) >= limit {
-			break
-		}
-	}
-	return result
 }
 
 func evidenceIDs(evidence []Evidence) []string {

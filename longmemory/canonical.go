@@ -168,7 +168,8 @@ func (s *Store) CommitCanonicalMerge(ctx context.Context, merge CanonicalMerge) 
 
 func (s *Store) ScheduleBackfill(ctx context.Context, jobType string) error {
 	allowed := map[string]bool{"canonical_entity_backfill": true, "canonical_event_backfill": true,
-		"session_chunk_index_backfill": true, "chunk_embedding_backfill": true}
+		"session_chunk_index_backfill": true, "chunk_embedding_backfill": true,
+		"evidence_atom_backfill": true, "atom_embedding_backfill": true}
 	if !allowed[jobType] {
 		return fmt.Errorf("unsupported memory backfill job %q", jobType)
 	}
@@ -241,6 +242,11 @@ func (s *Store) RunBackfillJob(ctx context.Context, job Job) error {
 		return err
 	case "chunk_embedding_backfill":
 		return nil // RunMaintenance consumes the missing chunk embedding index.
+	case "evidence_atom_backfill":
+		_, err := s.BackfillEvidenceAtoms(ctx, 0, 96, 160)
+		return err
+	case "atom_embedding_backfill":
+		return nil // RunMaintenance consumes the missing atom embedding index.
 	default:
 		return fmt.Errorf("unsupported memory backfill job %q", job.Kind)
 	}

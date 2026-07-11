@@ -9,40 +9,51 @@ import (
 )
 
 type HybridSearchOptions struct {
-	FTSCandidates          int
-	VectorCandidates       int
-	GraphCandidates        int
-	GraphMaxHops           int
-	RRFK                   int
-	MMRLambda              float64
-	MMRRelevanceWeight     float64
-	MMRNoveltyWeight       float64
-	MMRFacetWeight         float64
-	MMRSourceWeight        float64
-	SessionRetrieval       bool
-	SessionCandidates      int
-	ChunksPerSession       int
-	SessionChunkCandidates int
-	MaxItems               int
-	CoreContextTokens      int
-	TargetContextTokens    int
-	MaxContextTokens       int
-	LocalTimeout           time.Duration
-	SessionID              string
-	TeamSessionID          string
-	AgentID                string
-	ExcludeIDs             map[string]struct{}
-	ExpansionModel         string
-	ExpansionError         string
-	ExpansionWaitMS        int64
-	NeighborChunks         int
-	ReferenceTime          time.Time
-	CoverageFacets         []string
-	CanonicalEntityEnabled bool
-	CanonicalEventEnabled  bool
-	CacheEnabled           bool
-	CacheTTL               time.Duration
-	SuppressTrace          bool
+	FTSCandidates                 int
+	VectorCandidates              int
+	GraphCandidates               int
+	GraphMaxHops                  int
+	RRFK                          int
+	MMRLambda                     float64
+	MMRRelevanceWeight            float64
+	MMRNoveltyWeight              float64
+	MMRFacetWeight                float64
+	MMRSourceWeight               float64
+	SessionRetrieval              bool
+	SessionCandidates             int
+	ChunksPerSession              int
+	SessionChunkCandidates        int
+	MaxItems                      int
+	CoreContextTokens             int
+	TargetContextTokens           int
+	MaxContextTokens              int
+	LocalTimeout                  time.Duration
+	SessionID                     string
+	TeamSessionID                 string
+	AgentID                       string
+	ExcludeIDs                    map[string]struct{}
+	ExpansionModel                string
+	ExpansionError                string
+	ExpansionWaitMS               int64
+	NeighborChunks                int
+	ReferenceTime                 time.Time
+	CoverageFacets                []string
+	CanonicalEntityEnabled        bool
+	CanonicalEventEnabled         bool
+	CacheEnabled                  bool
+	CacheTTL                      time.Duration
+	SuppressTrace                 bool
+	AtomMaxSelected               int
+	CoverageMaxFacets             int
+	CoverageCompletionRounds      int
+	CoverageRelevanceWeight       float64
+	CoverageFacetWeight           float64
+	CoverageProvenanceWeight      float64
+	CoverageSourceWeight          float64
+	CoverageCoherenceWeight       float64
+	EvidencePrimaryBudgetRatio    float64
+	EvidenceCompletionBudgetRatio float64
+	EvidenceContextBudgetRatio    float64
 }
 
 func (s *Store) BuildEvidencePacket(ctx context.Context, plan QueryPlan, selected []CandidateScore, blocks []CoreBlock, opts HybridSearchOptions) (EvidencePacket, error) {
@@ -219,13 +230,6 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 	if opts.RRFK <= 0 {
 		opts.RRFK = 60
 	}
-	if opts.MMRLambda <= 0 || opts.MMRLambda > 1 {
-		opts.MMRLambda = 0.75
-	}
-	if opts.MMRRelevanceWeight+opts.MMRNoveltyWeight+opts.MMRFacetWeight+opts.MMRSourceWeight <= 0 {
-		opts.MMRRelevanceWeight, opts.MMRNoveltyWeight = 0.60, 0.20
-		opts.MMRFacetWeight, opts.MMRSourceWeight = 0.15, 0.05
-	}
 	if opts.SessionCandidates <= 0 {
 		opts.SessionCandidates = 12
 	}
@@ -236,7 +240,21 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 		opts.SessionChunkCandidates = 64
 	}
 	if opts.MaxItems <= 0 {
-		opts.MaxItems = 8
+		opts.MaxItems = 32
+	}
+	if opts.AtomMaxSelected <= 0 {
+		opts.AtomMaxSelected = opts.MaxItems
+	}
+	if opts.CoverageMaxFacets <= 0 {
+		opts.CoverageMaxFacets = 8
+	}
+	if opts.CoverageRelevanceWeight+opts.CoverageFacetWeight+opts.CoverageProvenanceWeight+
+		opts.CoverageSourceWeight+opts.CoverageCoherenceWeight <= 0 {
+		opts.CoverageRelevanceWeight, opts.CoverageFacetWeight = 0.45, 0.25
+		opts.CoverageProvenanceWeight, opts.CoverageSourceWeight, opts.CoverageCoherenceWeight = 0.15, 0.10, 0.05
+	}
+	if opts.EvidencePrimaryBudgetRatio+opts.EvidenceCompletionBudgetRatio+opts.EvidenceContextBudgetRatio <= 0 {
+		opts.EvidencePrimaryBudgetRatio, opts.EvidenceCompletionBudgetRatio, opts.EvidenceContextBudgetRatio = 0.70, 0.20, 0.10
 	}
 	if opts.CoreContextTokens <= 0 {
 		opts.CoreContextTokens = 512
@@ -248,83 +266,6 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 		opts.MaxContextTokens = 6000
 	}
 	return opts
-}
-
-func selectWithCoverageMMR(candidates []CandidateScore, limit int, opts HybridSearchOptions, embeddings map[string][]float32) []CandidateScore {
-	if limit <= 0 || len(candidates) == 0 {
-		return nil
-	}
-	selected := make([]CandidateScore, 0, minInt(limit, len(candidates)))
-	selectedIDs, coveredFacets, coveredSessions := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
-	for len(selected) < limit {
-		best, bestScore := -1, math.Inf(-1)
-		for index := range candidates {
-			candidate := candidates[index]
-			if _, ok := selectedIDs[candidate.MemoryID]; ok {
-				continue
-			}
-			maxSimilarity := 0.0
-			for _, prior := range selected {
-				similarity := cosineSimilarity(embeddings[candidate.MemoryID], embeddings[prior.MemoryID])
-				if candidate.Entry.SourceSessionID != "" && candidate.Entry.SourceSessionID == prior.Entry.SourceSessionID {
-					similarity = math.Max(similarity, 0.65)
-				}
-				maxSimilarity = math.Max(maxSimilarity, similarity)
-			}
-			facetGain := candidateFacetGain(candidate, opts.CoverageFacets, coveredFacets)
-			sourceGain := 0.0
-			if candidate.Entry.SourceSessionID != "" {
-				if _, seen := coveredSessions[candidate.Entry.SourceSessionID]; !seen {
-					sourceGain = 1
-				}
-			}
-			relevance := candidate.FusedScore * float64(maxInt(opts.RRFK, 1))
-			score := opts.MMRRelevanceWeight*relevance + opts.MMRNoveltyWeight*(1-maxSimilarity) +
-				opts.MMRFacetWeight*facetGain + opts.MMRSourceWeight*sourceGain
-			if score > bestScore {
-				best, bestScore = index, score
-			}
-		}
-		if best < 0 {
-			break
-		}
-		chosen := candidates[best]
-		selected = append(selected, chosen)
-		selectedIDs[chosen.MemoryID] = struct{}{}
-		if chosen.Entry.SourceSessionID != "" {
-			coveredSessions[chosen.Entry.SourceSessionID] = struct{}{}
-		}
-		markCandidateFacets(chosen, opts.CoverageFacets, coveredFacets)
-	}
-	return selected
-}
-
-func candidateFacetGain(candidate CandidateScore, facets []string, covered map[string]struct{}) float64 {
-	if len(facets) == 0 {
-		return 0
-	}
-	text := strings.ToLower(candidate.Entry.Title + " " + candidate.Entry.Summary + " " + candidate.Entry.Content + " " + strings.Join(candidate.Entry.Entities, " "))
-	gain := 0
-	for _, facet := range facets {
-		key := strings.ToLower(strings.TrimSpace(facet))
-		if key == "" {
-			continue
-		}
-		if _, seen := covered[key]; !seen && strings.Contains(text, key) {
-			gain++
-		}
-	}
-	return float64(gain) / float64(len(facets))
-}
-
-func markCandidateFacets(candidate CandidateScore, facets []string, covered map[string]struct{}) {
-	text := strings.ToLower(candidate.Entry.Title + " " + candidate.Entry.Summary + " " + candidate.Entry.Content + " " + strings.Join(candidate.Entry.Entities, " "))
-	for _, facet := range facets {
-		key := strings.ToLower(strings.TrimSpace(facet))
-		if key != "" && strings.Contains(text, key) {
-			covered[key] = struct{}{}
-		}
-	}
 }
 
 func candidateSlice(values map[string]*CandidateScore) []CandidateScore {
@@ -339,45 +280,6 @@ func candidateSlice(values map[string]*CandidateScore) []CandidateScore {
 		return result[i].FusedScore > result[j].FusedScore
 	})
 	return result
-}
-
-func selectWithMMR(candidates []CandidateScore, limit int, lambda float64, embeddings map[string][]float32) []CandidateScore {
-	if limit <= 0 || len(candidates) == 0 {
-		return nil
-	}
-	selected := make([]CandidateScore, 0, minInt(limit, len(candidates)))
-	selectedIDs := map[string]struct{}{}
-	for len(selected) < limit && len(selected) < len(candidates) {
-		best := -1
-		bestScore := math.Inf(-1)
-		for index := range candidates {
-			candidate := candidates[index]
-			if _, ok := selectedIDs[candidate.MemoryID]; ok {
-				continue
-			}
-			maxSimilarity := 0.0
-			for _, prior := range selected {
-				similarity := cosineSimilarity(embeddings[candidate.MemoryID], embeddings[prior.MemoryID])
-				if similarity == 0 {
-					similarity = lexicalSimilarity(candidate.Entry, prior.Entry)
-				}
-				if candidate.Entry.SourceSessionID != "" && candidate.Entry.SourceSessionID == prior.Entry.SourceSessionID {
-					similarity = math.Max(similarity, 0.65)
-				}
-				maxSimilarity = math.Max(maxSimilarity, similarity)
-			}
-			score := lambda*candidate.FusedScore - (1-lambda)*maxSimilarity/float64(60)
-			if score > bestScore {
-				best, bestScore = index, score
-			}
-		}
-		if best < 0 {
-			break
-		}
-		selected = append(selected, candidates[best])
-		selectedIDs[candidates[best].MemoryID] = struct{}{}
-	}
-	return selected
 }
 
 func cosineSimilarity(left, right []float32) float64 {
@@ -398,14 +300,30 @@ func cosineSimilarity(left, right []float32) float64 {
 }
 
 func lexicalSimilarity(left, right Entry) float64 {
-	return 0
+	leftTerms := coverageTerms(left.Title + " " + left.Content + " " + strings.Join(left.Entities, " "))
+	rightTerms := coverageTerms(right.Title + " " + right.Content + " " + strings.Join(right.Entities, " "))
+	if len(leftTerms) == 0 || len(rightTerms) == 0 {
+		return 0
+	}
+	intersection := 0
+	union := map[string]struct{}{}
+	for term := range leftTerms {
+		union[term] = struct{}{}
+		if _, ok := rightTerms[term]; ok {
+			intersection++
+		}
+	}
+	for term := range rightTerms {
+		union[term] = struct{}{}
+	}
+	return float64(intersection) / float64(len(union))
 }
 
 func documentFromEntry(entry Entry, text string) RetrievalDocument {
 	return RetrievalDocument{DocumentID: entry.MemoryID, Kind: entry.DocumentKind, ParentID: entry.ParentID,
 		Scope: Scope{Type: entry.ScopeType, Key: entry.ScopeKey}, SessionID: entry.SourceSessionID,
 		MessageID: entry.MessageID, Role: entry.Role, Text: text, OccurredAt: entry.OccurredAt,
-		ValidFrom: entry.ValidFrom, ValidUntil: entry.ValidUntil}
+		ValidFrom: entry.ValidFrom, ValidUntil: entry.ValidUntil, EpistemicStatus: entry.EpistemicStatus}
 }
 
 func estimateTokens(text string) int {

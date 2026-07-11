@@ -12,6 +12,7 @@ import (
 type MaintenanceResult struct {
 	Embedded        int `json:"embedded"`
 	ChunkEmbedded   int `json:"chunk_embedded"`
+	AtomEmbedded    int `json:"atom_embedded"`
 	SessionEmbedded int `json:"session_embedded"`
 	Enriched        int `json:"enriched"`
 	Consolidated    int `json:"consolidated"`
@@ -183,6 +184,29 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 	chunks, err := s.ChunksMissingEmbedding(ctx, embedder.Model(), limit)
 	if err != nil {
 		return result, err
+	}
+	atoms, err := s.AtomsMissingEmbedding(ctx, embedder.Model(), limit)
+	if err != nil {
+		return result, err
+	}
+	if len(atoms) > 0 {
+		texts := make([]string, len(atoms))
+		for index := range atoms {
+			texts[index] = atoms[index].Text
+		}
+		vectors, embedErr := embedder.Embed(ctx, texts, EmbeddingPassage)
+		if embedErr != nil {
+			return result, embedErr
+		}
+		for index, atom := range atoms {
+			if index >= len(vectors) {
+				break
+			}
+			if err := s.UpsertAtomEmbedding(ctx, atom.AtomID, embedder.Model(), atom.ContentHash, vectors[index]); err != nil {
+				return result, err
+			}
+			result.AtomEmbedded++
+		}
 	}
 	if len(chunks) > 0 {
 		texts := make([]string, len(chunks))
@@ -668,6 +692,6 @@ func firstString(values []string) string {
 }
 
 func (r MaintenanceResult) String() string {
-	return fmt.Sprintf("embedded=%d chunk_embedded=%d session_embedded=%d enriched=%d consolidated=%d linked=%d promoted=%d archived=%d",
-		r.Embedded, r.ChunkEmbedded, r.SessionEmbedded, r.Enriched, r.Consolidated, r.Linked, r.Promoted, r.Archived)
+	return fmt.Sprintf("embedded=%d chunk_embedded=%d atom_embedded=%d session_embedded=%d enriched=%d consolidated=%d linked=%d promoted=%d archived=%d",
+		r.Embedded, r.ChunkEmbedded, r.AtomEmbedded, r.SessionEmbedded, r.Enriched, r.Consolidated, r.Linked, r.Promoted, r.Archived)
 }

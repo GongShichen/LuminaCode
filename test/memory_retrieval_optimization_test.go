@@ -137,7 +137,7 @@ func TestInvalidMemoryWeightsAreReported(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	contents := `{"memory_mmr_relevance_weight":0.8,"memory_mmr_novelty_weight":0.2,"memory_mmr_facet_coverage_weight":0.2,"memory_mmr_source_coverage_weight":0.1}`
+	contents := `{"memory_coverage_relevance_weight":0.8,"memory_coverage_facet_weight":0.2,"memory_coverage_provenance_weight":0.2,"memory_coverage_source_weight":0.1,"memory_coverage_coherence_weight":0.1}`
 	if err := os.WriteFile(filepath.Join(configDir, "defaults.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
