@@ -264,6 +264,12 @@ func runMemoryCLI(args []string) error {
 			"embedding_execution_timeout_seconds": cfg.MemoryEmbeddingExecutionTimeout,
 			"coverage_max_facets":                 cfg.MemoryCoverageMaxFacets,
 			"coverage_completion_rounds":          cfg.MemoryCoverageCompletionRounds,
+			"coverage_support_target":             cfg.MemoryCoverageSupportTarget,
+			"coverage_residual_trigger":           cfg.MemoryCoverageResidualTrigger,
+			"coverage_min_marginal_gain":          cfg.MemoryCoverageMinMarginalGain,
+			"atom_structural_context_enabled":     cfg.MemoryAtomStructuralContextEnabled,
+			"atom_structural_context_max_tokens":  cfg.MemoryAtomStructuralContextTokens,
+			"query_expansion_additional_wait_ms":  cfg.MemoryQueryExpansionAdditionalWait,
 			"lifecycle_enabled":                   cfg.MemoryLifecycleEnabled,
 			"maintenance_interval_seconds":        cfg.MemoryMaintenanceIntervalSeconds,
 			"archive_value_threshold":             cfg.MemoryArchiveValueThreshold, "auto_hard_delete": false})

@@ -33,7 +33,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	// Configure the timeout in the DSN so every pooled connection waits for a
+	// short-lived WAL writer instead of immediately surfacing SQLITE_BUSY.
+	// PRAGMA busy_timeout executed once would only affect whichever connection
+	// the pool happened to use for migration.
+	dsn := path
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	dsn += separator + "_pragma=busy_timeout%3D5000"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +73,7 @@ func (s *Store) Close() error {
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
+		`PRAGMA busy_timeout=5000;`,
 		`CREATE TABLE IF NOT EXISTS memories (
 			memory_id TEXT PRIMARY KEY,
 			scope_type TEXT NOT NULL,
@@ -898,16 +909,38 @@ func scoreEntries(entries []Entry, opts SearchOptions) {
 }
 
 func sanitizeFTSQuery(query string) string {
-	var terms []string
+	var terms, fallback []string
 	for _, token := range strings.FieldsFunc(query, func(r rune) bool {
 		return !(r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '@' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r > 127)
 	}) {
 		token = strings.TrimSpace(strings.ReplaceAll(token, `"`, ""))
 		if token != "" {
-			terms = append(terms, `"`+token+`"`)
+			quoted := `"` + token + `"`
+			fallback = append(fallback, quoted)
+			if !isRetrievalStopword(token) {
+				terms = append(terms, quoted)
+			}
 		}
 	}
+	if len(terms) == 0 {
+		terms = fallback
+	}
 	return strings.Join(terms, " OR ")
+}
+
+var retrievalStopwords = map[string]struct{}{
+	"a": {}, "an": {}, "the": {}, "is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {},
+	"do": {}, "does": {}, "did": {}, "have": {}, "has": {}, "had": {}, "i": {}, "me": {}, "my": {}, "mine": {},
+	"you": {}, "your": {}, "yours": {}, "we": {}, "our": {}, "ours": {}, "he": {}, "she": {}, "it": {}, "its": {},
+	"they": {}, "their": {}, "them": {}, "this": {}, "that": {}, "these": {}, "those": {}, "what": {}, "which": {},
+	"who": {}, "whom": {}, "whose": {}, "where": {}, "when": {}, "why": {}, "how": {}, "of": {}, "in": {}, "on": {},
+	"at": {}, "for": {}, "from": {}, "by": {}, "with": {}, "and": {}, "or": {}, "but": {}, "if": {}, "then": {},
+	"than": {}, "to": {}, "as": {},
+}
+
+func isRetrievalStopword(value string) bool {
+	_, ok := retrievalStopwords[strings.ToLower(strings.TrimSpace(value))]
+	return ok
 }
 
 func toJSON(values []string) string {

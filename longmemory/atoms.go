@@ -3,8 +3,10 @@ package longmemory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,6 +31,7 @@ func BuildEvidenceAtoms(chunk EvidenceChunk, targetTokens, maxTokens int) []Evid
 		return nil
 	}
 	runes := []rune(text)
+	structures := atomStructureSpans(chunk, runes)
 	targetRunes, maxRunes := targetTokens*3, maxTokens*3
 	boundaries := atomBoundaries(runes, maxRunes)
 	start := 0
@@ -43,7 +46,7 @@ func BuildEvidenceAtoms(chunk EvidenceChunk, targetTokens, maxTokens int) []Evid
 			if boundary > end {
 				break
 			}
-			if atomHardBoundary(runes, boundary) || boundary >= target || end == len(runes) {
+			if atomHardBoundary(runes, boundary) || atomSpeechActBoundary(runes, start, boundary) || boundary >= target {
 				end = boundary
 				break
 			}
@@ -57,18 +60,246 @@ func BuildEvidenceAtoms(chunk EvidenceChunk, targetTokens, maxTokens int) []Evid
 			absoluteStart := chunk.StartRune + segmentStart
 			absoluteEnd := chunk.StartRune + segmentEnd
 			hash := StableID(chunk.ScopeType, chunk.ScopeKey, "atom-content", atomText)
-			atomID := StableID(chunk.ScopeType, chunk.ScopeKey, "atom:"+chunk.ChunkID,
+			atomID := StableID(chunk.ScopeType, chunk.ScopeKey, "atom:"+chunk.MessageID,
 				strings.Join([]string{chunk.MessageID, itoa(absoluteStart), itoa(absoluteEnd), hash}, "\x00"))
-			atoms = append(atoms, EvidenceAtom{AtomID: atomID, ChunkID: chunk.ChunkID,
+			atom := EvidenceAtom{AtomID: atomID, ChunkID: chunk.ChunkID,
 				MessageID: chunk.MessageID, SessionID: chunk.SessionID, ScopeType: chunk.ScopeType,
 				ScopeKey: chunk.ScopeKey, Role: chunk.Role, Text: atomText, StartRune: absoluteStart,
 				EndRune: absoluteEnd, OccurredAt: chunk.OccurredAt, ValidFrom: chunk.ValidFrom,
 				ValidUntil: chunk.ValidUntil, EpistemicStatus: defaultEpistemicStatus(chunk.Role, atomText),
-				ContentHash: hash})
+				ContentHash: hash, SequenceNo: len(atoms)}
+			applyAtomStructure(&atom, structures, segmentStart)
+			atom.ContentHash = StableID(chunk.ScopeType, chunk.ScopeKey, "atom-search-content",
+				strings.Join([]string{hash, atomStructurePrefix(atom)}, "\x00"))
+			atoms = append(atoms, atom)
 		}
 		start = end
 	}
 	return atoms
+}
+
+// atomSpeechActBoundary keeps a declarative assertion from being merged with
+// a following question (and vice versa). Epistemic status is assigned per
+// atom, so mixing both speech acts would misclassify the entire span.
+func atomSpeechActBoundary(runes []rune, start, boundary int) bool {
+	if boundary <= start || boundary >= len(runes) {
+		return false
+	}
+	currentQuestion := runes[boundary-1] == '?' || runes[boundary-1] == '？'
+	nextEnd := boundary
+	for nextEnd < len(runes) {
+		value := runes[nextEnd]
+		if value == '.' || value == '?' || value == '!' || value == '。' || value == '？' || value == '！' {
+			nextQuestion := value == '?' || value == '？'
+			return currentQuestion != nextQuestion
+		}
+		nextEnd++
+	}
+	return false
+}
+
+// BuildEvidenceAtomsForSpan cuts the original message once, then assigns each
+// atom to the chunk that contains it. Atomizing overlapping chunks separately
+// creates duplicate and mid-word evidence, so ingestion and backfill must use
+// this entry point whenever the source span is available.
+func BuildEvidenceAtomsForSpan(span EvidenceSpan, chunks []EvidenceChunk, targetTokens, maxTokens int) []EvidenceAtom {
+	span = normalizeEvidenceSpan(span)
+	if strings.TrimSpace(span.Text) == "" {
+		return nil
+	}
+	ordered := append([]EvidenceChunk(nil), chunks...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].StartRune == ordered[j].StartRune {
+			return ordered[i].EndRune < ordered[j].EndRune
+		}
+		return ordered[i].StartRune < ordered[j].StartRune
+	})
+	virtual := EvidenceChunk{ChunkID: "", SpanID: span.SpanID, ParentMemoryID: span.MemoryID,
+		ScopeType: span.ScopeType, ScopeKey: span.ScopeKey, SessionID: span.SessionID,
+		MessageID: span.MessageID, Role: span.Role, Text: span.Text, StartRune: span.StartRune,
+		EndRune: span.EndRune, OccurredAt: span.OccurredAt, ValidFrom: span.OccurredAt}
+	atoms := BuildEvidenceAtoms(virtual, targetTokens, maxTokens)
+	for index := range atoms {
+		for _, chunk := range ordered {
+			if atoms[index].StartRune >= chunk.StartRune && atoms[index].EndRune <= chunk.EndRune {
+				atoms[index].ChunkID = chunk.ChunkID
+				break
+			}
+		}
+		if atoms[index].ChunkID == "" {
+			for _, chunk := range ordered {
+				if atoms[index].StartRune >= chunk.StartRune && atoms[index].StartRune < chunk.EndRune {
+					atoms[index].ChunkID = chunk.ChunkID
+					break
+				}
+			}
+		}
+	}
+	return atoms
+}
+
+type atomStructureSpan struct {
+	start, end        int
+	containerID, kind string
+	parentID          string
+	ordinal           int
+	headingPath       []string
+}
+
+func atomStructureSpans(chunk EvidenceChunk, runes []rune) []atomStructureSpan {
+	var result []atomStructureSpan
+	headings := []string{}
+	lineStart, listStart, tableStart := 0, -1, -1
+	inCode, codeStart := false, -1
+	listOrdinal, tableOrdinal := 0, 0
+	for lineStart < len(runes) {
+		lineEnd := lineStart
+		for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+			lineEnd++
+		}
+		next := lineEnd
+		if next < len(runes) {
+			next++
+		}
+		line := strings.TrimSpace(string(runes[lineStart:lineEnd]))
+		if strings.HasPrefix(line, "```") {
+			if !inCode {
+				inCode, codeStart = true, lineStart
+			} else {
+				result = append(result, structuralSpan(chunk, codeStart, next, "code_block", 0, "", headings))
+				inCode, codeStart = false, -1
+			}
+			lineStart = next
+			continue
+		}
+		if inCode {
+			lineStart = next
+			continue
+		}
+		if level, title := headingLine(line); level > 0 {
+			if level <= len(headings) {
+				headings = headings[:level-1]
+			}
+			for len(headings) < level-1 {
+				headings = append(headings, "")
+			}
+			headings = append(headings, title)
+			result = append(result, structuralSpan(chunk, lineStart, next, "heading", level, "", headings))
+			listStart, tableStart, listOrdinal, tableOrdinal = -1, -1, 0, 0
+			lineStart = next
+			continue
+		}
+		if ordinal, ok := orderedListOrdinal(line); ok {
+			if listStart < 0 {
+				listStart, listOrdinal = lineStart, 0
+			}
+			listOrdinal++
+			if ordinal == 0 {
+				ordinal = listOrdinal
+			}
+			listID := StableID(chunk.ScopeType, chunk.ScopeKey, "atom-list",
+				strings.Join([]string{chunk.MessageID, itoa(chunk.StartRune + listStart)}, "\x00"))
+			result = append(result, structuralSpan(chunk, lineStart, next, "list_item", ordinal, listID, headings))
+			tableStart, tableOrdinal = -1, 0
+		} else if isUnorderedListLine(line) {
+			if listStart < 0 {
+				listStart, listOrdinal = lineStart, 0
+			}
+			listOrdinal++
+			listID := StableID(chunk.ScopeType, chunk.ScopeKey, "atom-list",
+				strings.Join([]string{chunk.MessageID, itoa(chunk.StartRune + listStart)}, "\x00"))
+			result = append(result, structuralSpan(chunk, lineStart, next, "list_item", listOrdinal, listID, headings))
+			tableStart, tableOrdinal = -1, 0
+		} else if strings.Count(line, "|") >= 2 {
+			if tableStart < 0 {
+				tableStart, tableOrdinal = lineStart, 0
+			}
+			tableOrdinal++
+			tableID := StableID(chunk.ScopeType, chunk.ScopeKey, "atom-table",
+				strings.Join([]string{chunk.MessageID, itoa(chunk.StartRune + tableStart)}, "\x00"))
+			result = append(result, structuralSpan(chunk, lineStart, next, "table_row", tableOrdinal, tableID, headings))
+			listStart, listOrdinal = -1, 0
+		} else {
+			kind := "paragraph"
+			if strings.HasPrefix(line, ">") {
+				kind = "quote"
+			}
+			result = append(result, structuralSpan(chunk, lineStart, next, kind, 0, "", headings))
+			listStart, tableStart, listOrdinal, tableOrdinal = -1, -1, 0, 0
+		}
+		lineStart = next
+	}
+	if inCode && codeStart >= 0 {
+		result = append(result, structuralSpan(chunk, codeStart, len(runes), "code_block", 0, "", headings))
+	}
+	return result
+}
+
+func structuralSpan(chunk EvidenceChunk, start, end int, kind string, ordinal int, parent string, headings []string) atomStructureSpan {
+	id := StableID(chunk.ScopeType, chunk.ScopeKey, "atom-container",
+		strings.Join([]string{chunk.MessageID, kind, itoa(chunk.StartRune + start), itoa(ordinal)}, "\x00"))
+	return atomStructureSpan{start: start, end: end, containerID: id, kind: kind,
+		parentID: parent, ordinal: ordinal, headingPath: append([]string(nil), headings...)}
+}
+
+func applyAtomStructure(atom *EvidenceAtom, structures []atomStructureSpan, relativeStart int) {
+	for _, structure := range structures {
+		if relativeStart < structure.start || relativeStart >= structure.end {
+			continue
+		}
+		atom.ContainerID, atom.ContainerKind = structure.containerID, structure.kind
+		atom.ContainerOrdinal, atom.ParentContainerID = structure.ordinal, structure.parentID
+		atom.HeadingPath = append([]string(nil), structure.headingPath...)
+		return
+	}
+}
+
+func headingLine(line string) (int, string) {
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 || level >= len(line) || line[level] != ' ' {
+		return 0, ""
+	}
+	return level, strings.TrimSpace(line[level:])
+}
+
+func orderedListOrdinal(line string) (int, bool) {
+	index := 0
+	for index < len(line) && line[index] >= '0' && line[index] <= '9' {
+		index++
+	}
+	if index == 0 || index >= len(line) || (line[index] != '.' && line[index] != ')') {
+		return 0, false
+	}
+	value, err := strconv.Atoi(line[:index])
+	return value, err == nil
+}
+
+func isUnorderedListLine(line string) bool {
+	return len(line) >= 2 && (line[0] == '-' || line[0] == '*' || line[0] == '+') && unicode.IsSpace(rune(line[1]))
+}
+
+func atomStructurePrefix(atom EvidenceAtom) string {
+	var parts []string
+	if len(atom.HeadingPath) > 0 {
+		parts = append(parts, "Under "+strings.Join(atom.HeadingPath, " / "))
+	}
+	if atom.ContainerKind == "list_item" && atom.ContainerOrdinal > 0 {
+		parts = append(parts, "List item "+itoa(atom.ContainerOrdinal))
+	} else if atom.ContainerKind != "" && atom.ContainerKind != "paragraph" {
+		parts = append(parts, strings.ReplaceAll(atom.ContainerKind, "_", " "))
+	}
+	return strings.Join(parts, ". ")
+}
+
+func atomSearchText(atom EvidenceAtom) string {
+	prefix := atomStructurePrefix(atom)
+	if prefix == "" {
+		return atom.Text
+	}
+	return prefix + ". " + atom.Text
 }
 
 func atomHardBoundary(runes []rune, boundary int) bool {
@@ -108,6 +339,9 @@ func atomBoundaries(runes []rune, maxRunes int) []int {
 		if inFence {
 			continue
 		}
+		if value == '.' && isListOrdinalPeriod(runes, index) {
+			continue
+		}
 		if value == '\n' || value == '.' || value == '?' || value == '!' || value == ';' ||
 			value == '。' || value == '？' || value == '！' || value == '；' {
 			boundaries = append(boundaries, index+1)
@@ -119,6 +353,17 @@ func atomBoundaries(runes []rune, maxRunes int) []int {
 	boundaries = append(boundaries, len(runes))
 	sort.Ints(boundaries)
 	return uniqueInts(boundaries)
+}
+
+func isListOrdinalPeriod(runes []rune, index int) bool {
+	if index <= 0 || index+1 >= len(runes) || !unicode.IsDigit(runes[index-1]) || !unicode.IsSpace(runes[index+1]) {
+		return false
+	}
+	start := index - 1
+	for start > 0 && unicode.IsDigit(runes[start-1]) {
+		start--
+	}
+	return start == 0 || runes[start-1] == '\n'
 }
 
 func trimRuneRange(runes []rune, start, end int) (int, int) {
@@ -173,13 +418,25 @@ func upsertEvidenceAtomTx(ctx context.Context, tx *sql.Tx, atom EvidenceAtom) er
 	if strings.TrimSpace(atom.AtomID) == "" || strings.TrimSpace(atom.Text) == "" {
 		return nil
 	}
+	var existingHash string
+	if err := tx.QueryRowContext(ctx, `SELECT content_hash FROM memory_evidence_atoms WHERE atom_id=?`, atom.AtomID).Scan(&existingHash); err == nil && existingHash == atom.ContentHash {
+		return nil
+	} else if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	headingPath, _ := json.Marshal(atom.HeadingPath)
 	_, err := tx.ExecContext(ctx, `INSERT INTO memory_evidence_atoms(atom_id, chunk_id, message_id,
-		session_id, scope_type, scope_key, role, text, start_rune, end_rune, occurred_at, valid_from,
-		valid_until, epistemic_status, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		session_id, scope_type, scope_key, role, text, start_rune, end_rune, sequence_no, container_id,
+		container_kind, container_ordinal, parent_container_id, heading_path_json, occurred_at, valid_from,
+		valid_until, epistemic_status, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(atom_id) DO UPDATE SET text=excluded.text, role=excluded.role,
-		epistemic_status=excluded.epistemic_status, content_hash=excluded.content_hash`, atom.AtomID, atom.ChunkID,
+		epistemic_status=excluded.epistemic_status, content_hash=excluded.content_hash,
+		sequence_no=excluded.sequence_no, container_id=excluded.container_id, container_kind=excluded.container_kind,
+		container_ordinal=excluded.container_ordinal, parent_container_id=excluded.parent_container_id,
+		heading_path_json=excluded.heading_path_json`, atom.AtomID, atom.ChunkID,
 		atom.MessageID, atom.SessionID, atom.ScopeType, atom.ScopeKey, atom.Role, atom.Text, atom.StartRune,
-		atom.EndRune, formatTime(atom.OccurredAt), formatTime(atom.ValidFrom), formatTime(atom.ValidUntil),
+		atom.EndRune, atom.SequenceNo, atom.ContainerID, atom.ContainerKind, atom.ContainerOrdinal,
+		atom.ParentContainerID, string(headingPath), formatTime(atom.OccurredAt), formatTime(atom.ValidFrom), formatTime(atom.ValidUntil),
 		atom.EpistemicStatus, atom.ContentHash)
 	if err != nil {
 		return err
@@ -188,7 +445,7 @@ func upsertEvidenceAtomTx(ctx context.Context, tx *sql.Tx, atom EvidenceAtom) er
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO memory_atom_fts(atom_id, session_id, message_id, role, text)
-		VALUES (?, ?, ?, ?, ?)`, atom.AtomID, atom.SessionID, atom.MessageID, atom.Role, atom.Text)
+		VALUES (?, ?, ?, ?, ?)`, atom.AtomID, atom.SessionID, atom.MessageID, atom.Role, atomSearchText(atom))
 	return err
 }
 
@@ -207,8 +464,62 @@ func (s *Store) AppendEvidenceAtoms(ctx context.Context, atoms []EvidenceAtom) e
 }
 
 func (s *Store) BackfillEvidenceAtoms(ctx context.Context, limit, targetTokens, maxTokens int) (int, error) {
+	query := `SELECT s.span_id, s.memory_id, s.scope_type, s.scope_key, s.session_id, s.message_id,
+		s.role, s.source_path, s.text, s.start_rune, s.end_rune, s.occurred_at, s.content_hash
+		FROM memory_evidence_spans s WHERE NOT EXISTS (
+			SELECT 1 FROM memory_evidence_atoms a WHERE a.message_id=s.message_id
+			AND a.scope_type=s.scope_type AND a.scope_key=s.scope_key)
+		ORDER BY s.occurred_at, s.span_id`
+	var args []any
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	var spans []EvidenceSpan
+	for rows.Next() {
+		var span EvidenceSpan
+		var occurredAt string
+		if scanErr := rows.Scan(&span.SpanID, &span.MemoryID, &span.ScopeType, &span.ScopeKey,
+			&span.SessionID, &span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune,
+			&span.EndRune, &occurredAt, &span.ContentHash); scanErr != nil {
+			rows.Close()
+			return 0, scanErr
+		}
+		span.OccurredAt = parseTime(occurredAt)
+		spans = append(spans, span)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	count := 0
+	for _, span := range spans {
+		chunks := BuildEvidenceChunks(span)
+		for _, atom := range BuildEvidenceAtomsForSpan(span, chunks, targetTokens, maxTokens) {
+			if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+				return count, err
+			}
+			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
+				FromID: atom.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+				return count, err
+			}
+			count++
+		}
+	}
+	return count, tx.Commit()
+}
+
+func (s *Store) BackfillAtomStructure(ctx context.Context, limit, targetTokens, maxTokens int) (int, error) {
 	query := `SELECT ` + chunkColumns + `, 0 FROM memory_evidence_chunks c
-		WHERE NOT EXISTS (SELECT 1 FROM memory_evidence_atoms a WHERE a.chunk_id=c.chunk_id)
+		WHERE EXISTS (SELECT 1 FROM memory_evidence_atoms a WHERE a.chunk_id=c.chunk_id AND a.container_id='')
 		ORDER BY c.occurred_at, c.chunk_id`
 	var args []any
 	if limit > 0 {
@@ -242,8 +553,100 @@ func (s *Store) BackfillEvidenceAtoms(ctx context.Context, limit, targetTokens, 
 			if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
 				return count, err
 			}
+			count++
+		}
+	}
+	return count, tx.Commit()
+}
+
+// RepairOverlappingEvidenceAtoms rebuilds only messages whose derived atoms
+// overlap. Raw spans and chunks remain untouched; the atom layer is a
+// reproducible index and can be repaired safely and idempotently.
+func (s *Store) RepairOverlappingEvidenceAtoms(ctx context.Context, limit, targetTokens, maxTokens int) (int, error) {
+	query := `SELECT DISTINCT s.span_id, s.memory_id, s.scope_type, s.scope_key, s.session_id, s.message_id,
+		s.role, s.source_path, s.text, s.start_rune, s.end_rune, s.occurred_at, s.content_hash
+		FROM memory_evidence_spans s WHERE EXISTS (
+			SELECT 1 FROM memory_evidence_atoms a1 JOIN memory_evidence_atoms a2
+			ON a1.scope_type=a2.scope_type AND a1.scope_key=a2.scope_key AND a1.message_id=a2.message_id
+			AND a1.atom_id<a2.atom_id AND a1.start_rune<a2.end_rune AND a2.start_rune<a1.end_rune
+			WHERE a1.scope_type=s.scope_type AND a1.scope_key=s.scope_key AND a1.message_id=s.message_id)
+		ORDER BY s.occurred_at, s.span_id`
+	var args []any
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	var spans []EvidenceSpan
+	for rows.Next() {
+		var span EvidenceSpan
+		var occurredAt string
+		if err := rows.Scan(&span.SpanID, &span.MemoryID, &span.ScopeType, &span.ScopeKey, &span.SessionID,
+			&span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune,
+			&occurredAt, &span.ContentHash); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		span.OccurredAt = parseTime(occurredAt)
+		spans = append(spans, span)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(spans) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	count := 0
+	for _, span := range spans {
+		var oldIDs []string
+		atomRows, queryErr := tx.QueryContext(ctx, `SELECT atom_id FROM memory_evidence_atoms
+			WHERE scope_type=? AND scope_key=? AND message_id=?`, span.ScopeType, span.ScopeKey, span.MessageID)
+		if queryErr != nil {
+			return count, queryErr
+		}
+		for atomRows.Next() {
+			var atomID string
+			if err := atomRows.Scan(&atomID); err != nil {
+				atomRows.Close()
+				return count, err
+			}
+			oldIDs = append(oldIDs, atomID)
+		}
+		if err := atomRows.Close(); err != nil {
+			return count, err
+		}
+		for _, atomID := range oldIDs {
+			for _, statement := range []string{
+				`DELETE FROM memory_atom_embeddings WHERE atom_id=?`,
+				`DELETE FROM memory_atom_entities WHERE atom_id=?`,
+				`DELETE FROM memory_atom_fts WHERE atom_id=?`,
+				`DELETE FROM memory_edges WHERE from_id=? OR to_id=?`,
+				`DELETE FROM memory_evidence_atoms WHERE atom_id=?`,
+			} {
+				statementArgs := []any{atomID}
+				if strings.Contains(statement, " OR ") {
+					statementArgs = append(statementArgs, atomID)
+				}
+				if _, err := tx.ExecContext(ctx, statement, statementArgs...); err != nil {
+					return count, err
+				}
+			}
+		}
+		chunks := BuildEvidenceChunks(span)
+		for _, atom := range BuildEvidenceAtomsForSpan(span, chunks, targetTokens, maxTokens) {
+			if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+				return count, err
+			}
 			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
-				FromID: chunk.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+				FromID: atom.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
 				return count, err
 			}
 			count++
@@ -252,8 +655,114 @@ func (s *Store) BackfillEvidenceAtoms(ctx context.Context, limit, targetTokens, 
 	return count, tx.Commit()
 }
 
+// RepairMixedSpeechActAtoms rebuilds derived atoms that combine declarative
+// statements with a trailing question. Source spans and chunks are immutable.
+func (s *Store) RepairMixedSpeechActAtoms(ctx context.Context, limit, targetTokens, maxTokens int) (int, error) {
+	query := `SELECT DISTINCT s.span_id, s.memory_id, s.scope_type, s.scope_key, s.session_id, s.message_id,
+		s.role, s.source_path, s.text, s.start_rune, s.end_rune, s.occurred_at, s.content_hash
+		FROM memory_evidence_spans s WHERE EXISTS (
+			SELECT 1 FROM memory_evidence_atoms a WHERE a.scope_type=s.scope_type AND a.scope_key=s.scope_key
+			AND a.message_id=s.message_id AND a.epistemic_status='questioned'
+			AND (instr(a.text, '.')>0 OR instr(a.text, '。')>0 OR instr(a.text, '!')>0 OR instr(a.text, '！')>0))
+		ORDER BY s.occurred_at, s.span_id`
+	var args []any
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	var spans []EvidenceSpan
+	for rows.Next() {
+		var span EvidenceSpan
+		var occurredAt string
+		if err := rows.Scan(&span.SpanID, &span.MemoryID, &span.ScopeType, &span.ScopeKey, &span.SessionID,
+			&span.MessageID, &span.Role, &span.SourcePath, &span.Text, &span.StartRune, &span.EndRune,
+			&occurredAt, &span.ContentHash); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		span.OccurredAt = parseTime(occurredAt)
+		spans = append(spans, span)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(spans) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	count := 0
+	for _, span := range spans {
+		rebuilt, rebuildErr := replaceSpanAtomsTx(ctx, tx, span, targetTokens, maxTokens)
+		if rebuildErr != nil {
+			return count, rebuildErr
+		}
+		count += rebuilt
+	}
+	return count, tx.Commit()
+}
+
+func replaceSpanAtomsTx(ctx context.Context, tx *sql.Tx, span EvidenceSpan, targetTokens, maxTokens int) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT atom_id FROM memory_evidence_atoms
+		WHERE scope_type=? AND scope_key=? AND message_id=?`, span.ScopeType, span.ScopeKey, span.MessageID)
+	if err != nil {
+		return 0, err
+	}
+	var oldIDs []string
+	for rows.Next() {
+		var atomID string
+		if err := rows.Scan(&atomID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		oldIDs = append(oldIDs, atomID)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, atomID := range oldIDs {
+		statements := []string{
+			`DELETE FROM memory_atom_embeddings WHERE atom_id=?`,
+			`DELETE FROM memory_atom_entities WHERE atom_id=?`,
+			`DELETE FROM memory_atom_fts WHERE atom_id=?`,
+			`DELETE FROM memory_edges WHERE from_id=? OR to_id=?`,
+			`DELETE FROM memory_evidence_atoms WHERE atom_id=?`,
+		}
+		for _, statement := range statements {
+			statementArgs := []any{atomID}
+			if strings.Contains(statement, " OR ") {
+				statementArgs = append(statementArgs, atomID)
+			}
+			if _, err := tx.ExecContext(ctx, statement, statementArgs...); err != nil {
+				return 0, err
+			}
+		}
+	}
+	count := 0
+	chunks := BuildEvidenceChunks(span)
+	for _, atom := range BuildEvidenceAtomsForSpan(span, chunks, targetTokens, maxTokens) {
+		if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+			return count, err
+		}
+		if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
+			FromID: atom.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
+}
+
 const atomColumns = `a.atom_id, a.chunk_id, a.message_id, a.session_id, a.scope_type, a.scope_key,
-	a.role, a.text, a.start_rune, a.end_rune, a.occurred_at, a.valid_from, a.valid_until,
+	a.role, a.text, a.start_rune, a.end_rune, a.sequence_no, a.container_id, a.container_kind,
+	a.container_ordinal, a.parent_container_id, a.heading_path_json, a.occurred_at, a.valid_from, a.valid_until,
 	a.epistemic_status, a.content_hash`
 
 const activeAtomParentClause = `EXISTS (SELECT 1 FROM memory_evidence_chunks parent_chunk
@@ -261,18 +770,25 @@ const activeAtomParentClause = `EXISTS (SELECT 1 FROM memory_evidence_chunks par
 
 func scanAtom(scanner interface{ Scan(...any) error }) (EvidenceAtom, float64, error) {
 	var atom EvidenceAtom
-	var occurredAt, validFrom, validUntil string
+	var occurredAt, validFrom, validUntil, headingPath string
 	var score float64
 	err := scanner.Scan(&atom.AtomID, &atom.ChunkID, &atom.MessageID, &atom.SessionID, &atom.ScopeType,
-		&atom.ScopeKey, &atom.Role, &atom.Text, &atom.StartRune, &atom.EndRune, &occurredAt, &validFrom,
+		&atom.ScopeKey, &atom.Role, &atom.Text, &atom.StartRune, &atom.EndRune, &atom.SequenceNo,
+		&atom.ContainerID, &atom.ContainerKind, &atom.ContainerOrdinal, &atom.ParentContainerID, &headingPath,
+		&occurredAt, &validFrom,
 		&validUntil, &atom.EpistemicStatus, &atom.ContentHash, &score)
+	_ = json.Unmarshal([]byte(headingPath), &atom.HeadingPath)
 	atom.OccurredAt, atom.ValidFrom, atom.ValidUntil = parseTime(occurredAt), parseTime(validFrom), parseTime(validUntil)
 	return atom, score, err
 }
 
 func atomEntry(atom EvidenceAtom, score float64, reason string) Entry {
+	title := "Message " + atom.MessageID
+	if prefix := atomStructurePrefix(atom); prefix != "" {
+		title += " (" + prefix + ")"
+	}
 	return Entry{MemoryID: atom.AtomID, ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
-		MemoryType: TypeEpisodic, Title: "Message " + atom.MessageID, Content: atom.Text, Summary: atom.Text,
+		MemoryType: TypeEpisodic, Title: title, Content: atom.Text, Summary: atom.Text,
 		SourceSessionID: atom.SessionID, SourceMessageIDs: []string{atom.MessageID}, CreatedAt: atom.OccurredAt,
 		UpdatedAt: atom.OccurredAt, ValidFrom: atom.ValidFrom, ValidUntil: atom.ValidUntil, Status: StatusActive,
 		Score: score, MatchReason: reason, DocumentKind: "atom", ParentID: atom.ChunkID, MessageID: atom.MessageID,
@@ -415,6 +931,7 @@ func (s *Store) SearchAtomsEntity(ctx context.Context, terms []string, scopes []
 }
 
 func (s *Store) SearchAtomsTemporal(ctx context.Context, constraints []TemporalConstraint, scopes []Scope, sessionID string, limit int) ([]Entry, error) {
+	constraints = effectiveTemporalConstraints(constraints)
 	if len(constraints) == 0 {
 		return nil, nil
 	}
@@ -452,6 +969,16 @@ func (s *Store) SearchAtomsTemporal(ctx context.Context, constraints []TemporalC
 		entries = entries[:limit]
 	}
 	return entries, rows.Err()
+}
+
+func effectiveTemporalConstraints(constraints []TemporalConstraint) []TemporalConstraint {
+	result := make([]TemporalConstraint, 0, len(constraints))
+	for _, constraint := range constraints {
+		if !constraint.From.IsZero() || !constraint.To.IsZero() || !constraint.At.IsZero() {
+			result = append(result, constraint)
+		}
+	}
+	return result
 }
 
 func sortedEntryMap(best map[string]Entry, limit int) []Entry {

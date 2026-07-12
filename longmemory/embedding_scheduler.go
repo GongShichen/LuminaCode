@@ -72,8 +72,7 @@ func SharedEmbeddingScheduler(base Embedder, opts EmbeddingSchedulerOptions) Emb
 	if loaded {
 		return actual.(*ScheduledEmbedder)
 	}
-	go scheduler.run(scheduler.queryQueue, EmbeddingQuery)
-	go scheduler.run(scheduler.passQueue, EmbeddingPassage)
+	go scheduler.runCoordinator()
 	return scheduler
 }
 
@@ -99,6 +98,18 @@ func (s *ScheduledEmbedder) Dimensions() int { return s.base.Dimensions() }
 func (s *ScheduledEmbedder) Embed(ctx context.Context, texts []string, kind EmbeddingKind) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
+	}
+	if len(texts) > s.opts.BatchSize {
+		vectors := make([][]float32, 0, len(texts))
+		for start := 0; start < len(texts); start += s.opts.BatchSize {
+			end := minInt(start+s.opts.BatchSize, len(texts))
+			batch, err := s.Embed(ctx, texts[start:end], kind)
+			if err != nil {
+				return nil, err
+			}
+			vectors = append(vectors, batch...)
+		}
+		return vectors, nil
 	}
 	key := embeddingCacheKey(kind, texts)
 	if kind == EmbeddingQuery {
@@ -129,29 +140,60 @@ func (s *ScheduledEmbedder) Embed(ctx context.Context, texts []string, kind Embe
 	}
 }
 
-func (s *ScheduledEmbedder) run(queue <-chan embeddingRequest, kind EmbeddingKind) {
-	for first := range queue {
-		batch := []embeddingRequest{first}
-		textCount := len(first.texts)
-		timer := time.NewTimer(s.opts.BatchWait)
-	collect:
-		for textCount < s.opts.BatchSize {
+func (s *ScheduledEmbedder) runCoordinator() {
+	queryStreak := 0
+	for {
+		var first embeddingRequest
+		var kind EmbeddingKind
+		if queryStreak >= 4 {
 			select {
-			case request := <-queue:
-				batch = append(batch, request)
-				textCount += len(request.texts)
-			case <-timer.C:
-				break collect
-			}
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
+			case first = <-s.passQueue:
+				kind, queryStreak = EmbeddingPassage, 0
 			default:
 			}
 		}
-		s.executeBatch(batch, kind)
+		if first.result == nil {
+			select {
+			case first = <-s.queryQueue:
+				kind, queryStreak = EmbeddingQuery, queryStreak+1
+			default:
+				select {
+				case first = <-s.queryQueue:
+					kind, queryStreak = EmbeddingQuery, queryStreak+1
+				case first = <-s.passQueue:
+					kind, queryStreak = EmbeddingPassage, 0
+				}
+			}
+		}
+		queue := s.passQueue
+		if kind == EmbeddingQuery {
+			queue = s.queryQueue
+		}
+		s.collectAndExecute(first, queue, kind)
 	}
+}
+
+func (s *ScheduledEmbedder) collectAndExecute(first embeddingRequest, queue <-chan embeddingRequest, kind EmbeddingKind) {
+	batch := []embeddingRequest{first}
+	textCount := len(first.texts)
+	timer := time.NewTimer(s.opts.BatchWait)
+collect:
+	for textCount < s.opts.BatchSize {
+		select {
+		case request := <-queue:
+			batch = append(batch, request)
+			textCount += len(request.texts)
+		case <-timer.C:
+			break collect
+		}
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	s.executeBatch(batch, kind)
 }
 
 func (s *ScheduledEmbedder) executeBatch(batch []embeddingRequest, kind EmbeddingKind) {
@@ -204,6 +246,13 @@ func EmbeddingStats(embedder Embedder) EmbeddingTrace {
 		return scheduler.Stats()
 	}
 	return EmbeddingTrace{}
+}
+
+func EmbeddingStatsDelta(before, after EmbeddingTrace) EmbeddingTrace {
+	return EmbeddingTrace{QueueWaitMS: after.QueueWaitMS - before.QueueWaitMS,
+		ExecutionMS: after.ExecutionMS - before.ExecutionMS, Batches: after.Batches - before.Batches,
+		Texts: after.Texts - before.Texts, CacheHits: after.CacheHits - before.CacheHits,
+		Errors: after.Errors - before.Errors}
 }
 
 func embeddingCacheKey(kind EmbeddingKind, texts []string) string {

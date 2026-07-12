@@ -49,17 +49,25 @@ func (s *Store) retrievalCacheKey(ctx context.Context, query MemoryQuery, expans
 	}
 	sort.Strings(excludeIDs)
 	optionKey := struct {
-		FTS, Vector, Graph, Hops, RRFK, MaxItems, Sessions, ChunksPerSession, SessionChunks     int
-		CoverageRelevance, CoverageFacet, CoverageProvenance, CoverageSource, CoverageCoherence float64
-		CoreTokens, TargetTokens, MaxTokens, Neighbors                                          int
-		CanonicalEntity, CanonicalEvent                                                         bool
-		Exclude                                                                                 []string
+		FTS, Vector, Graph, Hops, RRFK, MaxItems, AtomMax, Sessions, ChunksPerSession, SessionChunks int
+		CoverageMaxFacets, CoverageRounds                                                            int
+		CoverageRelevance, CoverageFacet, CoverageProvenance, CoverageSource, CoverageCoherence      float64
+		CoverageTarget, CoverageResidual, CoverageMarginal                                           float64
+		EvidencePrimary, EvidenceCompletion, EvidenceContext                                         float64
+		CoreTokens, TargetTokens, MaxTokens, Neighbors, StructuralTokens                             int
+		CanonicalEntity, CanonicalEvent, StructuralContext                                           bool
+		ExpansionModel, ExpansionSchema                                                              string
+		Exclude                                                                                      []string
 	}{opts.FTSCandidates, opts.VectorCandidates, opts.GraphCandidates, opts.GraphMaxHops, opts.RRFK,
-		opts.MaxItems, opts.SessionCandidates, opts.ChunksPerSession, opts.SessionChunkCandidates,
+		opts.MaxItems, opts.AtomMaxSelected, opts.SessionCandidates, opts.ChunksPerSession, opts.SessionChunkCandidates,
+		opts.CoverageMaxFacets, opts.CoverageCompletionRounds,
 		opts.CoverageRelevanceWeight, opts.CoverageFacetWeight, opts.CoverageProvenanceWeight,
-		opts.CoverageSourceWeight, opts.CoverageCoherenceWeight,
-		opts.CoreContextTokens, opts.TargetContextTokens, opts.MaxContextTokens, opts.NeighborChunks,
-		opts.CanonicalEntityEnabled, opts.CanonicalEventEnabled, excludeIDs}
+		opts.CoverageSourceWeight, opts.CoverageCoherenceWeight, opts.CoverageSupportTarget,
+		opts.CoverageResidualTrigger, opts.CoverageMinMarginalGain,
+		opts.EvidencePrimaryBudgetRatio, opts.EvidenceCompletionBudgetRatio, opts.EvidenceContextBudgetRatio,
+		opts.CoreContextTokens, opts.TargetContextTokens, opts.MaxContextTokens, opts.NeighborChunks, opts.StructuralContextTokens,
+		opts.CanonicalEntityEnabled, opts.CanonicalEventEnabled, opts.StructuralContextEnabled,
+		opts.ExpansionModel, "structured-facets", excludeIDs}
 	optionsJSON, _ := json.Marshal(optionKey)
 	bucket := query.Timestamp.UTC().Truncate(time.Minute).Format(time.RFC3339)
 	scopeKey := string(scopeJSON)

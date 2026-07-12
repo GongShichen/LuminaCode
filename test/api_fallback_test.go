@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"LuminaCode/api"
 	"LuminaCode/config"
@@ -21,6 +22,23 @@ type fallbackClientStub struct {
 	completeErr   error
 	streamCalls   int
 	completeCalls int
+}
+
+type structuredClientStub struct {
+	fallbackClientStub
+	response api.Response
+	err      error
+	wait     bool
+	calls    int
+}
+
+func (stub *structuredClientStub) CompleteStructured(ctx context.Context, _ string, _ []map[string]any, _ api.StructuredCompletionOptions) (api.Response, error) {
+	stub.calls++
+	if stub.wait {
+		<-ctx.Done()
+		return api.Response{}, ctx.Err()
+	}
+	return stub.response, stub.err
 }
 
 func (s *fallbackClientStub) StreamChat(context.Context, string, []map[string]any, []map[string]any, *api.LLMRequestOptions) <-chan api.EventResult {
@@ -112,6 +130,25 @@ func TestFallbackClientCompleteAndCombinedFailure(t *testing.T) {
 	_, err = client.Complete(context.Background(), "", nil, api.CompleteOptions{})
 	if err == nil || !strings.Contains(err.Error(), "primary model failed") || !strings.Contains(err.Error(), "fallback model failed") {
 		t.Fatalf("combined error lost a provider failure: %v", err)
+	}
+}
+
+func TestStructuredFallbackRetainsTotalDeadlineBudget(t *testing.T) {
+	primary := &structuredClientStub{wait: true}
+	secondary := &structuredClientStub{response: api.Response{ToolCalls: []map[string]any{{
+		"name": "ExpandMemoryQuery", "input": map[string]any{"queries": []any{"Aurora"}},
+	}}}}
+	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
+	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	response, err := client.CompleteStructured(ctx, "", nil, api.StructuredCompletionOptions{RequiredTool: "ExpandMemoryQuery"})
+	if err != nil || len(response.ToolCalls) != 1 {
+		t.Fatalf("structured fallback did not use remaining deadline: response=%#v error=%v", response, err)
+	}
+	if primary.calls != 1 || secondary.calls != 1 || time.Since(started) >= 850*time.Millisecond {
+		t.Fatalf("structured fallback exhausted the total deadline: primary=%d fallback=%d elapsed=%s",
+			primary.calls, secondary.calls, time.Since(started))
 	}
 }
 

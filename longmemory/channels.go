@@ -78,7 +78,10 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 	if limit <= 0 {
 		limit = 40
 	}
-	terms := normalizeEntityTerms(append(append([]string(nil), entities...), queries...))
+	terms := normalizeEntityTerms(entities)
+	if len(terms) == 0 {
+		terms = normalizeEntityLiterals(queries)
+	}
 	if len(terms) == 0 {
 		return nil, nil
 	}
@@ -120,6 +123,34 @@ func (s *Store) SearchEntities(ctx context.Context, queries, entities []string, 
 		entries = entries[:limit]
 	}
 	return entries, nil
+}
+
+// normalizeEntityLiterals keeps only query tokens that have an entity-like
+// shape. Free-form query words belong to lexical retrieval and must not become
+// a second structured-entity vote.
+func normalizeEntityLiterals(values []string) []string {
+	var literals []string
+	for _, value := range values {
+		for _, token := range strings.Fields(value) {
+			token = strings.Trim(token, "\"'`()[]{}<>,;!?")
+			if strings.ContainsAny(token, "/\\:@") || strings.Contains(token, "_") || hasMixedAlphaNumeric(token) {
+				literals = append(literals, token)
+			}
+		}
+	}
+	return normalizeEntityTerms(literals)
+}
+
+func hasMixedAlphaNumeric(value string) bool {
+	hasLetter, hasDigit := false, false
+	for _, current := range value {
+		if current >= '0' && current <= '9' {
+			hasDigit = true
+		} else if (current >= 'a' && current <= 'z') || (current >= 'A' && current <= 'Z') || current > 127 {
+			hasLetter = true
+		}
+	}
+	return hasLetter && hasDigit
 }
 
 func (s *Store) SearchSessions(ctx context.Context, queries []string, scopes []Scope, limit int) ([]Entry, error) {
@@ -363,6 +394,7 @@ func (s *Store) SearchTemporal(ctx context.Context, queries []string, constraint
 	if limit <= 0 {
 		limit = 40
 	}
+	constraints = effectiveTemporalConstraints(constraints)
 	if len(constraints) == 0 {
 		return nil, nil
 	}

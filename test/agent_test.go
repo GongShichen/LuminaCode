@@ -924,6 +924,7 @@ func TestCoreQueryLoopInjectsPendingTaskNotificationsLikePython(t *testing.T) {
 	cfg.APIMaxTokens = 256
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
+	cfg.LongTermMemoryEnabled = false
 
 	engine := agent.NewCoreExecutionEngine(&cfg)
 	workerState := agent.NewAgentState()

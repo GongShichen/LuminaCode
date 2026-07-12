@@ -169,7 +169,9 @@ func (s *Store) CommitCanonicalMerge(ctx context.Context, merge CanonicalMerge) 
 func (s *Store) ScheduleBackfill(ctx context.Context, jobType string) error {
 	allowed := map[string]bool{"canonical_entity_backfill": true, "canonical_event_backfill": true,
 		"session_chunk_index_backfill": true, "chunk_embedding_backfill": true,
-		"evidence_atom_backfill": true, "atom_embedding_backfill": true}
+		"evidence_atom_backfill": true, "atom_structure_backfill": true,
+		"atom_embedding_backfill": true, "atom_structure_embedding_backfill": true,
+		"atom_overlap_repair_backfill": true, "atom_speech_act_repair_backfill": true}
 	if !allowed[jobType] {
 		return fmt.Errorf("unsupported memory backfill job %q", jobType)
 	}
@@ -245,8 +247,21 @@ func (s *Store) RunBackfillJob(ctx context.Context, job Job) error {
 	case "evidence_atom_backfill":
 		_, err := s.BackfillEvidenceAtoms(ctx, 0, 96, 160)
 		return err
+	case "atom_structure_backfill":
+		_, err := s.BackfillAtomStructure(ctx, 0, 96, 160)
+		return err
+	case "atom_overlap_repair_backfill":
+		_, err := s.RepairOverlappingEvidenceAtoms(ctx, 0, 96, 160)
+		return err
+	case "atom_speech_act_repair_backfill":
+		_, err := s.RepairMixedSpeechActAtoms(ctx, 0, 96, 160)
+		return err
 	case "atom_embedding_backfill":
 		return nil // RunMaintenance consumes the missing atom embedding index.
+	case "atom_structure_embedding_backfill":
+		_, err := s.db.ExecContext(ctx, `DELETE FROM memory_atom_embeddings WHERE atom_id IN
+			(SELECT atom_id FROM memory_evidence_atoms WHERE container_id<>'')`)
+		return err
 	default:
 		return fmt.Errorf("unsupported memory backfill job %q", job.Kind)
 	}

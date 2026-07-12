@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type FallbackClientConfig struct {
@@ -29,6 +31,7 @@ type FallbackLLMClient struct {
 }
 
 var _ LLMClient = (*FallbackLLMClient)(nil)
+var _ StructuredCompletionClient = (*FallbackLLMClient)(nil)
 
 type ModelFallbackError struct {
 	Primary  error
@@ -110,6 +113,129 @@ func (c *FallbackLLMClient) Complete(
 		return "", ModelFallbackError{Primary: err, Fallback: fallbackErr}
 	}
 	return fallbackText, nil
+}
+
+func (c *FallbackLLMClient) CompleteStructured(
+	ctx context.Context,
+	systemPrompt string,
+	messages []map[string]any,
+	opts StructuredCompletionOptions,
+) (Response, error) {
+	primary, primaryOK := c.primary.(StructuredCompletionClient)
+	fallback, fallbackOK := c.fallback.(StructuredCompletionClient)
+	if !primaryOK {
+		return c.completeStructuredFallback(ctx, systemPrompt, messages, opts,
+			errors.New("primary client does not support structured completion"))
+	}
+	if !fallbackOK {
+		response, err := primary.CompleteStructured(ctx, systemPrompt, messages, opts)
+		if err == nil && structuredResponseSatisfies(response, opts.RequiredTool) {
+			return response, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("primary model did not return required structured output %q", opts.RequiredTool)
+		}
+		return Response{}, ModelFallbackError{Primary: err,
+			Fallback: errors.New("fallback client does not support structured completion")}
+	}
+	type completionResult struct {
+		response Response
+		err      error
+		primary  bool
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan completionResult, 2)
+	call := func(client StructuredCompletionClient, primary bool, prompt string, callOpts StructuredCompletionOptions) {
+		response, err := client.CompleteStructured(runCtx, prompt, messages, callOpts)
+		if err == nil && !structuredResponseSatisfies(response, opts.RequiredTool) {
+			err = fmt.Errorf("model did not return required structured output %q", opts.RequiredTool)
+		}
+		results <- completionResult{response: response, err: err, primary: primary}
+	}
+	go call(primary, true, systemPrompt, opts)
+	fallbackOpts := opts
+	fallbackOpts.Tools = nil
+	fallbackOpts.RequiredTool = ""
+	fallbackPrompt := systemPrompt + " If tool calling is unavailable, return only the strict JSON object that would be the tool input, without markdown."
+	delay := 500 * time.Millisecond
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if candidate := remaining / 8; candidate > 0 && candidate < delay {
+			delay = candidate
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	fallbackStarted := false
+	var primaryErr, fallbackErr error
+	for completed := 0; completed < 2; {
+		select {
+		case result := <-results:
+			completed++
+			if result.err == nil {
+				return result.response, nil
+			}
+			if result.primary {
+				primaryErr = result.err
+				if !fallbackStarted {
+					fallbackStarted = true
+					go call(fallback, false, fallbackPrompt, fallbackOpts)
+				}
+			} else {
+				fallbackErr = result.err
+			}
+		case <-timer.C:
+			if !fallbackStarted {
+				fallbackStarted = true
+				go call(fallback, false, fallbackPrompt, fallbackOpts)
+			}
+		case <-ctx.Done():
+			if primaryErr == nil {
+				primaryErr = ctx.Err()
+			}
+			if fallbackErr == nil {
+				fallbackErr = ctx.Err()
+			}
+			return Response{}, ModelFallbackError{Primary: primaryErr, Fallback: fallbackErr}
+		}
+		if completed == 1 && !fallbackStarted {
+			continue
+		}
+	}
+	return Response{}, ModelFallbackError{Primary: primaryErr, Fallback: fallbackErr}
+}
+
+func (c *FallbackLLMClient) completeStructuredFallback(ctx context.Context, systemPrompt string,
+	messages []map[string]any, opts StructuredCompletionOptions, primaryErr error) (Response, error) {
+	fallback, ok := c.fallback.(StructuredCompletionClient)
+	if !ok {
+		return Response{}, ModelFallbackError{Primary: primaryErr,
+			Fallback: errors.New("fallback client does not support structured completion")}
+	}
+	response, err := fallback.CompleteStructured(ctx, systemPrompt, messages, opts)
+	if err == nil && structuredResponseSatisfies(response, opts.RequiredTool) {
+		return response, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("fallback model did not return required structured output %q", opts.RequiredTool)
+	}
+	return Response{}, ModelFallbackError{Primary: primaryErr, Fallback: err}
+}
+
+func structuredResponseSatisfies(response Response, requiredTool string) bool {
+	if strings.TrimSpace(requiredTool) == "" {
+		return strings.TrimSpace(response.Text) != "" || len(response.ToolCalls) > 0
+	}
+	for _, call := range response.ToolCalls {
+		if strings.EqualFold(stringValue(call["name"]), requiredTool) {
+			return true
+		}
+	}
+	text := strings.TrimSpace(response.Text)
+	text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "```json"), "```"))
+	var object map[string]any
+	return json.Unmarshal([]byte(text), &object) == nil && object != nil
 }
 
 func (c *FallbackLLMClient) StreamChat(

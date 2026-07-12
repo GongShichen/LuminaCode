@@ -285,7 +285,9 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 				}
 			}
 		}
-		backfillJobs, _ := store.ClaimJobs(ctx, []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "evidence_atom_backfill"}, 8)
+		backfillJobs, _ := store.ClaimJobs(ctx, []string{"canonical_entity_backfill", "canonical_event_backfill",
+			"session_chunk_index_backfill", "evidence_atom_backfill", "atom_structure_backfill",
+			"atom_structure_embedding_backfill", "atom_overlap_repair_backfill", "atom_speech_act_repair_backfill"}, 8)
 		for _, job := range backfillJobs {
 			if err := store.RunBackfillJob(ctx, job); err != nil {
 				_ = store.RetryJob(context.WithoutCancel(ctx), job.JobID, err, time.Minute)
@@ -302,7 +304,8 @@ func (s *DaemonServer) startMemoryMaintenance(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "lumina-backend memory maintenance: %v\n", err)
 			return
 		}
-		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "chunk_embedding_backfill", "atom_embedding_backfill", "consolidation", "migration_backfill"}, 32)
+		jobs, _ := store.ClaimJobs(ctx, []string{"embedding_backfill", "chunk_embedding_backfill", "atom_embedding_backfill",
+			"consolidation", "migration_backfill"}, 32)
 		scheduled := longmemory.SharedEmbeddingScheduler(embedder, longmemory.EmbeddingSchedulerOptions{
 			BatchSize: cfg.MemoryEmbeddingBatchSize, BatchWait: time.Duration(cfg.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
 			QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
@@ -983,6 +986,11 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			CoverageProvenanceWeight:      cfg.MemoryCoverageProvenanceWeight,
 			CoverageSourceWeight:          cfg.MemoryCoverageSourceWeight,
 			CoverageCoherenceWeight:       cfg.MemoryCoverageCoherenceWeight,
+			CoverageSupportTarget:         cfg.MemoryCoverageSupportTarget,
+			CoverageResidualTrigger:       cfg.MemoryCoverageResidualTrigger,
+			CoverageMinMarginalGain:       cfg.MemoryCoverageMinMarginalGain,
+			StructuralContextEnabled:      cfg.MemoryAtomStructuralContextEnabled,
+			StructuralContextTokens:       cfg.MemoryAtomStructuralContextTokens,
 			EvidencePrimaryBudgetRatio:    cfg.MemoryEvidencePrimaryBudgetRatio,
 			EvidenceCompletionBudgetRatio: cfg.MemoryEvidenceCompletionBudgetRatio,
 			EvidenceContextBudgetRatio:    cfg.MemoryEvidenceContextBudgetRatio,

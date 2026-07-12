@@ -65,6 +65,22 @@ type CompleteOptions struct {
 	Tools     []map[string]any
 }
 
+type StructuredCompletionOptions struct {
+	MaxTokens       int
+	Tools           []map[string]any
+	RequiredTool    string
+	DisableThinking bool
+}
+
+type StructuredCompletionClient interface {
+	CompleteStructured(
+		ctx context.Context,
+		systemPrompt string,
+		messages []map[string]any,
+		opts StructuredCompletionOptions,
+	) (Response, error)
+}
+
 type LLMClient interface {
 	StreamChat(
 		ctx context.Context,
@@ -98,6 +114,11 @@ func isOpenAIModel(model string) bool {
 
 func isOpenAICompatibleModel(model string) bool {
 	return isDeepSeekModel(model) || isOpenAIModel(model)
+}
+
+func supportsThinkingControl(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "deepseek") || strings.HasPrefix(model, "mimo")
 }
 
 func normalizeAPIType(apiType string) string {
@@ -291,6 +312,16 @@ type AnthropicClient struct {
 
 var _ LLMClient = (*AnthropicClient)(nil)
 
+func (c *AnthropicClient) buildHeaders() map[string]string {
+	headers := map[string]string{"anthropic-version": "2023-06-01", "content-type": "application/json"}
+	if isDeepSeekModel(c.Model) || strings.Contains(strings.ToLower(c.BaseURL), "api.deepseek.com") {
+		headers["Authorization"] = "Bearer " + c.APIKey
+	} else {
+		headers["x-api-key"] = c.APIKey
+	}
+	return headers
+}
+
 func (c *AnthropicClient) Complete(
 	ctx context.Context,
 	systemPrompt string,
@@ -298,11 +329,7 @@ func (c *AnthropicClient) Complete(
 	opts CompleteOptions,
 ) (string, error) {
 	url := c.BaseURL + "/v1/messages"
-	headers := map[string]string{
-		"x-api-key":         c.APIKey,
-		"anthropic-version": "2023-06-01",
-		"content-type":      "application/json",
-	}
+	headers := c.buildHeaders()
 
 	systemBlock := []map[string]any{
 		{
@@ -351,6 +378,64 @@ func (c *AnthropicClient) Complete(
 	return strings.Join(parts, ""), nil
 }
 
+func (c *AnthropicClient) CompleteStructured(
+	ctx context.Context,
+	systemPrompt string,
+	messages []map[string]any,
+	opts StructuredCompletionOptions,
+) (Response, error) {
+	url := c.BaseURL + "/v1/messages"
+	headers := c.buildHeaders()
+	body := map[string]any{
+		"model": c.Model, "system": []map[string]any{{"type": "text", "text": systemPrompt}},
+		"messages": messages, "stream": false,
+	}
+	if opts.MaxTokens > 0 {
+		body["max_tokens"] = opts.MaxTokens
+	}
+	if len(opts.Tools) > 0 {
+		body["tools"] = opts.Tools
+	}
+	if opts.RequiredTool != "" {
+		body["tool_choice"] = map[string]any{"type": "tool", "name": opts.RequiredTool}
+	}
+	if opts.DisableThinking && supportsThinkingControl(c.Model) {
+		body["thinking"] = map[string]any{"type": "disabled"}
+	} else if !opts.DisableThinking && c.ThinkingBudgetTokens != nil && *c.ThinkingBudgetTokens > 0 {
+		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": *c.ThinkingBudgetTokens}
+	}
+	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
+		return doJSONRequest(reqCtx, httpClient, http.MethodPost, url, headers, body)
+	}, 30*time.Second)
+	if err != nil {
+		return Response{}, err
+	}
+	response := Response{StopReason: getString(data, "stop_reason")}
+	if usage, ok := data["usage"].(map[string]any); ok {
+		response.InputTokens = getInt(usage, "input_tokens")
+		response.OutputTokens = getInt(usage, "output_tokens")
+	}
+	contentBlocks, _ := data["content"].([]any)
+	var textParts []string
+	for _, raw := range contentBlocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch getString(block, "type") {
+		case "text":
+			textParts = append(textParts, getString(block, "text"))
+		case "tool_use":
+			input, _ := block["input"].(map[string]any)
+			response.ToolCalls = append(response.ToolCalls, map[string]any{
+				"id": getString(block, "id"), "name": getString(block, "name"), "input": input,
+			})
+		}
+	}
+	response.Text = strings.Join(textParts, "")
+	return response, nil
+}
+
 func (c *AnthropicClient) StreamChat(
 	ctx context.Context,
 	systemPrompt string,
@@ -359,11 +444,7 @@ func (c *AnthropicClient) StreamChat(
 	options *LLMRequestOptions,
 ) <-chan EventResult {
 	url := c.BaseURL + "/v1/messages"
-	headers := map[string]string{
-		"x-api-key":         c.APIKey,
-		"anthropic-version": "2023-06-01",
-		"content-type":      "application/json",
-	}
+	headers := c.buildHeaders()
 
 	apiTools := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
@@ -668,6 +749,62 @@ func (c *OpenAICompatibleClient) Complete(
 	return getString(message, "content"), nil
 }
 
+func (c *OpenAICompatibleClient) CompleteStructured(
+	ctx context.Context,
+	systemPrompt string,
+	messages []map[string]any,
+	opts StructuredCompletionOptions,
+) (Response, error) {
+	body := map[string]any{"model": c.Model, "messages": c.buildMessages(systemPrompt, messages), "stream": false}
+	if opts.MaxTokens > 0 {
+		body["max_completion_tokens"] = opts.MaxTokens
+	}
+	if len(opts.Tools) > 0 {
+		body["tools"] = AnthropicToolsToOpenAI(opts.Tools)
+	}
+	if opts.RequiredTool != "" {
+		body["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": opts.RequiredTool}}
+	}
+	if opts.DisableThinking && supportsThinkingControl(c.Model) {
+		body["thinking"] = map[string]any{"type": "disabled"}
+	}
+	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
+		return doJSONRequest(reqCtx, httpClient, http.MethodPost, c.chatCompletionsURL(), c.buildHeaders(), body)
+	}, 30*time.Second)
+	if err != nil {
+		return Response{}, err
+	}
+	response := Response{}
+	if usage, ok := data["usage"].(map[string]any); ok {
+		response.InputTokens = getInt(usage, "prompt_tokens")
+		response.OutputTokens = getInt(usage, "completion_tokens")
+	}
+	choices, _ := data["choices"].([]any)
+	if len(choices) == 0 {
+		return response, nil
+	}
+	choice, _ := choices[0].(map[string]any)
+	response.StopReason = getString(choice, "finish_reason")
+	message, _ := choice["message"].(map[string]any)
+	response.Text = getString(message, "content")
+	toolCalls, _ := message["tool_calls"].([]any)
+	for _, raw := range toolCalls {
+		call, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, _ := call["function"].(map[string]any)
+		input := map[string]any{}
+		if arguments := getString(fn, "arguments"); arguments != "" {
+			_ = json.Unmarshal([]byte(arguments), &input)
+		}
+		response.ToolCalls = append(response.ToolCalls, map[string]any{
+			"id": getString(call, "id"), "name": getString(fn, "name"), "input": input,
+		})
+	}
+	return response, nil
+}
+
 func (c *OpenAICompatibleClient) StreamChat(
 	ctx context.Context,
 	systemPrompt string,
@@ -966,6 +1103,15 @@ func (c *Client) Complete(
 	opts CompleteOptions,
 ) (string, error) {
 	return c.delegate.Complete(ctx, systemPrompt, messages, opts)
+}
+
+func (c *Client) CompleteStructured(ctx context.Context, systemPrompt string, messages []map[string]any,
+	opts StructuredCompletionOptions) (Response, error) {
+	structured, ok := c.delegate.(StructuredCompletionClient)
+	if !ok {
+		return Response{}, fmt.Errorf("configured client does not support structured completion")
+	}
+	return structured.CompleteStructured(ctx, systemPrompt, messages, opts)
 }
 
 func (c *Client) StreamChat(

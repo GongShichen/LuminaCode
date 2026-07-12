@@ -130,6 +130,12 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 			text TEXT NOT NULL,
 			start_rune INTEGER NOT NULL DEFAULT 0,
 			end_rune INTEGER NOT NULL DEFAULT 0,
+			sequence_no INTEGER NOT NULL DEFAULT 0,
+			container_id TEXT NOT NULL DEFAULT '',
+			container_kind TEXT NOT NULL DEFAULT '',
+			container_ordinal INTEGER NOT NULL DEFAULT 0,
+			parent_container_id TEXT NOT NULL DEFAULT '',
+			heading_path_json TEXT NOT NULL DEFAULT '[]',
 			occurred_at TEXT NOT NULL DEFAULT '',
 			content_hash TEXT NOT NULL
 		);`,
@@ -340,6 +346,26 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 		return fmt.Errorf("migrate evidence span role: %w", err)
 	}
 	for _, column := range []struct{ name, definition string }{
+		{"sequence_no", "INTEGER NOT NULL DEFAULT 0"},
+		{"container_id", "TEXT NOT NULL DEFAULT ''"},
+		{"container_kind", "TEXT NOT NULL DEFAULT ''"},
+		{"container_ordinal", "INTEGER NOT NULL DEFAULT 0"},
+		{"parent_container_id", "TEXT NOT NULL DEFAULT ''"},
+		{"heading_path_json", "TEXT NOT NULL DEFAULT '[]'"},
+	} {
+		if err := ensureTableColumn(ctx, s.db, "memory_evidence_atoms", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate evidence atom structure %s: %w", column.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memory_atoms_sequence
+		ON memory_evidence_atoms(session_id, message_id, sequence_no)`); err != nil {
+		return fmt.Errorf("index evidence atom sequence: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memory_atoms_container
+		ON memory_evidence_atoms(scope_type, scope_key, container_id, container_ordinal)`); err != nil {
+		return fmt.Errorf("index evidence atom container: %w", err)
+	}
+	for _, column := range []struct{ name, definition string }{
 		{"confidence", "REAL NOT NULL DEFAULT 0.5"},
 		{"source_session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"source_message_ids_json", "TEXT NOT NULL DEFAULT '[]'"},
@@ -412,7 +438,10 @@ func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, jobType := range []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill", "chunk_embedding_backfill", "evidence_atom_backfill", "atom_embedding_backfill"} {
+	for _, jobType := range []string{"canonical_entity_backfill", "canonical_event_backfill", "session_chunk_index_backfill",
+		"chunk_embedding_backfill", "evidence_atom_backfill", "atom_structure_backfill",
+		"atom_embedding_backfill", "atom_structure_embedding_backfill", "atom_overlap_repair_backfill",
+		"atom_speech_act_repair_backfill"} {
 		if scheduleErr := s.ScheduleBackfill(ctx, jobType); scheduleErr != nil {
 			return scheduleErr
 		}
@@ -554,15 +583,6 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
 					return err
 				}
-				for _, atom := range BuildEvidenceAtoms(chunk, atomTarget, atomMax) {
-					if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
-						return err
-					}
-					if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
-						FromID: chunk.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
-						return err
-					}
-				}
 				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 					ScopeKey: sessionIndex.ScopeKey, FromID: sessionIndex.IndexID, ToID: chunk.ChunkID,
 					Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
@@ -581,19 +601,19 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				}
 				committedChunks = append(committedChunks, chunk)
 			}
-		}
-		for _, chunk := range batch.Chunks {
-			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
-				return err
-			}
-			for _, atom := range BuildEvidenceAtoms(chunk, atomTarget, atomMax) {
+			for _, atom := range BuildEvidenceAtomsForSpan(span, chunks, atomTarget, atomMax) {
 				if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
 					return err
 				}
 				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
-					FromID: chunk.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
+					FromID: atom.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
 					return err
 				}
+			}
+		}
+		for _, chunk := range batch.Chunks {
+			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
+				return err
 			}
 		}
 		for _, embedding := range batch.ChunkEmbeddings {

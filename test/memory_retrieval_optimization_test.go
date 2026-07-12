@@ -148,6 +148,32 @@ func TestInvalidMemoryWeightsAreReported(t *testing.T) {
 	}
 }
 
+func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".lumina", "CONFIG")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	contents := `{
+		"memory_query_expansion_timeout_seconds": 1,
+		"memory_query_expansion_max_additional_wait_ms": 1500,
+		"memory_coverage_support_target": 0.6,
+		"memory_coverage_residual_trigger": 0.8,
+		"memory_context_max_tokens": 300,
+		"memory_atom_structural_context_max_tokens": 384
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "defaults.json"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", root)
+	cfg := config.NewConfigForCWD(root)
+	err := cfg.ValidateMemoryConfig()
+	if err == nil || !strings.Contains(err.Error(), "residual_trigger") ||
+		!strings.Contains(err.Error(), "structural_context") || !strings.Contains(err.Error(), "additional_wait") {
+		t.Fatalf("invalid Evidence Ledger configuration was accepted: errors=%#v err=%v", cfg.MemoryConfigErrors, err)
+	}
+}
+
 func TestInvalidMemoryLifecycleConfigurationIsReported(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, ".lumina", "CONFIG")

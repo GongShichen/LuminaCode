@@ -192,7 +192,7 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 	if len(atoms) > 0 {
 		texts := make([]string, len(atoms))
 		for index := range atoms {
-			texts[index] = atoms[index].Text
+			texts[index] = atomSearchText(atoms[index])
 		}
 		vectors, embedErr := embedder.Embed(ctx, texts, EmbeddingPassage)
 		if embedErr != nil {

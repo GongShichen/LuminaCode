@@ -35,6 +35,9 @@ type HybridSearchOptions struct {
 	ExpansionModel                string
 	ExpansionError                string
 	ExpansionWaitMS               int64
+	ExpansionFuture               <-chan ExpansionResult
+	ExpansionAdditionalWait       time.Duration
+	ExpansionDeadline             time.Time
 	NeighborChunks                int
 	ReferenceTime                 time.Time
 	CoverageFacets                []string
@@ -44,6 +47,7 @@ type HybridSearchOptions struct {
 	CacheTTL                      time.Duration
 	SuppressTrace                 bool
 	AtomMaxSelected               int
+	AtomTargetTokens              int
 	CoverageMaxFacets             int
 	CoverageCompletionRounds      int
 	CoverageRelevanceWeight       float64
@@ -51,6 +55,11 @@ type HybridSearchOptions struct {
 	CoverageProvenanceWeight      float64
 	CoverageSourceWeight          float64
 	CoverageCoherenceWeight       float64
+	CoverageSupportTarget         float64
+	CoverageResidualTrigger       float64
+	CoverageMinMarginalGain       float64
+	StructuralContextEnabled      bool
+	StructuralContextTokens       int
 	EvidencePrimaryBudgetRatio    float64
 	EvidenceCompletionBudgetRatio float64
 	EvidenceContextBudgetRatio    float64
@@ -252,6 +261,12 @@ func normalizeHybridOptions(opts HybridSearchOptions, plan QueryPlan) HybridSear
 		opts.CoverageSourceWeight+opts.CoverageCoherenceWeight <= 0 {
 		opts.CoverageRelevanceWeight, opts.CoverageFacetWeight = 0.45, 0.25
 		opts.CoverageProvenanceWeight, opts.CoverageSourceWeight, opts.CoverageCoherenceWeight = 0.15, 0.10, 0.05
+	}
+	if opts.CoverageSupportTarget <= 0 {
+		opts.CoverageSupportTarget = 0.82
+	}
+	if opts.CoverageResidualTrigger <= 0 {
+		opts.CoverageResidualTrigger = opts.CoverageSupportTarget
 	}
 	if opts.EvidencePrimaryBudgetRatio+opts.EvidenceCompletionBudgetRatio+opts.EvidenceContextBudgetRatio <= 0 {
 		opts.EvidencePrimaryBudgetRatio, opts.EvidenceCompletionBudgetRatio, opts.EvidenceContextBudgetRatio = 0.70, 0.20, 0.10

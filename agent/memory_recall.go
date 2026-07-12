@@ -90,6 +90,7 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 			CacheEnabled:                  cfg.MemoryRetrievalCacheEnabled,
 			CacheTTL:                      time.Duration(cfg.MemoryRetrievalCacheTTLSeconds * float64(time.Second)),
 			AtomMaxSelected:               cfg.MemoryAtomMaxSelected,
+			AtomTargetTokens:              cfg.MemoryAtomTargetTokens,
 			CoverageMaxFacets:             cfg.MemoryCoverageMaxFacets,
 			CoverageCompletionRounds:      cfg.MemoryCoverageCompletionRounds,
 			CoverageRelevanceWeight:       cfg.MemoryCoverageRelevanceWeight,
@@ -97,96 +98,60 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 			CoverageProvenanceWeight:      cfg.MemoryCoverageProvenanceWeight,
 			CoverageSourceWeight:          cfg.MemoryCoverageSourceWeight,
 			CoverageCoherenceWeight:       cfg.MemoryCoverageCoherenceWeight,
+			CoverageSupportTarget:         cfg.MemoryCoverageSupportTarget,
+			CoverageResidualTrigger:       cfg.MemoryCoverageResidualTrigger,
+			CoverageMinMarginalGain:       cfg.MemoryCoverageMinMarginalGain,
+			StructuralContextEnabled:      cfg.MemoryAtomStructuralContextEnabled,
+			StructuralContextTokens:       cfg.MemoryAtomStructuralContextTokens,
 			EvidencePrimaryBudgetRatio:    cfg.MemoryEvidencePrimaryBudgetRatio,
 			EvidenceCompletionBudgetRatio: cfg.MemoryEvidenceCompletionBudgetRatio,
 			EvidenceContextBudgetRatio:    cfg.MemoryEvidenceContextBudgetRatio,
 		}
 	}
-	type retrievalResult struct {
-		value longmemory.AllChannelResult
-		err   error
-	}
-	originalCh := make(chan retrievalResult, 1)
-	go func() {
-		baselineOptions := searchOptions("", "", 0)
-		baselineOptions.SuppressTrace = true
-		value, searchErr := store.SearchAllChannels(ctx, memoryQuery, longmemory.QueryExpansion{}, embedder, baselineOptions)
-		originalCh <- retrievalResult{value: value, err: searchErr}
-	}()
-	expansionStarted := time.Now()
-	expansion, expansionModel, expansionError := expandMemoryQuery(ctx, cfg, memoryQuery, catalog, expansionFactory)
-	expansionWaitMS := time.Since(expansionStarted).Milliseconds()
-	if catalogErr != nil {
-		if expansionError != "" {
-			expansionError += "; "
+	options := searchOptions(cfg.MemoryQueryExpansionModel, "", 0)
+	var expansionCancel context.CancelFunc = func() {}
+	if cfg.MemoryQueryExpansionEnabled && expansionFactory != nil {
+		expansionCtx, cancel := context.WithCancel(ctx)
+		expansionCancel = cancel
+		expansionStarted := time.Now()
+		future := make(chan longmemory.ExpansionResult, 1)
+		go func() {
+			started := time.Now()
+			expansion, model, expansionError := expandMemoryQuery(expansionCtx, cfg, memoryQuery, catalog, expansionFactory)
+			if catalogErr != nil {
+				if expansionError != "" {
+					expansionError += "; "
+				}
+				expansionError += "inspect memory catalog: " + catalogErr.Error()
+			}
+			future <- longmemory.ExpansionResult{Expansion: expansion, Model: model, Error: expansionError,
+				DurationMS: time.Since(started).Milliseconds()}
+			close(future)
+		}()
+		options.ExpansionFuture = future
+		options.ExpansionAdditionalWait = time.Duration(cfg.MemoryQueryExpansionAdditionalWait) * time.Millisecond
+		if cfg.MemoryQueryExpansionTimeoutSeconds > 0 {
+			options.ExpansionDeadline = expansionStarted.Add(time.Duration(
+				cfg.MemoryQueryExpansionTimeoutSeconds * float64(time.Second)))
 		}
-		expansionError += "inspect memory catalog: " + catalogErr.Error()
 	}
-	var result longmemory.AllChannelResult
-	var searchErr error
-	if len(expansion.Queries)+len(expansion.Entities)+len(expansion.TemporalConstraints)+len(expansion.RelationTerms)+len(expansion.ProvenanceHints) > 0 {
-		result, searchErr = store.SearchAllChannels(ctx, memoryQuery, expansion, embedder,
-			searchOptions(expansionModel, expansionError, expansionWaitMS))
-		original := <-originalCh
-		if searchErr != nil && original.err == nil {
-			result, searchErr = original.value, nil
-		}
-	} else {
-		original := <-originalCh
-		result, searchErr = original.value, original.err
-		result.Run.ExpansionModel, result.Run.ExpansionError, result.Run.ExpansionWaitMS = expansionModel, expansionError, expansionWaitMS
-		result.Trace.Run = &result.Run
-		_ = store.RecordRetrievalTrace(context.WithoutCancel(ctx), result.Trace)
-	}
+	result, searchErr := store.SearchAllChannels(ctx, memoryQuery, longmemory.QueryExpansion{}, embedder, options)
+	expansionCancel()
 	if searchErr != nil {
 		return nil
 	}
 	var ids []string
-	recalls := make([]MemoryRecall, 0, len(result.Packet.Evidence)+1)
-	if len(result.Packet.CoreBlocks) > 0 {
-		var blockLines []string
-		for _, block := range result.Packet.CoreBlocks {
-			blockLines = append(blockLines, block.Label+":\n"+block.Content)
-		}
-		recalls = append(recalls, MemoryRecall{Filename: "core-memory", FilePath: "longmemory://core",
-			Content:    "Core long-term memory blocks:\n" + strings.Join(blockLines, "\n\n"),
-			MemoryType: memory.MemoryTypeUser, RecallID: "core-memory", Score: 1})
-	}
 	for _, evidence := range result.Packet.Evidence {
 		if len(evidence.DocumentIDs) > 0 {
 			ids = append(ids, evidence.DocumentIDs...)
 		} else {
 			ids = append(ids, evidence.MemoryID)
 		}
-		recalls = append(recalls, MemoryRecall{
-			Filename:   evidence.MemoryID,
-			FilePath:   "longmemory://" + evidence.MemoryID,
-			Content:    formatLongTermEvidence(evidence),
-			MemoryType: mapLongMemoryType(evidence.MemoryType),
-			RecallID:   evidence.MemoryID,
-			Score:      evidence.Score,
-		})
 	}
 	if len(result.Packet.CanonicalEvents) > 0 {
-		lines := []string{"Canonical event timeline (ordered by event time):"}
 		for _, event := range result.Packet.CanonicalEvents {
-			when := event.OccurredAt
-			if when.IsZero() {
-				when = event.ValidFrom
-			}
-			line := "- " + event.Title
-			if !when.IsZero() {
-				line += " @ " + when.UTC().Format(time.RFC3339)
-			}
-			if strings.TrimSpace(event.Summary) != "" {
-				line += ": " + strings.TrimSpace(event.Summary)
-			}
-			lines = append(lines, line)
 			ids = append(ids, event.SourceChunks...)
 		}
-		recalls = append(recalls, MemoryRecall{Filename: "canonical-event-timeline", FilePath: "longmemory://events",
-			Content: strings.Join(lines, "\n"), MemoryType: memory.MemoryTypeReference,
-			RecallID: "canonical-event-timeline", Score: 1})
 	}
 	_ = store.RecordUsed(ctx, longmemory.UsedRecord{
 		SessionID:     cfgSessionID(state),
@@ -197,13 +162,14 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 	})
 	reference := "Reference time for this user turn: " + queryTime.UTC().Format(time.RFC3339) +
 		"\nInterpret relative dates and order evidence against this reference time. Use provenance and valid time when evidence conflicts."
-	if len(recalls) == 0 {
-		recalls = append(recalls, MemoryRecall{Filename: "query-reference-time", FilePath: "longmemory://reference-time",
-			Content: reference, MemoryType: memory.MemoryTypeReference, RecallID: "query-reference-time", Score: 1})
+	content := formatEvidencePacket(result.Packet)
+	if content != "" {
+		content = reference + "\n\n" + content
 	} else {
-		recalls[0].Content = reference + "\n\n" + recalls[0].Content
+		content = reference
 	}
-	return recalls
+	return []MemoryRecall{{Filename: "evidence-ledger", FilePath: "longmemory://evidence-ledger",
+		Content: content, MemoryType: memory.MemoryTypeReference, RecallID: "evidence-ledger", Score: 1}}
 }
 
 func configuredMemoryEmbedder(cfg config.Config) longmemory.Embedder {
@@ -339,8 +305,95 @@ func formatLongTermEvidence(evidence longmemory.Evidence) string {
 		parts = append(parts, "Source paths: "+strings.Join(evidence.SourcePaths, ", "))
 	}
 	parts = append(parts, "Evidence:\n"+evidence.Text)
-	parts = append(parts, "Reminder: verify current files and code behavior before relying on path-specific or code-specific evidence.")
 	return strings.Join(parts, "\n")
+}
+
+func formatEvidencePacket(packet longmemory.EvidencePacket) string {
+	var sections []string
+	if len(packet.Guidance) > 0 {
+		lines := []string{"Active long-term guidance:"}
+		for _, block := range packet.Guidance {
+			line := "- " + block.Label + ": " + strings.TrimSpace(block.Content)
+			if !block.LastConfirmedAt.IsZero() {
+				line += " (last confirmed " + block.LastConfirmedAt.UTC().Format(time.RFC3339) + ")"
+			}
+			lines = append(lines, line)
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	if len(packet.Assertions) > 0 {
+		lines := []string{"Assertion register derived only from selected evidence:"}
+		for _, assertion := range packet.Assertions {
+			for _, version := range assertion.Current {
+				lines = append(lines, "- Current: "+formatAssertionVersion(version))
+			}
+			for _, version := range assertion.Historical {
+				lines = append(lines, "- Historical: "+formatAssertionVersion(version))
+			}
+			for _, version := range assertion.Conflicting {
+				lines = append(lines, "- Unresolved conflict: "+formatAssertionVersion(version))
+			}
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	if len(packet.Bundles) > 0 {
+		facetNames := map[string]string{}
+		for _, facet := range packet.Facets {
+			facetNames[facet.FacetID] = facet.Text
+		}
+		lines := []string{"Direct long-term evidence, grouped by information need and source structure:"}
+		for _, bundle := range packet.Bundles {
+			line := "-"
+			if len(bundle.FacetIDs) > 0 {
+				var names []string
+				for _, facetID := range bundle.FacetIDs {
+					if name := strings.TrimSpace(facetNames[facetID]); name != "" {
+						names = append(names, name)
+					}
+				}
+				if len(names) > 0 {
+					line += " Supports: " + strings.Join(names, " | ")
+				}
+			}
+			if bundle.Role != "" || bundle.EpistemicStatus != "" {
+				line += " [" + strings.Trim(strings.Join([]string{bundle.Role, bundle.EpistemicStatus}, "/"), "/") + "]"
+			}
+			if bundle.SessionID != "" || bundle.MessageID != "" {
+				line += " source=" + strings.Trim(strings.Join([]string{bundle.SessionID, bundle.MessageID}, "/"), "/")
+			}
+			if !bundle.OccurredAt.IsZero() {
+				line += " @ " + bundle.OccurredAt.UTC().Format(time.RFC3339)
+			}
+			if len(bundle.StructuralPath) > 0 {
+				line += " under " + strings.Join(bundle.StructuralPath, " / ")
+			}
+			line += "\n  " + strings.ReplaceAll(strings.TrimSpace(bundle.Text), "\n", "\n  ")
+			lines = append(lines, line)
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	if len(packet.Coverage.Uncovered) > 0 {
+		sections = append(sections, "Coverage note: some information needs remain weakly supported; do not invent missing details.")
+	}
+	for _, evidence := range packet.Evidence {
+		if len(evidence.SourcePaths) > 0 {
+			sections = append(sections, "Verify current files and code behavior before relying on path-specific or code-specific evidence.")
+			break
+		}
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func formatAssertionVersion(version longmemory.AssertionVersion) string {
+	line := strings.TrimSpace(strings.Join([]string{version.Subject, version.Predicate, version.Object}, " "))
+	if !version.ValidFrom.IsZero() {
+		line += " (valid from " + version.ValidFrom.UTC().Format(time.RFC3339)
+		if !version.ValidUntil.IsZero() {
+			line += " until " + version.ValidUntil.UTC().Format(time.RFC3339)
+		}
+		line += ")"
+	}
+	return line
 }
 
 func mapLongMemoryType(t longmemory.MemoryType) memory.MemoryType {

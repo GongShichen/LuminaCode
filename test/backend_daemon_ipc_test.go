@@ -187,7 +187,8 @@ func TestBackendDaemonSameSessionSubmitReturnsBusy(t *testing.T) {
 	cfg.APIBaseURL = apiServer.URL
 	cfg.APIType = "openai_compatible"
 	cfg.APIModel = "test-model"
-	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model")
+	cfg.LongTermMemoryEnabled = false
+	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model", "long_term_memory_enabled")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	endpointPath := filepath.Join(root, "run", "backend.json")

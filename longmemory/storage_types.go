@@ -124,22 +124,28 @@ type EvidenceChunk struct {
 }
 
 type EvidenceAtom struct {
-	AtomID          string    `json:"atom_id"`
-	ChunkID         string    `json:"chunk_id"`
-	MessageID       string    `json:"message_id"`
-	SessionID       string    `json:"session_id"`
-	ScopeType       ScopeType `json:"scope_type"`
-	ScopeKey        string    `json:"scope_key"`
-	Role            string    `json:"role"`
-	Text            string    `json:"text"`
-	StartRune       int       `json:"start_rune"`
-	EndRune         int       `json:"end_rune"`
-	OccurredAt      time.Time `json:"occurred_at"`
-	ValidFrom       time.Time `json:"valid_from"`
-	ValidUntil      time.Time `json:"valid_until"`
-	Entities        []string  `json:"entities,omitempty"`
-	EpistemicStatus string    `json:"epistemic_status"`
-	ContentHash     string    `json:"content_hash"`
+	AtomID            string    `json:"atom_id"`
+	ChunkID           string    `json:"chunk_id"`
+	MessageID         string    `json:"message_id"`
+	SessionID         string    `json:"session_id"`
+	ScopeType         ScopeType `json:"scope_type"`
+	ScopeKey          string    `json:"scope_key"`
+	Role              string    `json:"role"`
+	Text              string    `json:"text"`
+	StartRune         int       `json:"start_rune"`
+	EndRune           int       `json:"end_rune"`
+	SequenceNo        int       `json:"sequence_no"`
+	ContainerID       string    `json:"container_id,omitempty"`
+	ContainerKind     string    `json:"container_kind,omitempty"`
+	ContainerOrdinal  int       `json:"container_ordinal,omitempty"`
+	ParentContainerID string    `json:"parent_container_id,omitempty"`
+	HeadingPath       []string  `json:"heading_path,omitempty"`
+	OccurredAt        time.Time `json:"occurred_at"`
+	ValidFrom         time.Time `json:"valid_from"`
+	ValidUntil        time.Time `json:"valid_until"`
+	Entities          []string  `json:"entities,omitempty"`
+	EpistemicStatus   string    `json:"epistemic_status"`
+	ContentHash       string    `json:"content_hash"`
 }
 
 type CoreBlock struct {
@@ -209,11 +215,28 @@ type TemporalConstraint struct {
 
 type QueryExpansion struct {
 	Queries             []string             `json:"queries,omitempty"`
+	Facets              []FacetDraft         `json:"facets,omitempty"`
 	Entities            []string             `json:"entities,omitempty"`
 	TemporalConstraints []TemporalConstraint `json:"temporal_constraints,omitempty"`
 	RelationTerms       []string             `json:"relation_terms,omitempty"`
 	ProvenanceHints     []string             `json:"provenance_hints,omitempty"`
-	ParseMode           string               `json:"-"`
+	ParseMode           string               `json:"parse_mode,omitempty"`
+	Diagnostics         []string             `json:"diagnostics,omitempty"`
+}
+
+type ExpansionResult struct {
+	Expansion  QueryExpansion `json:"expansion"`
+	Model      string         `json:"model,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	DurationMS int64          `json:"duration_ms,omitempty"`
+}
+
+type FacetDraft struct {
+	Text                string               `json:"text"`
+	Entities            []string             `json:"entities,omitempty"`
+	Relations           []string             `json:"relations,omitempty"`
+	TemporalConstraints []TemporalConstraint `json:"temporal_constraints,omitempty"`
+	ProvenanceHints     []string             `json:"provenance_hints,omitempty"`
 }
 
 type SignalContribution struct {
@@ -378,6 +401,35 @@ type CoverageFacet struct {
 	Entities      []string             `json:"entities,omitempty"`
 	Relations     []string             `json:"relations,omitempty"`
 	TemporalHints []TemporalConstraint `json:"temporal_hints,omitempty"`
+	Required      bool                 `json:"required,omitempty"`
+}
+
+type FacetSupport struct {
+	FacetID           string   `json:"facet_id"`
+	DocumentID        string   `json:"document_id"`
+	Relevance         float64  `json:"relevance"`
+	AnchorAlignment   float64  `json:"anchor_alignment"`
+	SignalDiversity   float64  `json:"signal_diversity"`
+	Provenance        float64  `json:"provenance"`
+	TemporalCoherence float64  `json:"temporal_coherence"`
+	SourceGroup       string   `json:"source_group"`
+	SignalFamilies    []string `json:"signal_families,omitempty"`
+	AnchorHits        []string `json:"anchor_hits,omitempty"`
+	AnchorSupport     float64  `json:"anchor_support,omitempty"`
+	Support           float64  `json:"support"`
+}
+
+type FacetCoverageState struct {
+	FacetID           string             `json:"facet_id"`
+	Required          bool               `json:"required,omitempty"`
+	SupportMass       float64            `json:"support_mass"`
+	RemainingNeed     float64            `json:"remaining_need"`
+	Sources           map[string]float64 `json:"sources,omitempty"`
+	AnchorSupport     map[string]float64 `json:"anchor_support,omitempty"`
+	SourceMass        float64            `json:"source_mass,omitempty"`
+	AnchorCoverage    float64            `json:"anchor_coverage,omitempty"`
+	ObservableAnchors []string           `json:"observable_anchors,omitempty"`
+	EvidenceIDs       []string           `json:"evidence_ids,omitempty"`
 }
 
 type CoverageDecision struct {
@@ -386,15 +438,19 @@ type CoverageDecision struct {
 	Utility         float64            `json:"utility"`
 	UtilityPerCost  float64            `json:"utility_per_cost"`
 	EstimatedTokens int                `json:"estimated_tokens"`
+	MarginalGain    float64            `json:"marginal_gain"`
+	Supports        []FacetSupport     `json:"supports,omitempty"`
 	ScoreBreakdown  map[string]float64 `json:"score_breakdown,omitempty"`
 }
 
 type CoverageLedger struct {
-	Facets     []CoverageFacet     `json:"facets"`
-	CoveredBy  map[string][]string `json:"covered_by"`
-	Selected   []CoverageDecision  `json:"selected"`
-	Uncovered  []string            `json:"uncovered,omitempty"`
-	TokenUsage int                 `json:"token_usage"`
+	Facets      []CoverageFacet               `json:"facets"`
+	CoveredBy   map[string][]string           `json:"covered_by"`
+	Selected    []CoverageDecision            `json:"selected"`
+	Uncovered   []string                      `json:"uncovered,omitempty"`
+	TokenUsage  int                           `json:"token_usage"`
+	FacetStates map[string]FacetCoverageState `json:"facet_states,omitempty"`
+	StopReason  string                        `json:"stop_reason,omitempty"`
 }
 
 type Evidence struct {
@@ -419,10 +475,48 @@ type Evidence struct {
 	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
+type EvidenceBundle struct {
+	BundleID        string    `json:"bundle_id"`
+	FacetIDs        []string  `json:"facet_ids,omitempty"`
+	SeedAtomIDs     []string  `json:"seed_atom_ids,omitempty"`
+	ContextAtomIDs  []string  `json:"context_atom_ids,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	MessageID       string    `json:"message_id,omitempty"`
+	StructuralPath  []string  `json:"structural_path,omitempty"`
+	Text            string    `json:"text"`
+	Role            string    `json:"role,omitempty"`
+	EpistemicStatus string    `json:"epistemic_status,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at,omitempty"`
+}
+
+type AssertionVersion struct {
+	FactID        string    `json:"fact_id"`
+	Subject       string    `json:"subject"`
+	Predicate     string    `json:"predicate"`
+	Object        string    `json:"object"`
+	ValidFrom     time.Time `json:"valid_from,omitempty"`
+	ValidUntil    time.Time `json:"valid_until,omitempty"`
+	ObservedAt    time.Time `json:"observed_at,omitempty"`
+	InvalidatedAt time.Time `json:"invalidated_at,omitempty"`
+	SourceChunks  []string  `json:"source_chunks,omitempty"`
+}
+
+type AssertionView struct {
+	FactKey     string             `json:"fact_key"`
+	Current     []AssertionVersion `json:"current,omitempty"`
+	Historical  []AssertionVersion `json:"historical,omitempty"`
+	Conflicting []AssertionVersion `json:"conflicting,omitempty"`
+}
+
 type EvidencePacket struct {
 	Plan            QueryPlan           `json:"plan"`
 	ReferenceTime   time.Time           `json:"reference_time,omitempty"`
 	CoreBlocks      []CoreBlock         `json:"core_blocks"`
+	Facets          []CoverageFacet     `json:"facets,omitempty"`
+	Bundles         []EvidenceBundle    `json:"bundles,omitempty"`
+	Assertions      []AssertionView     `json:"assertions,omitempty"`
+	Guidance        []CoreBlock         `json:"guidance,omitempty"`
+	Coverage        CoverageLedger      `json:"coverage,omitempty"`
 	Evidence        []Evidence          `json:"evidence"`
 	Timeline        []TimelineEntry     `json:"timeline,omitempty"`
 	CanonicalEvents []CanonicalEvent    `json:"canonical_events,omitempty"`

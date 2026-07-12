@@ -300,8 +300,8 @@ func TestDeepSeekAnthropicDefaultsSendClaudeCompatibleRequest(t *testing.T) {
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		if r.Header.Get("x-api-key") != "test-key" {
-			t.Fatalf("anthropic-compatible request should use x-api-key header, got %q", r.Header.Get("x-api-key"))
+		if r.Header.Get("Authorization") != "Bearer test-key" || r.Header.Get("x-api-key") != "" {
+			t.Fatalf("DeepSeek Anthropic-compatible request used the wrong authentication headers: %#v", r.Header)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}]}`)
@@ -324,6 +324,36 @@ func TestDeepSeekAnthropicDefaultsSendClaudeCompatibleRequest(t *testing.T) {
 	}
 	if requestBody["model"] != "deepseek-v4-pro[1m]" || requestBody["stream"] != false {
 		t.Fatalf("unexpected anthropic request body: %#v", requestBody)
+	}
+}
+
+func TestDeepSeekStructuredCompletionDisablesThinkingForForcedTool(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+			t.Fatalf("invalid request body: %v", err)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Fatalf("missing DeepSeek bearer authentication: %#v", r.Header)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"content":[{"type":"tool_use","id":"call-1","name":"ExpandMemoryQuery","input":{"queries":["Aurora"]}}],"stop_reason":"tool_use"}`)
+	}))
+	defer server.Close()
+	client, err := api.NewAPIClient("test-key", server.URL, "deepseek-v4-pro[1m]", 256, nil, nil, "anthropic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.CompleteStructured(context.Background(), "sys", []map[string]any{{"role": "user", "content": "hi"}},
+		api.StructuredCompletionOptions{RequiredTool: "ExpandMemoryQuery", DisableThinking: true,
+			Tools: []map[string]any{{"name": "ExpandMemoryQuery", "input_schema": map[string]any{"type": "object"}}}})
+	if err != nil || len(response.ToolCalls) != 1 {
+		t.Fatalf("structured DeepSeek response failed: %#v error=%v", response, err)
+	}
+	thinking, _ := requestBody["thinking"].(map[string]any)
+	if thinking["type"] != "disabled" {
+		t.Fatalf("forced tool request did not disable thinking: %#v", requestBody)
 	}
 }
 

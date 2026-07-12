@@ -123,6 +123,7 @@ type Config struct {
 	MemoryQueryExpansionEnabled         bool
 	MemoryQueryExpansionModel           string
 	MemoryQueryExpansionTimeoutSeconds  float64
+	MemoryQueryExpansionAdditionalWait  int
 	MemoryQueryExpansionMaxContext      int
 	MemoryQueryExpansionMaxQueries      int
 	MemoryWriteConfirmUserScope         bool
@@ -149,6 +150,11 @@ type Config struct {
 	MemoryCoverageProvenanceWeight      float64
 	MemoryCoverageSourceWeight          float64
 	MemoryCoverageCoherenceWeight       float64
+	MemoryCoverageSupportTarget         float64
+	MemoryCoverageResidualTrigger       float64
+	MemoryCoverageMinMarginalGain       float64
+	MemoryAtomStructuralContextEnabled  bool
+	MemoryAtomStructuralContextTokens   int
 	MemoryEvidencePrimaryBudgetRatio    float64
 	MemoryEvidenceCompletionBudgetRatio float64
 	MemoryEvidenceContextBudgetRatio    float64
@@ -289,7 +295,8 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryAdjacentChunkWindow:          1,
 		MemoryQueryExpansionEnabled:        true,
 		MemoryQueryExpansionModel:          "inherit",
-		MemoryQueryExpansionTimeoutSeconds: 4,
+		MemoryQueryExpansionTimeoutSeconds: 0,
+		MemoryQueryExpansionAdditionalWait: 750,
 		MemoryQueryExpansionMaxContext:     3000,
 		MemoryQueryExpansionMaxQueries:     5,
 		MemoryRetrievalCacheEnabled:        true,
@@ -335,6 +342,11 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryCoverageProvenanceWeight:      0.15,
 		MemoryCoverageSourceWeight:          0.10,
 		MemoryCoverageCoherenceWeight:       0.05,
+		MemoryCoverageSupportTarget:         0.82,
+		MemoryCoverageResidualTrigger:       0.82,
+		MemoryCoverageMinMarginalGain:       0,
+		MemoryAtomStructuralContextEnabled:  true,
+		MemoryAtomStructuralContextTokens:   384,
 		MemoryEvidencePrimaryBudgetRatio:    0.70,
 		MemoryEvidenceCompletionBudgetRatio: 0.20,
 		MemoryEvidenceContextBudgetRatio:    0.10,
@@ -474,6 +486,7 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryQueryExpansionEnabled = fresh.MemoryQueryExpansionEnabled
 	updated.MemoryQueryExpansionModel = fresh.MemoryQueryExpansionModel
 	updated.MemoryQueryExpansionTimeoutSeconds = fresh.MemoryQueryExpansionTimeoutSeconds
+	updated.MemoryQueryExpansionAdditionalWait = fresh.MemoryQueryExpansionAdditionalWait
 	updated.MemoryQueryExpansionMaxContext = fresh.MemoryQueryExpansionMaxContext
 	updated.MemoryQueryExpansionMaxQueries = fresh.MemoryQueryExpansionMaxQueries
 	updated.MemoryWriteConfirmUserScope = fresh.MemoryWriteConfirmUserScope
@@ -502,6 +515,11 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryCoverageProvenanceWeight = fresh.MemoryCoverageProvenanceWeight
 	updated.MemoryCoverageSourceWeight = fresh.MemoryCoverageSourceWeight
 	updated.MemoryCoverageCoherenceWeight = fresh.MemoryCoverageCoherenceWeight
+	updated.MemoryCoverageSupportTarget = fresh.MemoryCoverageSupportTarget
+	updated.MemoryCoverageResidualTrigger = fresh.MemoryCoverageResidualTrigger
+	updated.MemoryCoverageMinMarginalGain = fresh.MemoryCoverageMinMarginalGain
+	updated.MemoryAtomStructuralContextEnabled = fresh.MemoryAtomStructuralContextEnabled
+	updated.MemoryAtomStructuralContextTokens = fresh.MemoryAtomStructuralContextTokens
 	updated.MemoryEvidencePrimaryBudgetRatio = fresh.MemoryEvidencePrimaryBudgetRatio
 	updated.MemoryEvidenceCompletionBudgetRatio = fresh.MemoryEvidenceCompletionBudgetRatio
 	updated.MemoryEvidenceContextBudgetRatio = fresh.MemoryEvidenceContextBudgetRatio
@@ -774,6 +792,7 @@ type luminaDefaults struct {
 	MemoryQueryExpansionEnabled         *bool              `json:"memory_query_expansion_enabled"`
 	MemoryQueryExpansionModel           *string            `json:"memory_query_expansion_model"`
 	MemoryQueryExpansionTimeoutSeconds  *float64           `json:"memory_query_expansion_timeout_seconds"`
+	MemoryQueryExpansionAdditionalWait  *int               `json:"memory_query_expansion_max_additional_wait_ms"`
 	MemoryQueryExpansionMaxContext      *int               `json:"memory_query_expansion_max_context_tokens"`
 	MemoryQueryExpansionMaxQueries      *int               `json:"memory_query_expansion_max_queries"`
 	MemoryWriteConfirmUserScope         *bool              `json:"memory_write_requires_confirmation_for_user_scope"`
@@ -800,6 +819,11 @@ type luminaDefaults struct {
 	MemoryCoverageProvenanceWeight      *float64           `json:"memory_coverage_provenance_weight"`
 	MemoryCoverageSourceWeight          *float64           `json:"memory_coverage_source_weight"`
 	MemoryCoverageCoherenceWeight       *float64           `json:"memory_coverage_coherence_weight"`
+	MemoryCoverageSupportTarget         *float64           `json:"memory_coverage_support_target"`
+	MemoryCoverageResidualTrigger       *float64           `json:"memory_coverage_residual_trigger"`
+	MemoryCoverageMinMarginalGain       *float64           `json:"memory_coverage_min_marginal_gain"`
+	MemoryAtomStructuralContextEnabled  *bool              `json:"memory_atom_structural_context_enabled"`
+	MemoryAtomStructuralContextTokens   *int               `json:"memory_atom_structural_context_max_tokens"`
 	MemoryEvidencePrimaryBudgetRatio    *float64           `json:"memory_evidence_primary_budget_ratio"`
 	MemoryEvidenceCompletionBudgetRatio *float64           `json:"memory_evidence_completion_budget_ratio"`
 	MemoryEvidenceContextBudgetRatio    *float64           `json:"memory_evidence_context_budget_ratio"`
@@ -1104,8 +1128,15 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MemoryQueryExpansionModel != nil && strings.TrimSpace(*defaults.MemoryQueryExpansionModel) != "" {
 		cfg.MemoryQueryExpansionModel = strings.TrimSpace(*defaults.MemoryQueryExpansionModel)
 	}
-	if defaults.MemoryQueryExpansionTimeoutSeconds != nil && *defaults.MemoryQueryExpansionTimeoutSeconds > 0 {
+	if defaults.MemoryQueryExpansionTimeoutSeconds != nil && *defaults.MemoryQueryExpansionTimeoutSeconds >= 0 {
 		cfg.MemoryQueryExpansionTimeoutSeconds = *defaults.MemoryQueryExpansionTimeoutSeconds
+	}
+	if defaults.MemoryQueryExpansionAdditionalWait != nil {
+		if *defaults.MemoryQueryExpansionAdditionalWait < 0 {
+			cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_query_expansion_max_additional_wait_ms must be non-negative")
+		} else {
+			cfg.MemoryQueryExpansionAdditionalWait = *defaults.MemoryQueryExpansionAdditionalWait
+		}
 	}
 	if defaults.MemoryQueryExpansionMaxContext != nil && *defaults.MemoryQueryExpansionMaxContext > 0 {
 		cfg.MemoryQueryExpansionMaxContext = *defaults.MemoryQueryExpansionMaxContext
@@ -1226,6 +1257,13 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	applyMemoryWeight(cfg, "memory_coverage_provenance_weight", defaults.MemoryCoverageProvenanceWeight, &cfg.MemoryCoverageProvenanceWeight)
 	applyMemoryWeight(cfg, "memory_coverage_source_weight", defaults.MemoryCoverageSourceWeight, &cfg.MemoryCoverageSourceWeight)
 	applyMemoryWeight(cfg, "memory_coverage_coherence_weight", defaults.MemoryCoverageCoherenceWeight, &cfg.MemoryCoverageCoherenceWeight)
+	applyMemoryWeight(cfg, "memory_coverage_support_target", defaults.MemoryCoverageSupportTarget, &cfg.MemoryCoverageSupportTarget)
+	applyMemoryWeight(cfg, "memory_coverage_residual_trigger", defaults.MemoryCoverageResidualTrigger, &cfg.MemoryCoverageResidualTrigger)
+	applyMemoryWeight(cfg, "memory_coverage_min_marginal_gain", defaults.MemoryCoverageMinMarginalGain, &cfg.MemoryCoverageMinMarginalGain)
+	if defaults.MemoryAtomStructuralContextEnabled != nil {
+		cfg.MemoryAtomStructuralContextEnabled = *defaults.MemoryAtomStructuralContextEnabled
+	}
+	applyPositiveMemoryInt(cfg, "memory_atom_structural_context_max_tokens", defaults.MemoryAtomStructuralContextTokens, &cfg.MemoryAtomStructuralContextTokens)
 	applyMemoryWeight(cfg, "memory_evidence_primary_budget_ratio", defaults.MemoryEvidencePrimaryBudgetRatio, &cfg.MemoryEvidencePrimaryBudgetRatio)
 	applyMemoryWeight(cfg, "memory_evidence_completion_budget_ratio", defaults.MemoryEvidenceCompletionBudgetRatio, &cfg.MemoryEvidenceCompletionBudgetRatio)
 	applyMemoryWeight(cfg, "memory_evidence_context_budget_ratio", defaults.MemoryEvidenceContextBudgetRatio, &cfg.MemoryEvidenceContextBudgetRatio)
@@ -1241,6 +1279,16 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if cfg.MemoryAtomTargetTokens > cfg.MemoryAtomMaxTokens {
 		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_atom_target_tokens must not exceed memory_atom_max_tokens")
+	}
+	if cfg.MemoryCoverageResidualTrigger > cfg.MemoryCoverageSupportTarget {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_coverage_residual_trigger must not exceed memory_coverage_support_target")
+	}
+	if cfg.MemoryAtomStructuralContextTokens > cfg.MemoryContextMaxTokens {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_atom_structural_context_max_tokens must not exceed memory_context_max_tokens")
+	}
+	if cfg.MemoryQueryExpansionTimeoutSeconds > 0 &&
+		float64(cfg.MemoryQueryExpansionAdditionalWait) > cfg.MemoryQueryExpansionTimeoutSeconds*1000 {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, "memory_query_expansion_max_additional_wait_ms must not exceed memory_query_expansion_timeout_seconds")
 	}
 	validateMemoryWeights(cfg)
 	if defaults.SkillsEnabled != nil {
