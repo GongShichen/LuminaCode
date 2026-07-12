@@ -91,7 +91,7 @@ func NewLocalEmbedder(modelName, modelDir string) (*LocalEmbedder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load memory tokenizer: %w", err)
 	}
-	session, provider, diagnostics, err := newEmbeddingSession(modelPath)
+	session, provider, diagnostics, err := newEmbeddingSession(modelPath, modelDir)
 	if err != nil {
 		return nil, fmt.Errorf("load memory embedding model: %w", err)
 	}
@@ -109,9 +109,8 @@ func (e *LocalEmbedder) ProviderDiagnostics() []string {
 	return append([]string(nil), e.diagnostics...)
 }
 
-func newEmbeddingSession(modelPath string) (*ort.DynamicAdvancedSession, string, []string, error) {
-	providers := embeddingProviderCandidates()
-	diagnostics := make([]string, 0, len(providers))
+func newEmbeddingSession(modelPath, modelDir string) (*ort.DynamicAdvancedSession, string, []string, error) {
+	providers, diagnostics := embeddingProviderCandidates(modelDir)
 	var lastErr error
 	for _, provider := range providers {
 		options, err := ort.NewSessionOptions()
@@ -134,7 +133,7 @@ func newEmbeddingSession(modelPath string) (*ort.DynamicAdvancedSession, string,
 	return nil, "", diagnostics, lastErr
 }
 
-func embeddingProviderCandidates() []string {
+func embeddingProviderCandidates(modelDir string) ([]string, []string) {
 	requested := strings.ToLower(strings.TrimSpace(os.Getenv("LUMINA_MEMORY_EMBEDDING_DEVICE")))
 	switch requested {
 	case "mps", "metal":
@@ -142,26 +141,53 @@ func embeddingProviderCandidates() []string {
 	case "amd":
 		requested = "rocm"
 	}
+	cudaAvailable := fileExists("/dev/nvidiactl") || commandExists("nvidia-smi") ||
+		strings.TrimSpace(os.Getenv("CUDA_PATH")) != "" || strings.TrimSpace(os.Getenv("NVIDIA_VISIBLE_DEVICES")) != "" ||
+		strings.TrimSpace(os.Getenv("CUDA_VISIBLE_DEVICES")) != ""
+	rocmAvailable := fileExists("/dev/kfd") || commandExists("rocminfo") || strings.TrimSpace(os.Getenv("ROCR_VISIBLE_DEVICES")) != ""
+	customRuntime := strings.TrimSpace(os.Getenv("LUMINA_ONNXRUNTIME_PATH")) != ""
+	installedProvider := ""
+	if content, err := os.ReadFile(filepath.Join(modelDir, "runtime", "provider")); err == nil {
+		installedProvider = strings.ToLower(strings.TrimSpace(string(content)))
+	}
+	providers := embeddingProviderCandidatesFor(requested, runtime.GOOS, installedProvider, customRuntime, cudaAvailable, rocmAvailable)
+	diagnostics := make([]string, 0, len(providers))
+	if (requested == "" || requested == "auto") && installedProvider == "cpu" && (cudaAvailable || rocmAvailable) {
+		diagnostics = append(diagnostics, "accelerator hardware detected, but the installed ONNX Runtime only provides CPU execution")
+	}
+	return providers, diagnostics
+}
+
+func embeddingProviderCandidatesFor(requested, goos, installedProvider string, customRuntime, cudaAvailable, rocmAvailable bool) []string {
 	if requested != "" && requested != "auto" {
 		if requested == "cpu" {
 			return []string{"cpu"}
 		}
 		return []string{requested, "cpu"}
 	}
+	// Bundled runtimes contain a known provider set. Trust the installer marker
+	// instead of attempting a provider that the shared library cannot expose.
+	if !customRuntime && installedProvider != "" {
+		if installedProvider == "cpu" {
+			return []string{"cpu"}
+		}
+		return []string{installedProvider, "cpu"}
+	}
 	providers := make([]string, 0, 3)
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		providers = append(providers, "coreml")
 	case "windows":
-		if commandExists("nvidia-smi") || strings.TrimSpace(os.Getenv("CUDA_PATH")) != "" {
+		if cudaAvailable {
 			providers = append(providers, "cuda")
+		} else {
+			providers = append(providers, "directml")
 		}
-		providers = append(providers, "directml")
 	default:
-		if fileExists("/dev/nvidiactl") || commandExists("nvidia-smi") || strings.TrimSpace(os.Getenv("NVIDIA_VISIBLE_DEVICES")) != "" || strings.TrimSpace(os.Getenv("CUDA_VISIBLE_DEVICES")) != "" {
+		if cudaAvailable {
 			providers = append(providers, "cuda")
 		}
-		if fileExists("/dev/kfd") || commandExists("rocminfo") || strings.TrimSpace(os.Getenv("ROCR_VISIBLE_DEVICES")) != "" {
+		if rocmAvailable {
 			providers = append(providers, "rocm")
 		}
 	}

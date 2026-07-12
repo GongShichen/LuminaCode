@@ -49,6 +49,8 @@ func main() {
 	}
 	cfg := bridgeConfig(*projectRoot, *storePath)
 	ctx := context.Background()
+	backfill := newEmbeddingBackfillWorker(ctx, cfg, flushEmbeddingBacklog)
+	defer backfill.Close()
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	encoder := json.NewEncoder(os.Stdout)
@@ -58,7 +60,7 @@ func main() {
 			_ = encoder.Encode(response{OK: false, Error: err.Error()})
 			continue
 		}
-		result := handle(ctx, cfg, req)
+		result := handle(ctx, cfg, backfill, req)
 		if err := encoder.Encode(result); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -95,7 +97,7 @@ func bridgeConfig(projectRoot, storePath string) config.Config {
 	return cfg
 }
 
-func handle(ctx context.Context, cfg config.Config, req request) response {
+func handle(ctx context.Context, cfg config.Config, backfill *embeddingBackfillWorker, req request) response {
 	started := time.Now()
 	result := response{ID: req.ID, OK: true, Meta: map[string]any{}}
 	switch req.Op {
@@ -130,13 +132,14 @@ func handle(ctx context.Context, cfg config.Config, req request) response {
 		}
 		result.Meta["messages"] = len(state.Messages)
 		result.Meta["ingested"] = total
+		backfill.Notify()
 	case "query":
 		query := strings.TrimSpace(req.Query)
 		if query == "" {
 			return failed(req.ID, "query is required")
 		}
 		maintenanceStarted := time.Now()
-		embedded, err := flushEmbeddingBacklog(ctx, cfg)
+		embedded, err := backfill.Drain(ctx)
 		if err != nil {
 			return failed(req.ID, "flush memory embeddings: "+err.Error())
 		}
