@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"LuminaCode/config"
 )
@@ -113,7 +115,7 @@ func (w *embeddingBackfillWorker) run() {
 				break drainRequests
 			}
 		}
-		processed, err := w.backfill(w.ctx, w.cfg)
+		processed, err := w.runBackfillWithRetry()
 		if err != nil && len(waiters) == 0 {
 			fmt.Fprintf(os.Stderr, "background memory embedding backfill: %v\n", err)
 		}
@@ -122,4 +124,35 @@ func (w *embeddingBackfillWorker) run() {
 			waiter <- outcome
 		}
 	}
+}
+
+func (w *embeddingBackfillWorker) runBackfillWithRetry() (int, error) {
+	total := 0
+	for {
+		processed, err := w.backfill(w.ctx, w.cfg)
+		total += processed
+		if !retryableEmbeddingBackfillError(err) {
+			return total, err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-w.ctx.Done():
+			timer.Stop()
+			return total, w.ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func retryableEmbeddingBackfillError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var coded interface{ Code() int }
+	if !errors.As(err, &coded) {
+		return false
+	}
+	// SQLite extended result codes retain the primary code in the low byte.
+	primary := coded.Code() & 0xff
+	return primary == 5 || primary == 6 // SQLITE_BUSY or SQLITE_LOCKED
 }
