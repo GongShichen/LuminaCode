@@ -265,6 +265,16 @@ func EmbeddingStats(embedder Embedder) EmbeddingTrace {
 	return EmbeddingTrace{}
 }
 
+// EmbeddingBatchSize returns the scheduler's atomic execution unit. Callers
+// that persist generated vectors should commit after each unit so a later
+// execution failure does not discard already completed work.
+func EmbeddingBatchSize(embedder Embedder) int {
+	if scheduler, ok := embedder.(*ScheduledEmbedder); ok {
+		return scheduler.opts.BatchSize
+	}
+	return 32
+}
+
 func EmbeddingStatsDelta(before, after EmbeddingTrace) EmbeddingTrace {
 	return EmbeddingTrace{QueueWaitMS: after.QueueWaitMS - before.QueueWaitMS,
 		ExecutionMS: after.ExecutionMS - before.ExecutionMS, Batches: after.Batches - before.Batches,

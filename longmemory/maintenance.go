@@ -189,16 +189,17 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 	if err != nil {
 		return result, err
 	}
-	if len(atoms) > 0 {
-		texts := make([]string, len(atoms))
-		for index := range atoms {
-			texts[index] = atomSearchText(atoms[index])
+	for start := 0; start < len(atoms); start += EmbeddingBatchSize(embedder) {
+		end := minInt(start+EmbeddingBatchSize(embedder), len(atoms))
+		texts := make([]string, end-start)
+		for index := start; index < end; index++ {
+			texts[index-start] = atomSearchText(atoms[index])
 		}
 		vectors, embedErr := embedder.Embed(ctx, texts, EmbeddingPassage)
 		if embedErr != nil {
 			return result, embedErr
 		}
-		for index, atom := range atoms {
+		for index, atom := range atoms[start:end] {
 			if index >= len(vectors) {
 				break
 			}
@@ -208,16 +209,17 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 			result.AtomEmbedded++
 		}
 	}
-	if len(chunks) > 0 {
-		texts := make([]string, len(chunks))
-		for index := range chunks {
-			texts[index] = chunks[index].Text
+	for start := 0; start < len(chunks); start += EmbeddingBatchSize(embedder) {
+		end := minInt(start+EmbeddingBatchSize(embedder), len(chunks))
+		texts := make([]string, end-start)
+		for index := start; index < end; index++ {
+			texts[index-start] = chunks[index].Text
 		}
-		vectors, err := embedder.Embed(ctx, texts, EmbeddingPassage)
-		if err != nil {
-			return result, err
+		vectors, embedErr := embedder.Embed(ctx, texts, EmbeddingPassage)
+		if embedErr != nil {
+			return result, embedErr
 		}
-		for index, chunk := range chunks {
+		for index, chunk := range chunks[start:end] {
 			if index >= len(vectors) {
 				break
 			}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"LuminaCode/config"
@@ -113,6 +114,9 @@ func (w *embeddingBackfillWorker) run() {
 			}
 		}
 		processed, err := w.backfill(w.ctx, w.cfg)
+		if err != nil && len(waiters) == 0 {
+			fmt.Fprintf(os.Stderr, "background memory embedding backfill: %v\n", err)
+		}
 		outcome := embeddingBackfillResult{processed: processed, err: err}
 		for _, waiter := range waiters {
 			waiter <- outcome
