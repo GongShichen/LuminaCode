@@ -231,6 +231,15 @@ func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sa
 				break
 			}
 		}
+		for state.MemoryExtractionCursor < len(state.Messages) {
+			before := state.MemoryExtractionCursor
+			if _, err := controller.ExtractNow(ctx, &state); err != nil {
+				return nil, fmt.Errorf("enrich session %s at message %d: %w", state.MemorySessionID, before, err)
+			}
+			if state.MemoryExtractionCursor <= before {
+				return nil, fmt.Errorf("enrich session %s made no cursor progress at message %d", state.MemorySessionID, before)
+			}
+		}
 	}
 	if err := flushEmbeddings(ctx, cfg); err != nil {
 		return nil, err
@@ -305,10 +314,11 @@ func generateAnswer(ctx context.Context, cfg config.Config, question, evidence s
 		return "", err
 	}
 	prompt := "Memory evidence:\n" + evidence + "\n\nQuestion: " + question +
-		"\nAnswer with a short phrase using the evidence. If the evidence does not contain the answer, say 'No information available'."
+		"\nGive the shortest complete answer supported by the evidence. Copy names, dates, and distinctive wording exactly when possible. " +
+		"You may make ordinary logical or geographic inferences, but do not invent remembered events. If neither the evidence nor a direct inference supports an answer, say 'No information available'."
 	streamCtx := api.ContextWithStreamIdleTimeout(ctx, 10*time.Minute)
 	var answer strings.Builder
-	for event := range client.StreamChat(streamCtx, "Answer only from the supplied memory evidence.", []map[string]any{{"role": "user", "content": prompt}}, nil, nil) {
+	for event := range client.StreamChat(streamCtx, "Use memory evidence as the factual basis and answer concisely.", []map[string]any{{"role": "user", "content": prompt}}, nil, nil) {
 		if event.Err != nil {
 			return answer.String(), event.Err
 		}

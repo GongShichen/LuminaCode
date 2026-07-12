@@ -17,8 +17,9 @@ func BuildCoverageFacets(plan QueryPlan, expansion QueryExpansion, maxFacets int
 	facets := make([]CoverageFacet, 0, len(expansion.Facets)+1)
 	if len(expansion.Facets) > 0 {
 		facets = append(facets, CoverageFacet{Text: strings.TrimSpace(plan.Query),
-			Entities: append([]string(nil), expansion.Entities...), Relations: append([]string(nil), expansion.RelationTerms...),
-			TemporalHints: append([]TemporalConstraint(nil), validGlobalTemporal...), Required: false})
+			Entities:      anchorsPresentInText(plan.Query, expansion.Entities),
+			Relations:     anchorsPresentInText(plan.Query, expansion.RelationTerms),
+			TemporalHints: append([]TemporalConstraint(nil), validGlobalTemporal...), Required: true})
 	}
 	for _, draft := range expansion.Facets {
 		facets = append(facets, CoverageFacet{Text: strings.TrimSpace(draft.Text),
@@ -27,10 +28,6 @@ func BuildCoverageFacets(plan QueryPlan, expansion QueryExpansion, maxFacets int
 			TemporalHints: append([]TemporalConstraint(nil), effectiveTemporalConstraints(draft.TemporalConstraints)...),
 			Required:      true})
 	}
-	// The original query remains in every retrieval channel, but it is not an
-	// additional coverage obligation when expansion supplied independent needs.
-	// Counting both the composite query and its children makes the same need
-	// compete with itself and can make completion mathematically unreachable.
 	if len(facets) == 0 {
 		facets = append(facets, CoverageFacet{Text: strings.TrimSpace(plan.Query),
 			Entities: append([]string(nil), expansion.Entities...), Relations: append([]string(nil), expansion.RelationTerms...),
@@ -209,6 +206,7 @@ func BuildCoverageLedger(candidates []CandidateScore, facets []CoverageFacet, op
 	if len(selected) >= limit && !coverageTargetReached(ledger.FacetStates, supportTarget) {
 		ledger.StopReason = "atom_limit_reached"
 	}
+	selected = appendCorroboratedEvidenceReserve(candidates, selected, &ledger, opts, tokenBudget, limit)
 	ledger.Uncovered = ledger.Uncovered[:0]
 	for _, facet := range facets {
 		state := ledger.FacetStates[facet.FacetID]
@@ -217,6 +215,88 @@ func BuildCoverageLedger(candidates []CandidateScore, facets []CoverageFacet, op
 		}
 	}
 	return selected, ledger
+}
+
+// appendCorroboratedEvidenceReserve uses otherwise idle packet budget for
+// candidates independently supported by multiple retrieval signal families.
+// Coverage probabilities remain unchanged: reserve evidence improves recall
+// without falsely claiming that another information need was satisfied.
+func appendCorroboratedEvidenceReserve(candidates, selected []CandidateScore, ledger *CoverageLedger,
+	opts HybridSearchOptions, tokenBudget, limit int) []CandidateScore {
+	if ledger == nil || len(selected) >= limit || ledger.TokenUsage >= tokenBudget {
+		return selected
+	}
+	selectedIDs := make(map[string]struct{}, len(selected))
+	selectedSources := make(map[string]struct{}, len(selected))
+	for _, candidate := range selected {
+		selectedIDs[candidate.MemoryID] = struct{}{}
+		selectedSources[coverageSourceGroup(candidate.Entry)] = struct{}{}
+	}
+	maxRelevance := 0.0
+	for _, candidate := range candidates {
+		maxRelevance = math.Max(maxRelevance, candidate.FusedScore)
+	}
+	if maxRelevance <= 0 {
+		maxRelevance = 1
+	}
+	for _, candidate := range candidates {
+		if len(selected) >= limit {
+			break
+		}
+		if _, exists := selectedIDs[candidate.MemoryID]; exists || !hasCorroboratedNativeSignals(candidate) {
+			continue
+		}
+		source := coverageSourceGroup(candidate.Entry)
+		if _, duplicate := selectedSources[source]; duplicate {
+			continue
+		}
+		cost := maxInt(1, estimateTokens(candidate.Entry.Title+" "+candidate.Entry.Content))
+		if ledger.TokenUsage+cost > tokenBudget {
+			continue
+		}
+		selected = append(selected, candidate)
+		selectedIDs[candidate.MemoryID] = struct{}{}
+		selectedSources[source] = struct{}{}
+		ledger.TokenUsage += cost
+		ledger.Selected = append(ledger.Selected, CoverageDecision{DocumentID: candidate.MemoryID,
+			Utility: candidate.FusedScore / maxRelevance, UtilityPerCost: candidate.FusedScore / maxRelevance,
+			EstimatedTokens: cost, ScoreBreakdown: map[string]float64{"reserve": 1,
+				"relevance": candidate.FusedScore / maxRelevance}})
+	}
+	return selected
+}
+
+func hasCorroboratedNativeSignals(candidate CandidateScore) bool {
+	families := map[string]struct{}{}
+	for _, contribution := range candidate.Contributions {
+		if !contribution.Native || strings.TrimSpace(contribution.SignalFamily) == "" {
+			continue
+		}
+		families[contribution.SignalFamily] = struct{}{}
+	}
+	return len(families) >= 2
+}
+
+func anchorsPresentInText(text string, anchors []string) []string {
+	terms := coverageTerms(text)
+	result := make([]string, 0, len(anchors))
+	for _, anchor := range anchors {
+		anchorTerms := coverageTerms(anchor)
+		if len(anchorTerms) == 0 {
+			continue
+		}
+		present := true
+		for term := range anchorTerms {
+			if _, ok := terms[term]; !ok {
+				present = false
+				break
+			}
+		}
+		if present {
+			result = append(result, anchor)
+		}
+	}
+	return result
 }
 
 func candidateFacetSupports(candidate CandidateScore, facets []CoverageFacet,

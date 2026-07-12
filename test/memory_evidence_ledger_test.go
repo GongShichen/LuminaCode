@@ -312,8 +312,8 @@ func TestQueryRewritesDoNotBecomeIndependentCoverageFacets(t *testing.T) {
 	expansion := longmemory.QueryExpansion{Queries: []string{"release requirements", "deployment constraints"},
 		Facets: []longmemory.FacetDraft{{Text: "database choice"}, {Text: "deployment region"}}}
 	facets := longmemory.BuildCoverageFacets(plan, expansion, 8)
-	if len(facets) != 3 || facets[0].Required {
-		t.Fatalf("composite query was not retained as an optional root facet: %#v", facets)
+	if len(facets) != 3 || !facets[0].Required {
+		t.Fatalf("original query was not retained as a required root facet: %#v", facets)
 	}
 	for _, facet := range facets {
 		if facet.Text == "release requirements" || facet.Text == "deployment constraints" {
@@ -340,8 +340,11 @@ func TestCoverageLeafFacetsDoNotInheritGlobalAnchors(t *testing.T) {
 			{Text: "Atlas deployment region", Entities: []string{"Atlas"}, Relations: []string{"deployed"}},
 		}}
 	facets := longmemory.BuildCoverageFacets(longmemory.QueryPlan{Query: "Compare Aurora and Atlas"}, expansion, 8)
-	if len(facets) != 3 || facets[0].Required {
+	if len(facets) != 3 || !facets[0].Required {
 		t.Fatalf("unexpected facet hierarchy: %#v", facets)
+	}
+	if strings.Join(facets[0].Entities, ",") != "Aurora,Atlas" || len(facets[0].Relations) != 0 {
+		t.Fatalf("root facet inherited anchors not present in the original query: %#v", facets[0])
 	}
 	if strings.Join(facets[1].Entities, ",") != "Aurora" || strings.Join(facets[1].Relations, ",") != "released" ||
 		strings.Join(facets[2].Entities, ",") != "Atlas" || strings.Join(facets[2].Relations, ",") != "deployed" {
@@ -717,6 +720,33 @@ func TestCoverageLedgerStopsAfterDirectAssertionInsteadOfFillingWithTopicNoise(t
 			CoverageSourceWeight: .10, CoverageCoherenceWeight: .05}, 2400)
 	if len(selected) != 1 || selected[0].MemoryID != "booking" || ledger.StopReason != "support_target_reached" {
 		t.Fatalf("topic noise filled the evidence budget after direct support: selected=%#v ledger=%#v", selected, ledger)
+	}
+}
+
+func TestCoverageLedgerUsesIdleBudgetForCorroboratedEvidence(t *testing.T) {
+	facet := longmemory.CoverageFacet{FacetID: "identity", Text: "Caroline identity",
+		Entities: []string{"Caroline"}, Relations: []string{"identity"}}
+	signals := []longmemory.SignalContribution{
+		{Channel: "bm25", SignalFamily: "lexical", Rank: 1, Native: true},
+		{Channel: "vector", SignalFamily: "semantic", Rank: 1, Native: true},
+	}
+	candidates := []longmemory.CandidateScore{
+		{MemoryID: "topical", FusedScore: 1, Entry: longmemory.Entry{MemoryID: "topical", DocumentKind: "atom",
+			Content: "Caroline explores identity through painting.", SourceSessionID: "s1", MessageID: "m1",
+			EpistemicStatus: "reported"}, Contributions: signals},
+		{MemoryID: "specific", FusedScore: .8, Entry: longmemory.Entry{MemoryID: "specific", DocumentKind: "atom",
+			Content: "Caroline described herself as a transgender woman.", SourceSessionID: "s2", MessageID: "m2",
+			EpistemicStatus: "reported"}, Contributions: signals},
+	}
+	selected, ledger := longmemory.BuildCoverageLedger(candidates, []longmemory.CoverageFacet{facet},
+		longmemory.HybridSearchOptions{AtomMaxSelected: 32, AtomTargetTokens: 96, CoverageSupportTarget: .5,
+			CoverageRelevanceWeight: .45, CoverageFacetWeight: .25, CoverageProvenanceWeight: .15,
+			CoverageSourceWeight: .10, CoverageCoherenceWeight: .05}, 1000)
+	if len(selected) != 2 || selected[1].MemoryID != "specific" {
+		t.Fatalf("corroborated reserve evidence was discarded: selected=%#v ledger=%#v", selected, ledger)
+	}
+	if ledger.Selected[1].ScoreBreakdown["reserve"] != 1 {
+		t.Fatalf("reserve selection was not observable in the ledger: %#v", ledger.Selected)
 	}
 }
 
