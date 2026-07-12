@@ -147,7 +147,7 @@ func (p *trajectoryIngestionPool) Close() {
 func (p *trajectoryIngestionPool) runWorker() {
 	defer p.workers.Done()
 	for task := range p.tasks {
-		result, err := p.ingest(p.ctx, p.cfg, task.trajectory)
+		result, err := p.ingestWithRetry(task.trajectory)
 		if err != nil {
 			trajectoryID := strings.TrimSpace(stringField(task.trajectory, "id"))
 			p.errMu.Lock()
@@ -160,6 +160,22 @@ func (p *trajectoryIngestionPool) runWorker() {
 			p.backfill.Notify()
 		}
 		p.pending.Done()
+	}
+}
+
+func (p *trajectoryIngestionPool) ingestWithRetry(trajectory map[string]any) (trajectoryIngestionResult, error) {
+	for {
+		result, err := p.ingest(p.ctx, p.cfg, trajectory)
+		if !retryableEmbeddingBackfillError(err) {
+			return result, err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-p.ctx.Done():
+			timer.Stop()
+			return trajectoryIngestionResult{}, p.ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

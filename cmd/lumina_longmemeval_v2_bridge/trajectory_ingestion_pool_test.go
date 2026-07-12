@@ -69,3 +69,25 @@ func TestTrajectoryIngestionPoolDrainReportsWorkerFailure(t *testing.T) {
 		t.Fatalf("Drain() = (%+v, %v), want one submitted failure", stats, err)
 	}
 }
+
+func TestTrajectoryIngestionPoolRetriesSQLiteContention(t *testing.T) {
+	var calls atomic.Int64
+	pool := newTrajectoryIngestionPool(context.Background(), config.Config{}, nil, 1,
+		func(context.Context, config.Config, map[string]any) (trajectoryIngestionResult, error) {
+			if calls.Add(1) == 1 {
+				return trajectoryIngestionResult{}, codedBackfillError(517)
+			}
+			return trajectoryIngestionResult{Messages: 4, Ingested: 4}, nil
+		})
+	defer pool.Close()
+	if err := pool.Enqueue(context.Background(), map[string]any{"id": "retry"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := pool.Drain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 || stats.Completed != 1 || stats.Ingested != 4 {
+		t.Fatalf("calls=%d stats=%+v, want one successful retry", calls.Load(), stats)
+	}
+}

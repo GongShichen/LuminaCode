@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/viant/sqlite-vec/vector"
 )
 
 type MaintenanceResult struct {
@@ -19,6 +21,70 @@ type MaintenanceResult struct {
 	Linked          int `json:"linked"`
 	Promoted        int `json:"promoted"`
 	Archived        int `json:"archived"`
+}
+
+type pendingEmbeddingWrite struct {
+	id          string
+	contentHash string
+	vector      []float32
+}
+
+func (s *Store) commitEmbeddingBatch(ctx context.Context, kind, model string, writes []pendingEmbeddingWrite) error {
+	if len(writes) == 0 {
+		return nil
+	}
+	type encodedWrite struct {
+		id          string
+		contentHash string
+		dimensions  int
+		blob        []byte
+	}
+	encoded := make([]encodedWrite, 0, len(writes))
+	for _, write := range writes {
+		blob, err := vector.EncodeEmbedding(write.vector)
+		if err != nil {
+			return err
+		}
+		encoded = append(encoded, encodedWrite{id: write.id, contentHash: write.contentHash,
+			dimensions: len(write.vector), blob: blob})
+	}
+	var statement string
+	switch kind {
+	case "memory":
+		statement = `INSERT INTO memory_embeddings(memory_id, model, dimensions, content_hash, embedding, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(memory_id, model) DO UPDATE SET dimensions=excluded.dimensions,
+			content_hash=excluded.content_hash, embedding=excluded.embedding, updated_at=excluded.updated_at`
+	case "chunk":
+		statement = `INSERT INTO memory_chunk_embeddings(chunk_id, model, dimensions, content_hash, embedding, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(chunk_id, model) DO UPDATE SET dimensions=excluded.dimensions,
+			content_hash=excluded.content_hash, embedding=excluded.embedding, updated_at=excluded.updated_at`
+	case "atom":
+		statement = `INSERT INTO memory_atom_embeddings(atom_id, model, dimensions, content_hash, embedding, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(atom_id, model) DO UPDATE SET dimensions=excluded.dimensions,
+			content_hash=excluded.content_hash, embedding=excluded.embedding, updated_at=excluded.updated_at`
+	default:
+		return fmt.Errorf("unsupported embedding batch kind %q", kind)
+	}
+	writer := extractionCommitLock(s.path)
+	writer.Lock()
+	defer writer.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, statement)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := formatTime(time.Now().UTC())
+	for _, write := range encoded {
+		if _, err := stmt.ExecContext(ctx, write.id, model, write.dimensions, write.contentHash, write.blob, now, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) EnqueueJob(ctx context.Context, job Job) error {
@@ -167,14 +233,18 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 		if err != nil {
 			return result, err
 		}
+		writes := make([]pendingEmbeddingWrite, 0, minInt(len(entries), len(vectors)))
 		for index, entry := range entries {
 			if index >= len(vectors) {
 				break
 			}
-			if err := s.UpsertEmbedding(ctx, entry.MemoryID, embedder.Model(),
-				StableID(entry.ScopeType, entry.ScopeKey, "embedding-content", texts[index]), vectors[index]); err != nil {
-				return result, err
-			}
+			writes = append(writes, pendingEmbeddingWrite{id: entry.MemoryID,
+				contentHash: StableID(entry.ScopeType, entry.ScopeKey, "embedding-content", texts[index]), vector: vectors[index]})
+		}
+		if err := s.commitEmbeddingBatch(ctx, "memory", embedder.Model(), writes); err != nil {
+			return result, err
+		}
+		for _, entry := range entries[:len(writes)] {
 			result.Embedded++
 			if enriched, enrichErr := s.enrichLegacyMemory(ctx, entry); enrichErr == nil && enriched {
 				result.Enriched++
@@ -199,15 +269,17 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 		if embedErr != nil {
 			return result, embedErr
 		}
+		writes := make([]pendingEmbeddingWrite, 0, minInt(len(atoms[start:end]), len(vectors)))
 		for index, atom := range atoms[start:end] {
 			if index >= len(vectors) {
 				break
 			}
-			if err := s.UpsertAtomEmbedding(ctx, atom.AtomID, embedder.Model(), atom.ContentHash, vectors[index]); err != nil {
-				return result, err
-			}
-			result.AtomEmbedded++
+			writes = append(writes, pendingEmbeddingWrite{id: atom.AtomID, contentHash: atom.ContentHash, vector: vectors[index]})
 		}
+		if err := s.commitEmbeddingBatch(ctx, "atom", embedder.Model(), writes); err != nil {
+			return result, err
+		}
+		result.AtomEmbedded += len(writes)
 	}
 	for start := 0; start < len(chunks); start += EmbeddingBatchSize(embedder) {
 		end := minInt(start+EmbeddingBatchSize(embedder), len(chunks))
@@ -219,15 +291,17 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 		if embedErr != nil {
 			return result, embedErr
 		}
+		writes := make([]pendingEmbeddingWrite, 0, minInt(len(chunks[start:end]), len(vectors)))
 		for index, chunk := range chunks[start:end] {
 			if index >= len(vectors) {
 				break
 			}
-			if err := s.UpsertChunkEmbedding(ctx, chunk.ChunkID, embedder.Model(), chunk.ContentHash, vectors[index]); err != nil {
-				return result, err
-			}
-			result.ChunkEmbedded++
+			writes = append(writes, pendingEmbeddingWrite{id: chunk.ChunkID, contentHash: chunk.ContentHash, vector: vectors[index]})
 		}
+		if err := s.commitEmbeddingBatch(ctx, "chunk", embedder.Model(), writes); err != nil {
+			return result, err
+		}
+		result.ChunkEmbedded += len(writes)
 	}
 	sessions, err := s.sessionsMissingEmbedding(ctx, embedder.Model(), limit)
 	if err != nil {
@@ -242,16 +316,18 @@ func (s *Store) RunMaintenance(ctx context.Context, embedder Embedder, limit int
 		if err != nil {
 			return result, err
 		}
+		writes := make([]pendingEmbeddingWrite, 0, minInt(len(sessions), len(vectors)))
 		for index, session := range sessions {
 			if index >= len(vectors) {
 				break
 			}
-			if err := s.UpsertEmbedding(ctx, session.MemoryID, embedder.Model(),
-				StableID(session.ScopeType, session.ScopeKey, session.SourceSessionID, texts[index]), vectors[index]); err != nil {
-				return result, err
-			}
-			result.SessionEmbedded++
+			writes = append(writes, pendingEmbeddingWrite{id: session.MemoryID,
+				contentHash: StableID(session.ScopeType, session.ScopeKey, session.SourceSessionID, texts[index]), vector: vectors[index]})
 		}
+		if err := s.commitEmbeddingBatch(ctx, "memory", embedder.Model(), writes); err != nil {
+			return result, err
+		}
+		result.SessionEmbedded += len(writes)
 	}
 	consolidated, err := s.Consolidate(ctx, embedder.Model(), maxInt(limit*8, 128))
 	if err != nil {
