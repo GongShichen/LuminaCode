@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/viant/sqlite-vec/engine"
@@ -22,6 +23,13 @@ type Store struct {
 	db            *sql.DB
 	busyTimeoutMS int64
 }
+
+type storeMigrationState struct {
+	sync.Mutex
+	complete bool
+}
+
+var storeMigrations sync.Map
 
 func Open(ctx context.Context, path string) (*Store, error) {
 	return OpenWithBusyTimeout(ctx, path, 5*time.Second)
@@ -61,16 +69,25 @@ func OpenWithBusyTimeout(ctx context.Context, path string, busyTimeout time.Dura
 		return nil, err
 	}
 	s := &Store{path: path, db: db, busyTimeoutMS: busyTimeoutMS}
-	if err := s.migrate(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if filepath.Clean(path) == filepath.Clean(DefaultStorePath()) {
-		if _, err := s.MigrateLegacyMarkdown(ctx); err != nil {
+	stateValue, _ := storeMigrations.LoadOrStore(filepath.Clean(path), &storeMigrationState{})
+	state := stateValue.(*storeMigrationState)
+	state.Lock()
+	if !state.complete {
+		if err := s.migrate(ctx); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("migrate legacy long-term memory: %w", err)
+			state.Unlock()
+			return nil, err
 		}
+		if filepath.Clean(path) == filepath.Clean(DefaultStorePath()) {
+			if _, err := s.MigrateLegacyMarkdown(ctx); err != nil {
+				_ = db.Close()
+				state.Unlock()
+				return nil, fmt.Errorf("migrate legacy long-term memory: %w", err)
+			}
+		}
+		state.complete = true
 	}
+	state.Unlock()
 	return s, nil
 }
 
