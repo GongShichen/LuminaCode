@@ -18,14 +18,27 @@ import (
 )
 
 type Store struct {
-	path string
-	db   *sql.DB
+	path          string
+	db            *sql.DB
+	busyTimeoutMS int64
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	return OpenWithBusyTimeout(ctx, path, 5*time.Second)
+}
+
+// OpenWithBusyTimeout creates a store whose pooled SQLite connections use the
+// supplied writer wait. Long-running maintenance can retain computed work
+// while an ingestion transaction commits, without changing interactive store
+// behavior or globally extending lock waits.
+func OpenWithBusyTimeout(ctx context.Context, path string, busyTimeout time.Duration) (*Store, error) {
 	if err := engine.RegisterVectorFunctions(nil); err != nil {
 		return nil, fmt.Errorf("register memory vector functions: %w", err)
 	}
+	if busyTimeout <= 0 {
+		busyTimeout = 5 * time.Second
+	}
+	busyTimeoutMS := busyTimeout.Milliseconds()
 	path = ExpandPath(path)
 	if path == "" {
 		path = DefaultStorePath()
@@ -42,12 +55,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.Contains(dsn, "?") {
 		separator = "&"
 	}
-	dsn += separator + "_pragma=busy_timeout%3D5000"
+	dsn += separator + fmt.Sprintf("_pragma=busy_timeout%%3D%d", busyTimeoutMS)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{path: path, db: db}
+	s := &Store{path: path, db: db, busyTimeoutMS: busyTimeoutMS}
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -73,7 +86,7 @@ func (s *Store) Close() error {
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA busy_timeout=5000;`,
+		fmt.Sprintf(`PRAGMA busy_timeout=%d;`, s.busyTimeoutMS),
 		`CREATE TABLE IF NOT EXISTS memories (
 			memory_id TEXT PRIMARY KEY,
 			scope_type TEXT NOT NULL,

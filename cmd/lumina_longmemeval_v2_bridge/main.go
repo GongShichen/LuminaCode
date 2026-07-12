@@ -187,7 +187,7 @@ func flushEmbeddingBacklog(ctx context.Context, cfg config.Config) (int, error) 
 		QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
 		ExecutionTimeout:  time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second)),
 	})
-	store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
+	store, err := longmemory.OpenWithBusyTimeout(ctx, cfg.LongTermMemoryStore, 15*time.Minute)
 	if err != nil {
 		return 0, err
 	}
