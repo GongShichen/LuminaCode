@@ -54,15 +54,20 @@ download_verified() {
 platform_archive() {
     os="$(uname -s)"
     arch="$(uname -m)"
+    device="$(printf '%s' "${LUMINA_MEMORY_EMBEDDING_DEVICE:-auto}" | tr '[:upper:]' '[:lower:]')"
     case "$os/$arch" in
         Darwin/arm64)
-            printf '%s\n' "onnxruntime-osx-arm64-$ORT_RELEASE.tgz|7a1280bbb1701ea514f71828765237e7896e0f2e1cd332f1f70dbd5c3e33aca3|lib/libonnxruntime.dylib"
+            printf '%s\n' "onnxruntime-osx-arm64-$ORT_RELEASE.tgz|7a1280bbb1701ea514f71828765237e7896e0f2e1cd332f1f70dbd5c3e33aca3|lib/libonnxruntime.dylib|coreml"
             ;;
         Linux/x86_64|Linux/amd64)
-            printf '%s\n' "onnxruntime-linux-x64-$ORT_RELEASE.tgz|1254da24fb389cf39dc0ff3451ab48301740ffbfcbaf646849df92f80ee92c57|lib/libonnxruntime.so.$ORT_RELEASE"
+            if [ "$device" = "cuda" ] || { [ "$device" = "auto" ] && { [ -e /dev/nvidiactl ] || command -v nvidia-smi >/dev/null 2>&1; }; }; then
+                printf '%s\n' "onnxruntime-linux-x64-gpu-$ORT_RELEASE.tgz|cb7df7ee2ca0f962c7ce7c839aeae36223d146a91fb4646d62fb0046f297479f|lib/libonnxruntime.so.$ORT_RELEASE|cuda"
+            else
+                printf '%s\n' "onnxruntime-linux-x64-$ORT_RELEASE.tgz|1254da24fb389cf39dc0ff3451ab48301740ffbfcbaf646849df92f80ee92c57|lib/libonnxruntime.so.$ORT_RELEASE|cpu"
+            fi
             ;;
         Linux/aarch64|Linux/arm64)
-            printf '%s\n' "onnxruntime-linux-aarch64-$ORT_RELEASE.tgz|34ff1c2d0f12e2cf3d33a0c5f82e39792e1d581fbd6968fd7c30d173654be01a|lib/libonnxruntime.so.$ORT_RELEASE"
+            printf '%s\n' "onnxruntime-linux-aarch64-$ORT_RELEASE.tgz|34ff1c2d0f12e2cf3d33a0c5f82e39792e1d581fbd6968fd7c30d173654be01a|lib/libonnxruntime.so.$ORT_RELEASE|cpu"
             ;;
         *)
             echo "Unsupported memory embedding platform: $os/$arch" >&2
@@ -76,12 +81,13 @@ install_runtime() {
     archive_name="$(printf '%s' "$descriptor" | cut -d'|' -f1)"
     archive_sha="$(printf '%s' "$descriptor" | cut -d'|' -f2)"
     library_path="$(printf '%s' "$descriptor" | cut -d'|' -f3)"
+    provider="$(printf '%s' "$descriptor" | cut -d'|' -f4)"
     runtime_dir="$MODEL_DIR/runtime"
     case "$(uname -s)" in
         Darwin) target_library="$runtime_dir/lib/libonnxruntime.dylib" ;;
         *) target_library="$runtime_dir/lib/libonnxruntime.so.1" ;;
     esac
-    if [ -f "$target_library" ]; then
+    if [ -f "$target_library" ] && [ -f "$runtime_dir/provider" ] && [ "$(cat "$runtime_dir/provider")" = "$provider" ]; then
         return 0
     fi
     archive="$MODEL_DIR/$archive_name"
@@ -96,6 +102,10 @@ install_runtime() {
         return 1
     }
     cp "$source_library" "$target_library"
+    if [ "$provider" = "cuda" ]; then
+        find "$extract_dir" -type f -name 'libonnxruntime_providers_*.so' -exec cp '{}' "$runtime_dir/lib/" ';'
+    fi
+    printf '%s\n' "$provider" > "$runtime_dir/provider"
     rm -rf "$extract_dir" "$archive"
 }
 
@@ -114,6 +124,7 @@ install_embedding() {
   "source": "ModelScope/AI-ModelScope/multilingual-e5-small",
   "model_sha256": "$MODEL_SHA256",
   "tokenizer_sha256": "$TOKENIZER_SHA256",
+	"runtime_provider": "$(cat "$MODEL_DIR/runtime/provider")",
   "dimensions": 384
 }
 EOF

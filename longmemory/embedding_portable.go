@@ -34,6 +34,12 @@ func (e *LocalEmbedder) Model() string { return "" }
 
 func (e *LocalEmbedder) Dimensions() int { return 0 }
 
+func (e *LocalEmbedder) Provider() string { return "unavailable" }
+
+func (e *LocalEmbedder) ProviderDiagnostics() []string {
+	return []string{"local memory embeddings require a cgo-enabled LuminaCode build"}
+}
+
 func (e *LocalEmbedder) Embed(context.Context, []string, EmbeddingKind) ([][]float32, error) {
 	return nil, fmt.Errorf("local memory embeddings require a cgo-enabled LuminaCode build")
 }

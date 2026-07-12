@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -32,11 +34,13 @@ type Embedder interface {
 }
 
 type LocalEmbedder struct {
-	modelName string
-	modelDir  string
-	tokenizer *tokenizer.Tokenizer
-	session   *ort.DynamicAdvancedSession
-	mu        sync.Mutex
+	modelName   string
+	modelDir    string
+	tokenizer   *tokenizer.Tokenizer
+	session     *ort.DynamicAdvancedSession
+	provider    string
+	diagnostics []string
+	mu          sync.Mutex
 }
 
 var embeddingRuntime struct {
@@ -87,17 +91,127 @@ func NewLocalEmbedder(modelName, modelDir string) (*LocalEmbedder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load memory tokenizer: %w", err)
 	}
-	session, err := ort.NewDynamicAdvancedSession(modelPath,
-		[]string{"input_ids", "attention_mask", "token_type_ids"}, []string{"last_hidden_state"}, nil)
+	session, provider, diagnostics, err := newEmbeddingSession(modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("load memory embedding model: %w", err)
 	}
-	return &LocalEmbedder{modelName: modelName, modelDir: modelDir, tokenizer: tok, session: session}, nil
+	return &LocalEmbedder{modelName: modelName, modelDir: modelDir, tokenizer: tok, session: session,
+		provider: provider, diagnostics: diagnostics}, nil
 }
 
 func (e *LocalEmbedder) Model() string { return e.modelName }
 
 func (e *LocalEmbedder) Dimensions() int { return 384 }
+
+func (e *LocalEmbedder) Provider() string { return e.provider }
+
+func (e *LocalEmbedder) ProviderDiagnostics() []string {
+	return append([]string(nil), e.diagnostics...)
+}
+
+func newEmbeddingSession(modelPath string) (*ort.DynamicAdvancedSession, string, []string, error) {
+	providers := embeddingProviderCandidates()
+	diagnostics := make([]string, 0, len(providers))
+	var lastErr error
+	for _, provider := range providers {
+		options, err := ort.NewSessionOptions()
+		if err != nil {
+			return nil, "", diagnostics, err
+		}
+		if err = configureEmbeddingSessionOptions(options, provider); err == nil {
+			var session *ort.DynamicAdvancedSession
+			session, err = ort.NewDynamicAdvancedSession(modelPath,
+				[]string{"input_ids", "attention_mask", "token_type_ids"}, []string{"last_hidden_state"}, options)
+			if err == nil {
+				_ = options.Destroy()
+				return session, provider, diagnostics, nil
+			}
+		}
+		_ = options.Destroy()
+		lastErr = err
+		diagnostics = append(diagnostics, provider+": "+err.Error())
+	}
+	return nil, "", diagnostics, lastErr
+}
+
+func embeddingProviderCandidates() []string {
+	requested := strings.ToLower(strings.TrimSpace(os.Getenv("LUMINA_MEMORY_EMBEDDING_DEVICE")))
+	switch requested {
+	case "mps", "metal":
+		requested = "coreml"
+	case "amd":
+		requested = "rocm"
+	}
+	if requested != "" && requested != "auto" {
+		if requested == "cpu" {
+			return []string{"cpu"}
+		}
+		return []string{requested, "cpu"}
+	}
+	providers := make([]string, 0, 3)
+	switch runtime.GOOS {
+	case "darwin":
+		providers = append(providers, "coreml")
+	case "windows":
+		if commandExists("nvidia-smi") || strings.TrimSpace(os.Getenv("CUDA_PATH")) != "" {
+			providers = append(providers, "cuda")
+		}
+		providers = append(providers, "directml")
+	default:
+		if fileExists("/dev/nvidiactl") || commandExists("nvidia-smi") || strings.TrimSpace(os.Getenv("NVIDIA_VISIBLE_DEVICES")) != "" || strings.TrimSpace(os.Getenv("CUDA_VISIBLE_DEVICES")) != "" {
+			providers = append(providers, "cuda")
+		}
+		if fileExists("/dev/kfd") || commandExists("rocminfo") || strings.TrimSpace(os.Getenv("ROCR_VISIBLE_DEVICES")) != "" {
+			providers = append(providers, "rocm")
+		}
+	}
+	return append(providers, "cpu")
+}
+
+func configureEmbeddingSessionOptions(options *ort.SessionOptions, provider string) error {
+	if err := options.SetGraphOptimizationLevel(ort.GraphOptimizationLevelEnableAll); err != nil {
+		return err
+	}
+	switch provider {
+	case "cuda":
+		cudaOptions, err := ort.NewCUDAProviderOptions()
+		if err != nil {
+			return err
+		}
+		defer cudaOptions.Destroy()
+		if err := cudaOptions.Update(map[string]string{"device_id": "0"}); err != nil {
+			return err
+		}
+		return options.AppendExecutionProviderCUDA(cudaOptions)
+	case "coreml":
+		return options.AppendExecutionProviderCoreMLV2(map[string]string{"MLComputeUnits": "ALL"})
+	case "rocm":
+		return options.AppendExecutionProvider("ROCMExecutionProvider", map[string]string{"device_id": "0"})
+	case "directml":
+		return options.AppendExecutionProviderDirectML(0)
+	case "cpu":
+		threads := minInt(runtime.NumCPU(), 16)
+		if configured, err := strconv.Atoi(strings.TrimSpace(os.Getenv("LUMINA_MEMORY_EMBEDDING_THREADS"))); err == nil && configured > 0 {
+			threads = configured
+		}
+		if err := options.SetIntraOpNumThreads(threads); err != nil {
+			return err
+		}
+		return options.SetInterOpNumThreads(1)
+	default:
+		return fmt.Errorf("unsupported memory embedding device %q", provider)
+	}
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
 
 func (e *LocalEmbedder) Close() error {
 	if e == nil || e.session == nil {

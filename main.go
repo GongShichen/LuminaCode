@@ -257,6 +257,7 @@ func runMemoryCLI(args []string) error {
 		}
 		return writeJSON(os.Stdout, map[string]any{"status": "ready", "model": embedder.Model(),
 			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir,
+			"provider": embedder.Provider(), "provider_diagnostics": embedder.ProviderDiagnostics(),
 			"indexed_memories": catalog.TotalMemories, "indexed_sessions": catalog.TotalSessions,
 			"indexed_chunks": catalog.TotalChunks, "indexed_atoms": catalog.TotalAtoms,
 			"embedding_batch_size":                cfg.MemoryEmbeddingBatchSize,

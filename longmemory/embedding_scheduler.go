@@ -99,25 +99,45 @@ func (s *ScheduledEmbedder) Embed(ctx context.Context, texts []string, kind Embe
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	if len(texts) > s.opts.BatchSize {
-		vectors := make([][]float32, 0, len(texts))
-		for start := 0; start < len(texts); start += s.opts.BatchSize {
-			end := minInt(start+s.opts.BatchSize, len(texts))
-			batch, err := s.Embed(ctx, texts[start:end], kind)
-			if err != nil {
-				return nil, err
-			}
-			vectors = append(vectors, batch...)
-		}
-		return vectors, nil
-	}
-	key := embeddingCacheKey(kind, texts)
-	if kind == EmbeddingQuery {
-		if cached, ok := s.cached(key); ok {
+	vectors := make([][]float32, len(texts))
+	missingTexts := make([]string, 0, len(texts))
+	missingKeys := make([]string, 0, len(texts))
+	missingIndexes := make([][]int, 0, len(texts))
+	missingByKey := map[string]int{}
+	for index, value := range texts {
+		key := embeddingTextCacheKey(kind, value)
+		if cached, ok := s.cached(key); ok && len(cached) == 1 {
 			s.cacheHits.Add(1)
-			return cached, nil
+			vectors[index] = cached[0]
+			continue
+		}
+		if missingIndex, ok := missingByKey[key]; ok {
+			missingIndexes[missingIndex] = append(missingIndexes[missingIndex], index)
+			continue
+		}
+		missingByKey[key] = len(missingTexts)
+		missingTexts = append(missingTexts, value)
+		missingKeys = append(missingKeys, key)
+		missingIndexes = append(missingIndexes, []int{index})
+	}
+	for start := 0; start < len(missingTexts); start += s.opts.BatchSize {
+		end := minInt(start+s.opts.BatchSize, len(missingTexts))
+		batch, err := s.enqueue(ctx, missingTexts[start:end], kind)
+		if err != nil {
+			return nil, err
+		}
+		for offset, vector := range batch {
+			missingIndex := start + offset
+			s.putCached(missingKeys[missingIndex], [][]float32{vector})
+			for _, outputIndex := range missingIndexes[missingIndex] {
+				vectors[outputIndex] = append([]float32(nil), vector...)
+			}
 		}
 	}
+	return vectors, nil
+}
+
+func (s *ScheduledEmbedder) enqueue(ctx context.Context, texts []string, kind EmbeddingKind) ([][]float32, error) {
 	request := embeddingRequest{ctx: ctx, texts: append([]string(nil), texts...), kind: kind,
 		queuedAt: time.Now(), result: make(chan embeddingResponse, 1)}
 	queue := s.passQueue
@@ -131,9 +151,6 @@ func (s *ScheduledEmbedder) Embed(ctx context.Context, texts []string, kind Embe
 	}
 	select {
 	case response := <-request.result:
-		if response.err == nil && kind == EmbeddingQuery {
-			s.putCached(key, response.vectors)
-		}
 		return response.vectors, response.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -261,6 +278,10 @@ func embeddingCacheKey(kind EmbeddingKind, texts []string) string {
 		normalized[index] = strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(text))), " ")
 	}
 	return string(kind) + "\x00" + strings.Join(normalized, "\x00")
+}
+
+func embeddingTextCacheKey(kind EmbeddingKind, value string) string {
+	return embeddingCacheKey(kind, []string{value})
 }
 
 func (s *ScheduledEmbedder) cached(key string) ([][]float32, bool) {

@@ -149,6 +149,24 @@ func TestEmbeddingSchedulerEnforcesBatchSizeForLargePassageRequest(t *testing.T)
 	}
 }
 
+func TestEmbeddingSchedulerDeduplicatesAndCachesPassages(t *testing.T) {
+	base := &recordingEmbedder{}
+	embedder := longmemory.SharedEmbeddingScheduler(base, longmemory.EmbeddingSchedulerOptions{
+		BatchSize: 8, BatchWait: time.Millisecond, QueryCacheEntries: 32, ExecutionTimeout: time.Second})
+	texts := []string{"repeated browser state", "unique decision", "repeated browser state"}
+	for run := 0; run < 2; run++ {
+		vectors, err := embedder.Embed(context.Background(), texts, longmemory.EmbeddingPassage)
+		if err != nil || len(vectors) != len(texts) {
+			t.Fatalf("passage embedding run %d failed: vectors=%d error=%v", run, len(vectors), err)
+		}
+	}
+	base.mu.Lock()
+	defer base.mu.Unlock()
+	if len(base.texts) != 2 {
+		t.Fatalf("expected two unique passage computations across both calls, got %#v", base.texts)
+	}
+}
+
 func TestIncrementalExpansionDoesNotRepeatOriginalQuery(t *testing.T) {
 	ctx := context.Background()
 	store, err := longmemory.Open(ctx, filepath.Join(t.TempDir(), "memory.sqlite"))

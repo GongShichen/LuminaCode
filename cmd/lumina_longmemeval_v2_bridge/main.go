@@ -15,6 +15,7 @@ import (
 	"LuminaCode/api"
 	adapter "LuminaCode/benchmark/longmemevalv2"
 	"LuminaCode/config"
+	"LuminaCode/longmemory"
 	coretools "LuminaCode/tools"
 )
 
@@ -134,6 +135,13 @@ func handle(ctx context.Context, cfg config.Config, req request) response {
 		if query == "" {
 			return failed(req.ID, "query is required")
 		}
+		maintenanceStarted := time.Now()
+		embedded, err := flushEmbeddingBacklog(ctx, cfg)
+		if err != nil {
+			return failed(req.ID, "flush memory embeddings: "+err.Error())
+		}
+		result.Meta["embedding_backfill_items"] = embedded
+		result.Meta["embedding_backfill_ms"] = time.Since(maintenanceStarted).Milliseconds()
 		state := agent.NewAgentState()
 		state.MemorySessionID = "longmemeval-v2-query"
 		state.MemoryAgentID = "main"
@@ -161,6 +169,38 @@ func handle(ctx context.Context, cfg config.Config, req request) response {
 	}
 	result.Meta["duration_ms"] = time.Since(started).Milliseconds()
 	return result
+}
+
+func flushEmbeddingBacklog(ctx context.Context, cfg config.Config) (int, error) {
+	if !cfg.MemoryEmbeddingEnabled {
+		return 0, nil
+	}
+	local, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+	if err != nil {
+		return 0, err
+	}
+	embedder := longmemory.SharedEmbeddingScheduler(local, longmemory.EmbeddingSchedulerOptions{
+		BatchSize: cfg.MemoryEmbeddingBatchSize, BatchWait: time.Duration(cfg.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
+		QueryCacheEntries: cfg.MemoryEmbeddingQueryCacheEntries,
+		ExecutionTimeout:  time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second)),
+	})
+	store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	total := 0
+	for {
+		maintenance, runErr := store.RunMaintenance(ctx, embedder, max(cfg.MemoryEmbeddingBatchSize*4, 128))
+		if runErr != nil {
+			return total, runErr
+		}
+		processed := maintenance.Embedded + maintenance.ChunkEmbedded + maintenance.AtomEmbedded + maintenance.SessionEmbedded
+		total += processed
+		if processed == 0 {
+			return total, nil
+		}
+	}
 }
 
 func failed(id, message string) response {

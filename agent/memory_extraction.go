@@ -745,34 +745,10 @@ func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, paylo
 		span.SessionID = episode.SessionID
 		batch.Chunks = append(batch.Chunks, longmemory.BuildEvidenceChunks(span)...)
 	}
-	if c.Config.MemoryEmbeddingEnabled {
-		if embedder := configuredMemoryEmbedder(c.Config); embedder != nil {
-			if len(batch.Chunks) > 0 {
-				texts := make([]string, len(batch.Chunks))
-				for index := range batch.Chunks {
-					texts[index] = batch.Chunks[index].Text
-				}
-				if vectors, err := embedder.Embed(ctx, texts, longmemory.EmbeddingPassage); err == nil {
-					for index, vector := range vectors {
-						if index >= len(batch.Chunks) {
-							break
-						}
-						batch.ChunkEmbeddings = append(batch.ChunkEmbeddings, longmemory.MemoryEmbedding{
-							MemoryID: batch.Chunks[index].ChunkID, Model: embedder.Model(),
-							ContentHash: batch.Chunks[index].ContentHash, Vector: vector})
-					}
-				}
-			}
-			if vectors, err := embedder.Embed(ctx, []string{episode.Content}, longmemory.EmbeddingPassage); err == nil && len(vectors) == 1 {
-				batch.SessionEmbedding = &longmemory.MemoryEmbedding{Model: embedder.Model(),
-					ContentHash: longmemory.StableID(episode.ScopeType, episode.ScopeKey, episode.SessionID, episode.Content), Vector: vectors[0]}
-			}
-		}
-		if len(batch.ChunkEmbeddings) != len(batch.Chunks) || batch.SessionEmbedding == nil {
-			batch.Jobs = append(batch.Jobs, longmemory.Job{Kind: "embedding_backfill",
-				ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
-				Payload: fmt.Sprintf(`{"session_id":%q,"source":"raw_ingestion"}`, payload.SessionID)})
-		}
+	if c.Config.MemoryEmbeddingEnabled && len(batch.Chunks) > 0 {
+		batch.Jobs = append(batch.Jobs, longmemory.Job{Kind: "embedding_backfill",
+			ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+			Payload: fmt.Sprintf(`{"session_id":%q,"source":"raw_ingestion"}`, payload.SessionID)})
 	}
 	return batch
 }
