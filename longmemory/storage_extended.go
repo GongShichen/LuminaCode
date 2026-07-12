@@ -532,6 +532,11 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	evidenceWriter, err := newEvidenceTxWriter(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer evidenceWriter.close()
 	var committedEpisode *Episode
 	if preparedEpisode != nil {
 		if err := appendEpisodeTx(ctx, tx, *preparedEpisode); err != nil {
@@ -567,7 +572,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			if _, err := tx.ExecContext(ctx, `DELETE FROM memory_fts WHERE memory_id=?`, targetID); err != nil {
 				return err
 			}
-			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: entry.ScopeType, ScopeKey: entry.ScopeKey,
+			if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: entry.ScopeType, ScopeKey: entry.ScopeKey,
 				FromID: targetID, ToID: entry.MemoryID, Type: EdgeSupersedes, Weight: 1, Confidence: entry.Confidence})); err != nil {
 				return err
 			}
@@ -576,14 +581,14 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 	}
 	if committedEpisode != nil && len(memoryIDs) > 0 {
 		if priorSessionMemoryID != "" && priorSessionMemoryID != memoryIDs[0] {
-			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: committedEpisode.ScopeType,
+			if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: committedEpisode.ScopeType,
 				ScopeKey: committedEpisode.ScopeKey, FromID: priorSessionMemoryID, ToID: memoryIDs[0],
 				Type: EdgeNextEvent, Weight: 1, Confidence: 1})); err != nil {
 				return err
 			}
 		}
 		for index := 1; index < len(memoryIDs); index++ {
-			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: committedEpisode.ScopeType,
+			if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: committedEpisode.ScopeType,
 				ScopeKey: committedEpisode.ScopeKey, FromID: memoryIDs[index-1], ToID: memoryIDs[index],
 				Type: EdgeNextEvent, Weight: 1, Confidence: 1})); err != nil {
 				return err
@@ -602,7 +607,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			AND session_id<>? AND ended_at<=? ORDER BY ended_at DESC LIMIT 1`, sessionIndex.ScopeType,
 			sessionIndex.ScopeKey, sessionIndex.SessionID, formatTime(sessionIndex.StartedAt)).Scan(&priorSessionIndexID)
 		if priorSessionIndexID != "" {
-			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+			if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 				ScopeKey: sessionIndex.ScopeKey, FromID: priorSessionIndexID, ToID: sessionIndex.IndexID,
 				Type: EdgeNextEvent, Weight: 1, Confidence: 1})); err != nil {
 				return err
@@ -619,11 +624,11 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				return err
 			}
 			for _, chunk := range prepared.chunks {
-				if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
+				if err := evidenceWriter.upsertChunk(ctx, chunk); err != nil {
 					return err
 				}
 				committedChunkIDs[chunk.ChunkID] = struct{}{}
-				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+				if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 					ScopeKey: sessionIndex.ScopeKey, FromID: sessionIndex.IndexID, ToID: chunk.ChunkID,
 					Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
 					return err
@@ -633,7 +638,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 					previousID = committedChunks[len(committedChunks)-1].ChunkID
 				}
 				if previousID != "" && previousID != chunk.ChunkID {
-					if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
+					if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 						ScopeKey: sessionIndex.ScopeKey, FromID: previousID, ToID: chunk.ChunkID,
 						Type: EdgeNextEvent, Weight: 0.9, Confidence: 1})); err != nil {
 						return err
@@ -642,10 +647,10 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				committedChunks = append(committedChunks, chunk)
 			}
 			for _, atom := range prepared.atoms {
-				if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
+				if err := evidenceWriter.upsertAtom(ctx, atom); err != nil {
 					return err
 				}
-				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
+				if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: atom.ScopeType, ScopeKey: atom.ScopeKey,
 					FromID: atom.ChunkID, ToID: atom.AtomID, Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
 					return err
 				}
@@ -655,7 +660,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			if _, exists := committedChunkIDs[chunk.ChunkID]; exists {
 				continue
 			}
-			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
+			if err := evidenceWriter.upsertChunk(ctx, chunk); err != nil {
 				return err
 			}
 		}
@@ -676,7 +681,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				if _, ok := allowedMessages[chunk.MessageID]; !ok {
 					continue
 				}
-				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: candidate.ScopeType,
+				if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: candidate.ScopeType,
 					ScopeKey: candidate.ScopeKey, FromID: memoryIDs[memoryIndex], ToID: chunk.ChunkID,
 					Type: EdgeSupports, Weight: 1, Confidence: candidate.Confidence})); err != nil {
 					return err
@@ -737,7 +742,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 		if edge.FromID == "" || edge.ToID == "" {
 			continue
 		}
-		if err := upsertEdgeTx(ctx, tx, normalizeEdge(edge)); err != nil {
+		if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(edge)); err != nil {
 			return err
 		}
 	}
@@ -774,7 +779,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			if !sharesString(batch.Memories[left].Entities, batch.Memories[right].Entities) {
 				continue
 			}
-			if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: batch.Memories[left].ScopeType,
+			if err := evidenceWriter.upsertEdge(ctx, normalizeEdge(Edge{ScopeType: batch.Memories[left].ScopeType,
 				ScopeKey: batch.Memories[left].ScopeKey, FromID: memoryIDs[left], ToID: memoryIDs[right],
 				Type: EdgeRelatedTo, Weight: 0.7, Confidence: minFloat(batch.Memories[left].Confidence, batch.Memories[right].Confidence)})); err != nil {
 				return err
