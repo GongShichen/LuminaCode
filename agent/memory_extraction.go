@@ -44,6 +44,7 @@ type ExtractionController struct {
 	BaseRegistry     *coretools.ToolRegistry
 	ExtractionConfig ExtractionConfig
 	Runner           ExtractionRunner
+	StoreBusyTimeout time.Duration
 
 	mu                  sync.Mutex
 	currentRunning      bool
@@ -263,7 +264,13 @@ func (c *ExtractionController) IngestMessages(ctx context.Context, state *AgentS
 	}
 	consumerID := "long-term-extraction:" + firstNonEmptyString(c.SourceAgentID, "main")
 	start := 0
-	store, err := longmemory.Open(ctx, storePath)
+	var store *longmemory.Store
+	var err error
+	if c.StoreBusyTimeout > 0 {
+		store, err = longmemory.OpenWithBusyTimeout(ctx, storePath, c.StoreBusyTimeout)
+	} else {
+		store, err = longmemory.Open(ctx, storePath)
+	}
 	if err != nil {
 		return 0, err
 	}

@@ -7,13 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/viant/sqlite-vec/vector"
 	"gonum.org/v1/gonum/graph/simple"
 )
+
+var extractionCommitLocks sync.Map
+
+func extractionCommitLock(path string) *sync.Mutex {
+	key := filepath.Clean(path)
+	lock, _ := extractionCommitLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
 
 func (s *Store) migrateMemoryStorage(ctx context.Context) error {
 	statements := []string{
@@ -476,11 +486,6 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 	if s == nil || s.db == nil {
 		return errors.New("memory store is closed")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
 	atomTarget, atomMax := batch.AtomTargetTokens, batch.AtomMaxTokens
 	if atomTarget <= 0 {
 		atomTarget = defaultAtomTargetTokens
@@ -488,13 +493,51 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 	if atomMax < atomTarget {
 		atomMax = maxInt(defaultAtomMaxTokens, atomTarget)
 	}
-	var committedEpisode *Episode
+	type preparedSpanEvidence struct {
+		span   EvidenceSpan
+		chunks []EvidenceChunk
+		atoms  []EvidenceAtom
+	}
+	var preparedEpisode *Episode
+	var preparedSessionIndex SessionIndex
+	var preparedEvidence []preparedSpanEvidence
 	if batch.Episode != nil {
 		episode := normalizeEpisode(*batch.Episode)
-		if err := appendEpisodeTx(ctx, tx, episode); err != nil {
+		preparedEpisode = &episode
+		preparedSessionIndex = buildSessionIndex(episode, batch.Memories)
+		chunksByMessage := make(map[string][]EvidenceChunk, len(batch.EpisodeSpans))
+		for _, chunk := range batch.Chunks {
+			chunksByMessage[chunk.MessageID] = append(chunksByMessage[chunk.MessageID], chunk)
+		}
+		for _, sourceSpan := range batch.EpisodeSpans {
+			span := sourceSpan
+			span.MemoryID = preparedSessionIndex.IndexID
+			span.ScopeType = preparedSessionIndex.ScopeType
+			span.ScopeKey = preparedSessionIndex.ScopeKey
+			span.SessionID = preparedSessionIndex.SessionID
+			span = normalizeEvidenceSpan(span)
+			chunks := append([]EvidenceChunk(nil), chunksByMessage[span.MessageID]...)
+			if len(chunks) == 0 {
+				chunks = BuildEvidenceChunks(span)
+			}
+			atoms := BuildEvidenceAtomsForSpan(span, chunks, atomTarget, atomMax)
+			preparedEvidence = append(preparedEvidence, preparedSpanEvidence{span: span, chunks: chunks, atoms: atoms})
+		}
+	}
+	writer := extractionCommitLock(s.path)
+	writer.Lock()
+	defer writer.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var committedEpisode *Episode
+	if preparedEpisode != nil {
+		if err := appendEpisodeTx(ctx, tx, *preparedEpisode); err != nil {
 			return err
 		}
-		committedEpisode = &episode
+		committedEpisode = preparedEpisode
 	}
 	priorSessionMemoryID := ""
 	if committedEpisode != nil && len(batch.Memories) > 0 {
@@ -550,7 +593,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 	var committedChunks []EvidenceChunk
 	var sessionIndex SessionIndex
 	if committedEpisode != nil {
-		sessionIndex = buildSessionIndex(*committedEpisode, batch.Memories)
+		sessionIndex = preparedSessionIndex
 		if err := upsertSessionIndexTx(ctx, tx, sessionIndex); err != nil {
 			return err
 		}
@@ -569,20 +612,17 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 		_ = tx.QueryRowContext(ctx, `SELECT chunk_id FROM memory_evidence_chunks
 			WHERE scope_type=? AND scope_key=? AND session_id=? ORDER BY occurred_at DESC, end_rune DESC LIMIT 1`,
 			sessionIndex.ScopeType, sessionIndex.ScopeKey, sessionIndex.SessionID).Scan(&priorChunkID)
-		for _, span := range batch.EpisodeSpans {
-			span.MemoryID = sessionIndex.IndexID
-			span.ScopeType = sessionIndex.ScopeType
-			span.ScopeKey = sessionIndex.ScopeKey
-			span.SessionID = sessionIndex.SessionID
-			span = normalizeEvidenceSpan(span)
+		committedChunkIDs := make(map[string]struct{}, len(batch.Chunks))
+		for _, prepared := range preparedEvidence {
+			span := prepared.span
 			if err := upsertEvidenceSpanTx(ctx, tx, span); err != nil {
 				return err
 			}
-			chunks := BuildEvidenceChunks(span)
-			for _, chunk := range chunks {
+			for _, chunk := range prepared.chunks {
 				if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
 					return err
 				}
+				committedChunkIDs[chunk.ChunkID] = struct{}{}
 				if err := upsertEdgeTx(ctx, tx, normalizeEdge(Edge{ScopeType: sessionIndex.ScopeType,
 					ScopeKey: sessionIndex.ScopeKey, FromID: sessionIndex.IndexID, ToID: chunk.ChunkID,
 					Type: EdgeContains, Weight: 1, Confidence: 1})); err != nil {
@@ -601,7 +641,7 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 				}
 				committedChunks = append(committedChunks, chunk)
 			}
-			for _, atom := range BuildEvidenceAtomsForSpan(span, chunks, atomTarget, atomMax) {
+			for _, atom := range prepared.atoms {
 				if err := upsertEvidenceAtomTx(ctx, tx, atom); err != nil {
 					return err
 				}
@@ -612,6 +652,9 @@ func (s *Store) CommitExtraction(ctx context.Context, batch ExtractionBatch) err
 			}
 		}
 		for _, chunk := range batch.Chunks {
+			if _, exists := committedChunkIDs[chunk.ChunkID]; exists {
+				continue
+			}
 			if err := upsertEvidenceChunkTx(ctx, tx, chunk); err != nil {
 				return err
 			}

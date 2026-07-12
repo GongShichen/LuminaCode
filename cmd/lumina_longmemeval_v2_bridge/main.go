@@ -13,10 +13,8 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/api"
-	adapter "LuminaCode/benchmark/longmemevalv2"
 	"LuminaCode/config"
 	"LuminaCode/longmemory"
-	coretools "LuminaCode/tools"
 )
 
 type request struct {
@@ -51,6 +49,8 @@ func main() {
 	ctx := context.Background()
 	backfill := newEmbeddingBackfillWorker(ctx, cfg, flushEmbeddingBacklog)
 	defer backfill.Close()
+	ingestion := newTrajectoryIngestionPool(ctx, cfg, backfill, configuredIngestionWorkers(), ingestTrajectory)
+	defer ingestion.Close()
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	encoder := json.NewEncoder(os.Stdout)
@@ -60,7 +60,7 @@ func main() {
 			_ = encoder.Encode(response{OK: false, Error: err.Error()})
 			continue
 		}
-		result := handle(ctx, cfg, backfill, req)
+		result := handle(ctx, cfg, ingestion, backfill, req)
 		if err := encoder.Encode(result); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -97,7 +97,7 @@ func bridgeConfig(projectRoot, storePath string) config.Config {
 	return cfg
 }
 
-func handle(ctx context.Context, cfg config.Config, backfill *embeddingBackfillWorker, req request) response {
+func handle(ctx context.Context, cfg config.Config, ingestion *trajectoryIngestionPool, backfill *embeddingBackfillWorker, req request) response {
 	started := time.Now()
 	result := response{ID: req.ID, OK: true, Meta: map[string]any{}}
 	switch req.Op {
@@ -106,38 +106,25 @@ func handle(ctx context.Context, cfg config.Config, backfill *embeddingBackfillW
 		if trajectoryID == "" {
 			return failed(req.ID, "trajectory id is required")
 		}
-		state := agent.NewAgentState()
-		state.MemorySessionID = trajectoryID
-		state.MemoryAgentID = "trajectory-replay"
-		state.MemoryAgentType = "trajectory-replay"
-		state.Messages = adapter.MessagesFromTrajectory(req.Trajectory)
-		for _, message := range state.Messages {
-			if message["role"] == "user" {
-				state.UserTurnCount++
-			}
+		if err := ingestion.Enqueue(ctx, req.Trajectory); err != nil {
+			return failed(req.ID, err.Error())
 		}
-		controller := agent.NewExtractionController(cfg, coretools.NewToolRegistry())
-		controller.SourceSessionID = trajectoryID
-		controller.SourceAgentID = "trajectory-replay"
-		total := 0
-		for {
-			count, err := controller.IngestMessages(ctx, &state)
-			if err != nil {
-				return failed(req.ID, err.Error())
-			}
-			total += count
-			if count == 0 {
-				break
-			}
-		}
-		result.Meta["messages"] = len(state.Messages)
-		result.Meta["ingested"] = total
-		backfill.Notify()
+		result.Meta["trajectory_id"] = trajectoryID
+		result.Meta["queued"] = true
 	case "query":
 		query := strings.TrimSpace(req.Query)
 		if query == "" {
 			return failed(req.ID, "query is required")
 		}
+		ingestionStarted := time.Now()
+		ingestionStats, err := ingestion.Drain(ctx)
+		if err != nil {
+			return failed(req.ID, "flush raw memory ingestion: "+err.Error())
+		}
+		result.Meta["ingestion_completed"] = ingestionStats.Completed
+		result.Meta["ingestion_messages"] = ingestionStats.Messages
+		result.Meta["ingestion_items"] = ingestionStats.Ingested
+		result.Meta["ingestion_flush_ms"] = time.Since(ingestionStarted).Milliseconds()
 		maintenanceStarted := time.Now()
 		embedded, err := backfill.Drain(ctx)
 		if err != nil {
@@ -166,6 +153,9 @@ func handle(ctx context.Context, cfg config.Config, backfill *embeddingBackfillW
 	case "ping":
 		result.Meta["status"] = "ready"
 	case "close":
+		if _, err := ingestion.Drain(ctx); err != nil {
+			return failed(req.ID, "flush raw memory ingestion: "+err.Error())
+		}
 		result.Meta["status"] = "closed"
 	default:
 		return failed(req.ID, "unsupported operation: "+req.Op)
