@@ -20,7 +20,7 @@ func MessagesFromTrajectory(trajectory map[string]any) []map[string]any {
 		messages = append(messages, textMessage("user", "Goal: "+goal))
 	}
 	if startURL := strings.TrimSpace(stringValue(trajectory["start_url"])); startURL != "" {
-		messages = append(messages, textMessage("tool", "Initial URL: "+startURL))
+		messages = append(messages, textMessage("assistant", "Initial observed URL: "+startURL))
 	}
 	if states, ok := trajectory["states"].([]any); ok {
 		for index, raw := range states {
@@ -29,7 +29,7 @@ func MessagesFromTrajectory(trajectory map[string]any) []map[string]any {
 				continue
 			}
 			if text := visibleObjectText(state); text != "" {
-				messages = append(messages, textMessage("tool", fmt.Sprintf("State %d:\n%s", index+1, text)))
+				messages = append(messages, textMessage("assistant", fmt.Sprintf("Observed trajectory state %d:\n%s", index+1, text)))
 			}
 		}
 	}

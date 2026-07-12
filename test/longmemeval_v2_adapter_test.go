@@ -33,6 +33,9 @@ func TestLongMemEvalV2TrajectoryUsesVisibleEvidenceOnly(t *testing.T) {
 	if strings.Contains(joined, "private chain of thought") {
 		t.Fatalf("hidden reasoning leaked into ingestion: %s", joined)
 	}
+	if role, _ := messages[2]["role"].(string); role != "assistant" {
+		t.Fatalf("visible trajectory state must enter the production evidence index, got role %q", role)
+	}
 }
 
 func messageText(messages []map[string]any) string {
