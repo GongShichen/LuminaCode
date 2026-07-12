@@ -119,36 +119,46 @@ func (e *LocalEmbedder) Embed(ctx context.Context, texts []string, kind Embeddin
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	result := make([][]float32, 0, len(texts))
+	inputs := make([]embeddingInput, 0, len(texts))
+	maxTokens := 0
 	for _, text := range texts {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
-		vector, err := e.embedOne(strings.TrimSpace(text), kind)
+		input, err := e.prepareEmbeddingInput(strings.TrimSpace(text), kind)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, vector)
+		inputs = append(inputs, input)
+		if len(input.ids) > maxTokens {
+			maxTokens = len(input.ids)
+		}
 	}
-	return result, nil
+	return e.embedBatch(inputs, maxTokens)
 }
 
-func (e *LocalEmbedder) embedOne(text string, kind EmbeddingKind) ([]float32, error) {
+type embeddingInput struct {
+	ids       []int64
+	attention []int64
+	typeIDs   []int64
+}
+
+func (e *LocalEmbedder) prepareEmbeddingInput(text string, kind EmbeddingKind) (embeddingInput, error) {
 	prefix := "passage: "
 	if kind == EmbeddingQuery {
 		prefix = "query: "
 	}
 	encoding, err := e.tokenizer.EncodeSingle(prefix+text, true)
 	if err != nil {
-		return nil, fmt.Errorf("tokenize memory text: %w", err)
+		return embeddingInput{}, fmt.Errorf("tokenize memory text: %w", err)
 	}
 	ids := encoding.GetIds()
 	attention := encoding.GetAttentionMask()
 	typeIDs := encoding.GetTypeIds()
 	if len(ids) == 0 {
-		return nil, errors.New("memory tokenizer returned no tokens")
+		return embeddingInput{}, errors.New("memory tokenizer returned no tokens")
 	}
 	if len(ids) > 512 {
 		ids = ids[:512]
@@ -166,10 +176,24 @@ func (e *LocalEmbedder) embedOne(text string, kind EmbeddingKind) ([]float32, er
 	} else {
 		typeIDs = typeIDs[:len(ids)]
 	}
-	inputIDs := intsToInt64(ids)
-	attentionMask := intsToInt64(attention)
-	tokenTypeIDs := intsToInt64(typeIDs)
-	shape := ort.NewShape(1, int64(len(ids)))
+	return embeddingInput{ids: intsToInt64(ids), attention: intsToInt64(attention), typeIDs: intsToInt64(typeIDs)}, nil
+}
+
+func (e *LocalEmbedder) embedBatch(inputs []embeddingInput, maxTokens int) ([][]float32, error) {
+	if len(inputs) == 0 || maxTokens <= 0 {
+		return nil, nil
+	}
+	batchSize := len(inputs)
+	inputIDs := make([]int64, batchSize*maxTokens)
+	attentionMask := make([]int64, batchSize*maxTokens)
+	tokenTypeIDs := make([]int64, batchSize*maxTokens)
+	for batchIndex, input := range inputs {
+		offset := batchIndex * maxTokens
+		copy(inputIDs[offset:offset+len(input.ids)], input.ids)
+		copy(attentionMask[offset:offset+len(input.attention)], input.attention)
+		copy(tokenTypeIDs[offset:offset+len(input.typeIDs)], input.typeIDs)
+	}
+	shape := ort.NewShape(int64(batchSize), int64(maxTokens))
 	idsTensor, err := ort.NewTensor(shape, inputIDs)
 	if err != nil {
 		return nil, err
@@ -198,39 +222,45 @@ func (e *LocalEmbedder) embedOne(text string, kind EmbeddingKind) ([]float32, er
 		return nil, fmt.Errorf("unexpected memory embedding output %T", outputs[0])
 	}
 	outputShape := output.GetShape()
-	if len(outputShape) != 3 || int(outputShape[1]) != len(ids) || outputShape[2] <= 0 {
+	if len(outputShape) != 3 || int(outputShape[0]) != batchSize || int(outputShape[1]) != maxTokens || outputShape[2] <= 0 {
 		return nil, fmt.Errorf("unexpected memory embedding shape %v", outputShape)
 	}
 	dimensions := int(outputShape[2])
-	pooled := make([]float32, dimensions)
 	data := output.GetData()
-	var weight float32
-	for tokenIndex, active := range attentionMask {
-		if active == 0 {
-			continue
+	result := make([][]float32, batchSize)
+	for batchIndex := range inputs {
+		pooled := make([]float32, dimensions)
+		var weight float32
+		maskOffset := batchIndex * maxTokens
+		outputOffset := batchIndex * maxTokens * dimensions
+		for tokenIndex := 0; tokenIndex < maxTokens; tokenIndex++ {
+			if attentionMask[maskOffset+tokenIndex] == 0 {
+				continue
+			}
+			weight++
+			tokenOffset := outputOffset + tokenIndex*dimensions
+			for dimension := 0; dimension < dimensions; dimension++ {
+				pooled[dimension] += data[tokenOffset+dimension]
+			}
 		}
-		weight++
-		offset := tokenIndex * dimensions
-		for dimension := 0; dimension < dimensions; dimension++ {
-			pooled[dimension] += data[offset+dimension]
+		if weight == 0 {
+			return nil, errors.New("memory embedding attention mask is empty")
 		}
+		var norm float64
+		for idx := range pooled {
+			pooled[idx] /= weight
+			norm += float64(pooled[idx] * pooled[idx])
+		}
+		norm = math.Sqrt(norm)
+		if norm == 0 {
+			return nil, errors.New("memory embedding has zero norm")
+		}
+		for idx := range pooled {
+			pooled[idx] = float32(float64(pooled[idx]) / norm)
+		}
+		result[batchIndex] = pooled
 	}
-	if weight == 0 {
-		return nil, errors.New("memory embedding attention mask is empty")
-	}
-	var norm float64
-	for idx := range pooled {
-		pooled[idx] /= weight
-		norm += float64(pooled[idx] * pooled[idx])
-	}
-	norm = math.Sqrt(norm)
-	if norm == 0 {
-		return nil, errors.New("memory embedding has zero norm")
-	}
-	for idx := range pooled {
-		pooled[idx] = float32(float64(pooled[idx]) / norm)
-	}
-	return pooled, nil
+	return result, nil
 }
 
 func initializeEmbeddingRuntime(modelDir string) error {
