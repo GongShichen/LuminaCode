@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -75,11 +76,20 @@ func main() {
 	limit := flag.Int("limit", 0, "maximum QA cases; zero runs all")
 	sampleLimit := flag.Int("sample-limit", 0, "maximum conversations; zero runs all")
 	includeAdversarial := flag.Bool("include-adversarial", false, "include category 5")
+	indexSampleID := flag.String("index-sample", "", "index one conversation in an isolated worker and exit")
 	flag.Parse()
 	if strings.TrimSpace(*outputDir) == "" {
 		*outputDir = filepath.Join(os.Getenv("HOME"), "Documents", "benchmark", "reports", "locomo-"+time.Now().Format("20060102-150405"))
 	}
-	if err := run(context.Background(), *dataPath, *outputDir, *parallel, *limit, *sampleLimit, *includeAdversarial); err != nil {
+	ctx := context.Background()
+	if strings.TrimSpace(*indexSampleID) != "" {
+		if err := runIndexSample(ctx, *dataPath, *outputDir, strings.TrimSpace(*indexSampleID)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(ctx, *dataPath, *outputDir, *parallel, *limit, *sampleLimit, *includeAdversarial); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -110,11 +120,10 @@ func run(ctx context.Context, dataPath, outputDir string, parallel, limit, sampl
 
 	runtimes := make(map[string]*sampleRuntime, len(samples))
 	for index := range samples {
-		runtime, err := indexSample(ctx, samples[index], workDir)
-		if err != nil {
+		if err := indexSampleInWorker(ctx, dataPath, outputDir, samples[index].SampleID); err != nil {
 			return fmt.Errorf("index %s: %w", samples[index].SampleID, err)
 		}
-		runtimes[samples[index].SampleID] = runtime
+		runtimes[samples[index].SampleID] = runtimeForSample(samples[index], workDir)
 		fmt.Printf("indexed %d/%d %s\n", index+1, len(samples), samples[index].SampleID)
 	}
 
@@ -180,11 +189,42 @@ func run(ctx context.Context, dataPath, outputDir string, parallel, limit, sampl
 	return writeReport(checkpointPath, outputDir)
 }
 
-func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sampleRuntime, error) {
-	projectRoot := filepath.Join(workDir, sample.SampleID, "project")
-	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
-		return nil, err
+func runIndexSample(ctx context.Context, dataPath, outputDir, sampleID string) error {
+	data, err := os.ReadFile(dataPath)
+	if err != nil {
+		return err
 	}
+	var samples []datasetSample
+	if err := json.Unmarshal(data, &samples); err != nil {
+		return err
+	}
+	for _, sample := range samples {
+		if sample.SampleID != sampleID {
+			continue
+		}
+		workDir := filepath.Join(outputDir, "work")
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return err
+		}
+		_, err := indexSample(ctx, sample, workDir)
+		return err
+	}
+	return fmt.Errorf("conversation %q was not found", sampleID)
+}
+
+func indexSampleInWorker(ctx context.Context, dataPath, outputDir, sampleID string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, executable, "--data", dataPath, "--output-dir", outputDir, "--index-sample", sampleID)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
+}
+
+func runtimeForSample(sample datasetSample, workDir string) *sampleRuntime {
+	projectRoot := filepath.Join(workDir, sample.SampleID, "project")
 	cfg := config.NewConfigForCWD(projectRoot)
 	cfg.CWD = projectRoot
 	cfg.LongTermMemoryEnabled = true
@@ -192,6 +232,24 @@ func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sa
 	cfg.SessionMemoryEnabled = false
 	cfg.MemoryBackgroundExtractionEnabled = false
 	cfg.HarnessMode = ""
+	var latest time.Time
+	for _, number := range sessionNumbers(sample.Conversation) {
+		var dateText string
+		_ = json.Unmarshal(sample.Conversation["session_"+strconv.Itoa(number)+"_date_time"], &dateText)
+		if occurredAt := parseLoCoMoTime(dateText); occurredAt.After(latest) {
+			latest = occurredAt
+		}
+	}
+	return &sampleRuntime{sample: sample, cfg: cfg, referenceTime: latest}
+}
+
+func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sampleRuntime, error) {
+	projectRoot := filepath.Join(workDir, sample.SampleID, "project")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		return nil, err
+	}
+	runtime := runtimeForSample(sample, workDir)
+	cfg := runtime.cfg
 	sessions := sessionNumbers(sample.Conversation)
 	var latest time.Time
 	for _, number := range sessions {
@@ -231,10 +289,14 @@ func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sa
 				break
 			}
 		}
-		for state.MemoryExtractionCursor < len(state.Messages) {
+		for {
 			before := state.MemoryExtractionCursor
-			if _, err := controller.ExtractNow(ctx, &state); err != nil {
+			summary, err := controller.ExtractNow(ctx, &state)
+			if err != nil {
 				return nil, fmt.Errorf("enrich session %s at message %d: %w", state.MemorySessionID, before, err)
+			}
+			if strings.TrimSpace(summary) == "" {
+				break
 			}
 			if state.MemoryExtractionCursor <= before {
 				return nil, fmt.Errorf("enrich session %s made no cursor progress at message %d", state.MemorySessionID, before)
@@ -244,7 +306,8 @@ func indexSample(ctx context.Context, sample datasetSample, workDir string) (*sa
 	if err := flushEmbeddings(ctx, cfg); err != nil {
 		return nil, err
 	}
-	return &sampleRuntime{sample: sample, cfg: cfg, referenceTime: latest}, nil
+	runtime.referenceTime = latest
+	return runtime, nil
 }
 
 func flushEmbeddings(ctx context.Context, cfg config.Config) error {
