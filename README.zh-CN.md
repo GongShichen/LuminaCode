@@ -50,11 +50,9 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 - user、project、Team、agent type 和 Team agent 记忆按 scope 隔离。常用或再次
   确认的记忆保持 hot；过期且低价值的记录可以归档，但后台维护不会物理删除。
 
-`make install` 会从 ModelScope 安装 `multilingual-e5-small` 到
-`~/.lumina/models/memory/`，`make uninstall` 会一并删除。可通过 `/Memory`、
-`/MemorySearch`、`/MemoryForget`、`/MemoryExport` 和 `/MemoryImport` 查看与管理。
+可通过 `/Memory`、`/MemorySearch`、`/MemoryForget`、`/MemoryExport` 和 `/MemoryImport` 查看与管理。
 
-### 2、找什么，用什么方式找，以及 Benchmark 结果
+### 2、找什么，用什么方式找
 
 - 每次查询都会固定搜索原词、语义相似内容、实体、时间、Session 和关系，对应
   BM25、向量、实体、时间、Session 和图六个通道。模型生成的通用查询扩展只能
@@ -64,34 +62,33 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
   必要的局部结构、provenance 和 timeline 作为一条临时隐藏上下文交给主模型，
   不重复注入 Session 摘要或完整 transcript。
 
-Lumina 在 500 题 LongMemEval oracle 数据集上的成绩为 **83.6%（418/500）**。
-三次独立评估结果完全一致，标准差为 `0.0`；评估通过
-`https://api.deepseek.com` 使用 LongMemEval 官方判分 prompt 和
+Lumina 在 500 题 LongMemEval oracle 数据集上的成绩为 **86.0%（430/500）**。
+评估通过 `https://api.deepseek.com` 使用 LongMemEval 官方判分 prompt 和
 `deepseek-v4-pro` 完成。这是生产记忆链路的黑盒测试，不是官方 GPT-4o
 leaderboard 成绩。
 
 | 题型 | 准确率 |
 |---|---:|
-| Single-session user | 95.71% |
-| Temporal reasoning | 85.71% |
-| Knowledge update | 83.33% |
-| Single-session preference | 83.33% |
-| Single-session assistant | 80.36% |
-| Multi-session | 76.69% |
+| Single-session user | 97.14% |
+| Knowledge update | 91.03% |
+| Temporal reasoning | 88.72% |
+| Single-session preference | 80.00% |
+| Multi-session | 79.70% |
+| Single-session assistant | 76.79% |
 
 本次运行同时把检索质量与答案准确率分开统计：
 
 | 检索指标 | 结果 |
 |---|---:|
-| Evidence Hit Rate | 96.24% |
-| Evidence Recall@K | 87.59% |
-| Evidence MRR | 0.690 |
-| Source Session Recall | 98.07% |
-| Gold Message Recall | 89.62% |
-| Injected Chunk Recall | 87.59% |
-| Injected Text Coverage | 82.82% |
-| 平均记忆上下文 | 1,268 tokens（memory token ratio 19.43%） |
-| 平均检索耗时 | 12.58 秒 |
+| Evidence Hit Rate | 99.79% |
+| Evidence Recall@K | 95.75% |
+| Evidence MRR | 0.701 |
+| Source Session Recall | 100.00% |
+| Gold Message Recall | 98.05% |
+| Injected Chunk Recall | 95.75% |
+| Injected Text Coverage | 88.13% |
+| 平均记忆上下文 | 1,717 tokens（memory token ratio 22.59%） |
+| 平均检索耗时 | 8.34 秒 |
 
 检索指标根据真正注入回答模型的 evidence atom ID 和原始 source span 计算。
 
@@ -106,7 +103,7 @@ leaderboard 成绩。
 | Engram | 91.6% | GPT-5 composer、GPT-4o judge；公开 prompt 和运行产物 |
 | Hindsight | 91.4% | Gemini 3 Pro；公开 benchmark 仓库 |
 | HydraDB | 90.79% | Gemini 3 Pro；论文报告 |
-| **LuminaCode** | **83.6%** | DeepSeek Judge，三次结果一致；复用官方 prompt；完整 500 题 |
+| **LuminaCode** | **86.0%** | DeepSeek Judge；复用官方 prompt；完整 500 题 |
 | LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
 | Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
 | Mem0 | 62.6% | GPT-4o-mini 同设置 baseline |
@@ -125,6 +122,22 @@ leaderboard 成绩。
 [Exabase M-1 公告](https://www.prnewswire.com/news-releases/exabase-achieves-highest-reported-score-on-leading-ai-memory-benchmark-using-a-smaller-cheaper-model-302780919.html)。Exabase 和 Honcho
 使用公开报告分数，但完整复现材料相对有限。不同报告的 reader、检索深度、
 上下文预算和 judge 不完全一致，因此这不是严格同口径排行榜。
+
+公开 LoCoMo LLM-Judge 排名：
+
+| 系统 | 总分 | Multi-Hop | Temporal | Open Domain | Single-Hop |
+|---|---:|---:|---:|---:|---:|
+| [Attemory](https://github.com/AttemorySystem/attemory/blob/main/benchmarks/results/LoCoMo/report.txt) | 94.52% | 81.25% | 92.52% | 96.91% | 93.97% |
+| [MemoryLake](https://github.com/memorylake-ai/memorylake-locomo-benchmark) | 94.03% | 91.84% | 91.28% | 85.42% | 96.79% |
+| [EverMemOS](https://arxiv.org/abs/2601.02163) | 93.05% | 91.84% | 89.72% | 76.04% | 96.67% |
+| [MemCog](https://arxiv.org/abs/2605.28046) | 92.98% | 80.21% | 92.81% | 94.89% | 91.84% |
+| [Backboard](https://github.com/Backboard-io/Backboard-Locomo-Benchmark) | 90.00% | 75.00% | 91.90% | 91.20% | 89.36% |
+| [Hindsight](https://github.com/vectorize-io/hindsight-benchmarks) | 89.61% | 70.83% | 83.80% | 95.12% | 86.17% |
+| **LuminaCode** | **77.40%** | **55.21%** | **76.32%** | **82.05%** | **72.34%** |
+| [Memobase v0.0.37](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md) | 75.78% | 46.88% | 85.05% | 77.17% | 70.92% |
+| Zep | 75.14% | 66.04% | 79.79% | 67.71% | 74.11% |
+| Mem0-Graph | 68.44% | 47.19% | 58.13% | 75.71% | 65.71% |
+| Mem0 | 66.88% | 51.15% | 55.51% | 72.93% | 67.13% |
 
 ## Agent Team
 

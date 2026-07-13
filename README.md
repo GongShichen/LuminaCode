@@ -83,34 +83,33 @@ local inspection and control.
   and timeline as one transient hidden packet rather than a repeated Session
   summary or full transcript.
 
-On the 500-question LongMemEval oracle set, Lumina scored **83.6% (418/500)**.
-Three independent evaluations produced the same score (standard deviation
-`0.0`) using the official LongMemEval judge prompt with `deepseek-v4-pro` through
+On the 500-question LongMemEval oracle set, Lumina scored **86.0% (430/500)**
+using the official LongMemEval judge prompt with `deepseek-v4-pro` through
 `https://api.deepseek.com`. This is a black-box test of the production memory
 path, not an official GPT-4o leaderboard score.
 
 | Question type | Accuracy |
 |---|---:|
-| Single-session user | 95.71% |
-| Temporal reasoning | 85.71% |
-| Knowledge update | 83.33% |
-| Single-session preference | 83.33% |
-| Single-session assistant | 80.36% |
-| Multi-session | 76.69% |
+| Single-session user | 97.14% |
+| Knowledge update | 91.03% |
+| Temporal reasoning | 88.72% |
+| Single-session preference | 80.00% |
+| Multi-session | 79.70% |
+| Single-session assistant | 76.79% |
 
 The run also records retrieval quality separately from answer accuracy:
 
 | Retrieval metric | Result |
 |---|---:|
-| Evidence hit rate | 96.24% |
-| Evidence Recall@K | 87.59% |
-| Evidence MRR | 0.690 |
-| Source Session recall | 98.07% |
-| Gold message recall | 89.62% |
-| Injected chunk recall | 87.59% |
-| Injected text coverage | 82.82% |
-| Average memory context | 1,268 tokens (19.43% memory token ratio) |
-| Average retrieval duration | 12.58 seconds |
+| Evidence hit rate | 99.79% |
+| Evidence Recall@K | 95.75% |
+| Evidence MRR | 0.701 |
+| Source Session recall | 100.00% |
+| Gold message recall | 98.05% |
+| Injected chunk recall | 95.75% |
+| Injected text coverage | 88.13% |
+| Average memory context | 1,717 tokens (22.59% memory token ratio) |
+| Average retrieval duration | 8.34 seconds |
 
 Retrieval metrics are computed from the evidence atom IDs and source spans
 actually injected into the answering model.
@@ -126,7 +125,7 @@ Published LongMemEval accuracy, sorted for orientation:
 | Engram | 91.6% | GPT-5 composer, GPT-4o judge; prompt and run artifacts published |
 | Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
 | HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
-| **LuminaCode** | **83.6%** | DeepSeek Judge, three identical runs; official prompt reused; 500 questions |
+| **LuminaCode** | **86.0%** | DeepSeek Judge; official prompt reused; 500 questions |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
@@ -147,6 +146,22 @@ Exabase and Honcho
 scores are included as publicly reported results with less complete reproduction
 material. Reader, retrieval depth, context budget, and judge differ across
 reports, so this table is not a strict apples-to-apples leaderboard.
+
+Published LoCoMo LLM-Judge results:
+
+| System | Overall | Multi-Hop | Temporal | Open Domain | Single-Hop |
+|---|---:|---:|---:|---:|---:|
+| [Attemory](https://github.com/AttemorySystem/attemory/blob/main/benchmarks/results/LoCoMo/report.txt) | 94.52% | 81.25% | 92.52% | 96.91% | 93.97% |
+| [MemoryLake](https://github.com/memorylake-ai/memorylake-locomo-benchmark) | 94.03% | 91.84% | 91.28% | 85.42% | 96.79% |
+| [EverMemOS](https://arxiv.org/abs/2601.02163) | 93.05% | 91.84% | 89.72% | 76.04% | 96.67% |
+| [MemCog](https://arxiv.org/abs/2605.28046) | 92.98% | 80.21% | 92.81% | 94.89% | 91.84% |
+| [Backboard](https://github.com/Backboard-io/Backboard-Locomo-Benchmark) | 90.00% | 75.00% | 91.90% | 91.20% | 89.36% |
+| [Hindsight](https://github.com/vectorize-io/hindsight-benchmarks) | 89.61% | 70.83% | 83.80% | 95.12% | 86.17% |
+| **LuminaCode** | **77.40%** | **55.21%** | **76.32%** | **82.05%** | **72.34%** |
+| [Memobase v0.0.37](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md) | 75.78% | 46.88% | 85.05% | 77.17% | 70.92% |
+| Zep | 75.14% | 66.04% | 79.79% | 67.71% | 74.11% |
+| Mem0-Graph | 68.44% | 47.19% | 58.13% | 75.71% | 65.71% |
+| Mem0 | 66.88% | 51.15% | 55.51% | 72.93% | 67.13% |
 
 ## Agent Team
 
