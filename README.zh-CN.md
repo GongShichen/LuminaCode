@@ -92,6 +92,48 @@ leaderboard 成绩。
 
 检索指标根据真正注入回答模型的 evidence atom ID 和原始 source span 计算。
 
+#### 完整记忆库 LongMemEval-S
+
+上面的 oracle 成绩属于检索上限设置：每题只提供能够支持答案的 Session。
+清洗后的 LongMemEval-S 使用相同的 500 个 question ID，但提供完整对话记忆库。
+每题平均搜索空间因此从 1.90 个 Session、21.92 条消息，增加到 47.73 个
+Session、493.50 条消息。
+
+在同样使用 `mimo-v2.5-pro` 回答模型和 `deepseek-v4-pro` 官方判分 prompt 的
+情况下，Lumina 在 LongMemEval-S 上取得 **75.8%（379/500）**：
+
+| 题型 | Oracle | LongMemEval-S | 差值 |
+|---|---:|---:|---:|
+| Overall | 86.00%（430/500） | 75.80%（379/500） | -10.20 pp |
+| Single-session user | 97.14% | 88.57% | -8.57 pp |
+| Knowledge update | 91.03% | 89.74% | -1.29 pp |
+| Temporal reasoning | 88.72% | 80.45% | -8.27 pp |
+| Single-session preference | 80.00% | 53.33% | -26.67 pp |
+| Multi-session | 79.70% | 63.91% | -15.79 pp |
+| Single-session assistant | 76.79% | 69.64% | -7.15 pp |
+
+检索指标能够解释大部分答案准确率差距：
+
+| 检索指标 | Oracle | LongMemEval-S |
+|---|---:|---:|
+| Evidence Hit Rate | 99.79% | 91.44% |
+| Gold Message Recall | 98.05% | 84.95% |
+| Injected Chunk Recall | 95.75% | 80.75% |
+| Injected Text Coverage | 88.13% | 71.20% |
+| Source Session Recall | 100.00% | 98.44% |
+| Evidence MRR | 0.701 | 0.504 |
+| 平均召回 evidence | 27.95 | 36.86 |
+| 平均记忆上下文 | 1,717 tokens | 2,344 tokens |
+| 平均检索耗时 | 8.34 秒 | 9.48 秒 |
+
+在 479 个带 evidence 标注的问题中，完整召回全部 gold message 的题目从
+oracle 的 456 题降到 LongMemEval-S 的 373 题。当 gold message 全部可见时，
+答案准确率几乎没有变化：oracle 为 88.16%，LongMemEval-S 为 87.67%。因此，
+整体 10.2 个百分点的差距主要来自完整记忆库中精确证据漏召回、只召回部分证据
+或证据排名过低，而不是回答模型能力发生了系统性回归。本次 LongMemEval-S
+运行完成了 500 条唯一 prediction，运行和检索通道错误均为 0；75.8% 是当前
+完整记忆库 baseline，不应与 oracle-only 成绩直接比较。
+
 公开 LongMemEval 成绩按分数排序如下，仅用于定位：
 
 | 系统 | 准确率 | 公开评测设置 |
@@ -103,7 +145,7 @@ leaderboard 成绩。
 | Engram | 91.6% | GPT-5 composer、GPT-4o judge；公开 prompt 和运行产物 |
 | Hindsight | 91.4% | Gemini 3 Pro；公开 benchmark 仓库 |
 | HydraDB | 90.79% | Gemini 3 Pro；论文报告 |
-| **LuminaCode** | **86.0%** | DeepSeek Judge；复用官方 prompt；完整 500 题 |
+| **LuminaCode（LongMemEval-S）** | **75.8%** | 完整 haystack；DeepSeek Judge；复用官方 prompt；完整 500 题 |
 | LiCoMemory | 73.8% | GPT-4o-mini，5 次均值 |
 | Mem0-G | 64.8% | GPT-4o-mini 同设置 baseline |
 | Mem0 | 62.6% | GPT-4o-mini 同设置 baseline |

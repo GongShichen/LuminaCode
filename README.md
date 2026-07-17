@@ -114,6 +114,51 @@ The run also records retrieval quality separately from answer accuracy:
 Retrieval metrics are computed from the evidence atom IDs and source spans
 actually injected into the answering model.
 
+#### Full-haystack LongMemEval-S
+
+The oracle result above is an upper-bound retrieval setting: each question is
+given only the answer-supporting Sessions. The cleaned LongMemEval-S set uses
+the same 500 question IDs but supplies the complete conversation haystack. This
+increases the average search space from 1.90 to 47.73 Sessions and from 21.92 to
+493.50 messages per question.
+
+Using the same `mimo-v2.5-pro` answer model and `deepseek-v4-pro` official judge
+prompt, Lumina scored **75.8% (379/500)** on LongMemEval-S:
+
+| Question type | Oracle | LongMemEval-S | Difference |
+|---|---:|---:|---:|
+| Overall | 86.00% (430/500) | 75.80% (379/500) | -10.20 pp |
+| Single-session user | 97.14% | 88.57% | -8.57 pp |
+| Knowledge update | 91.03% | 89.74% | -1.29 pp |
+| Temporal reasoning | 88.72% | 80.45% | -8.27 pp |
+| Single-session preference | 80.00% | 53.33% | -26.67 pp |
+| Multi-session | 79.70% | 63.91% | -15.79 pp |
+| Single-session assistant | 76.79% | 69.64% | -7.15 pp |
+
+The retrieval comparison explains most of the answer-accuracy gap:
+
+| Retrieval metric | Oracle | LongMemEval-S |
+|---|---:|---:|
+| Evidence hit rate | 99.79% | 91.44% |
+| Gold message recall | 98.05% | 84.95% |
+| Injected chunk recall | 95.75% | 80.75% |
+| Injected text coverage | 88.13% | 71.20% |
+| Source Session recall | 100.00% | 98.44% |
+| Evidence MRR | 0.701 | 0.504 |
+| Average retrieved evidence | 27.95 | 36.86 |
+| Average memory context | 1,717 tokens | 2,344 tokens |
+| Average retrieval duration | 8.34 seconds | 9.48 seconds |
+
+Of the 479 questions with labeled evidence, complete gold-message recall fell
+from 456 oracle questions to 373 LongMemEval-S questions. When all gold messages
+were present, answer accuracy was nearly unchanged: 88.16% on oracle and 87.67%
+on LongMemEval-S. The 10.2-point overall difference therefore comes primarily
+from exact evidence being missed, only partially recalled, or ranked too low in
+the much larger haystack, rather than from a broad regression in answer-model
+quality. The LongMemEval-S run completed 500 unique predictions with no runtime
+or retrieval-channel errors; its 75.8% result is the current full-haystack
+baseline and should not be compared directly with oracle-only scores.
+
 Published LongMemEval accuracy, sorted for orientation:
 
 | System | Accuracy | Reported evaluation |
@@ -125,7 +170,7 @@ Published LongMemEval accuracy, sorted for orientation:
 | Engram | 91.6% | GPT-5 composer, GPT-4o judge; prompt and run artifacts published |
 | Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
 | HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
-| **LuminaCode** | **86.0%** | DeepSeek Judge; official prompt reused; 500 questions |
+| **LuminaCode (LongMemEval-S)** | **75.8%** | Full haystack; DeepSeek Judge; official prompt reused; 500 questions |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
