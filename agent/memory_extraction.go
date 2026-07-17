@@ -11,12 +11,16 @@ import (
 	"sync"
 	"time"
 
+	"LuminaCode/api"
 	"LuminaCode/config"
 	"LuminaCode/longmemory"
 	coretools "LuminaCode/tools"
 )
 
-const extractionResultPreviewChars = 500
+const (
+	extractionResultPreviewChars        = 500
+	memoryExtractionCompletionMaxTokens = 16 * 1024
+)
 
 var ExtractionAgentDef = AgentDef{
 	Name:           "auto-memory-extract",
@@ -698,6 +702,15 @@ func (c *ExtractionController) defaultRunner(parentState *AgentState) Extraction
 		if c.Config.ExtractionModel != nil && *c.Config.ExtractionModel != "" {
 			model = *c.Config.ExtractionModel
 		}
+		client, err := CreateConfiguredLLMClient(c.Config, model, c.Config.APIMaxTokens, nil, api.DefaultRetryConfigPtr())
+		if err != nil {
+			return "", fmt.Errorf("configure memory extraction model: %w", err)
+		}
+		if structured, ok := client.(api.StructuredCompletionClient); ok {
+			streamCtx := api.ContextWithStreamIdleTimeout(ctx,
+				time.Duration(c.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+			return runStructuredMemoryExtraction(streamCtx, structured, prompt, systemPrompt, memoryExtractionCompletionMaxTokens)
+		}
 		extractionTool := newExtractMemoryBatchTool()
 		registry := coretools.NewToolRegistry(extractionTool)
 		sub := NewSubAgent(c.Config, registry, ExtractionAgentDef, parentState, model, "auto-memory-extract", extraContext)
@@ -713,6 +726,65 @@ func (c *ExtractionController) defaultRunner(parentState *AgentState) Extraction
 		}
 		return result, nil
 	}
+}
+
+func runStructuredMemoryExtraction(ctx context.Context, client api.StructuredCompletionClient, prompt, systemPrompt string,
+	maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+	extractionTool := newExtractMemoryBatchTool()
+	registry := coretools.NewToolRegistry(extractionTool)
+	response, err := client.CompleteStructured(ctx, systemPrompt,
+		[]map[string]any{{"role": "user", "content": prompt}}, api.StructuredCompletionOptions{
+			MaxTokens: maxTokens, Tools: registry.GetAPISchemas(), RequiredTool: extractionTool.Name(), DisableThinking: true,
+		})
+	if err != nil {
+		return "", err
+	}
+	input, err := structuredMemoryExtractionInput(response, extractionTool.Name())
+	if err != nil {
+		return "", err
+	}
+	result := registry.Execute(ctx, coretools.ToolCall{
+		ID: "structured-memory-extraction", Name: extractionTool.Name(), Input: input,
+	}, coretools.ExecutionContext{})
+	if result.IsError {
+		return "", fmt.Errorf("invalid %s response: %s", extractionTool.Name(), result.Content)
+	}
+	encoded, ok, err := extractionTool.batchJSON()
+	if err != nil {
+		return "", fmt.Errorf("encode extracted memory batch: %w", err)
+	}
+	if !ok {
+		return "", fmt.Errorf("memory extraction model did not return %s input", extractionTool.Name())
+	}
+	return encoded, nil
+}
+
+func structuredMemoryExtractionInput(response api.Response, requiredTool string) (map[string]any, error) {
+	for _, call := range response.ToolCalls {
+		if !strings.EqualFold(stringFromAny(call["name"]), requiredTool) {
+			continue
+		}
+		input, ok := call["input"].(map[string]any)
+		if !ok || input == nil {
+			return nil, fmt.Errorf("%s returned invalid tool input", requiredTool)
+		}
+		return input, nil
+	}
+	text := strings.TrimSpace(response.Text)
+	if strings.HasPrefix(text, "```") {
+		if lineEnd := strings.IndexByte(text, '\n'); lineEnd >= 0 {
+			text = text[lineEnd+1:]
+		}
+		text = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(text), "```"))
+	}
+	var input map[string]any
+	if text == "" || json.Unmarshal([]byte(text), &input) != nil || input == nil {
+		return nil, fmt.Errorf("memory extraction model returned neither %s nor a strict JSON object", requiredTool)
+	}
+	return input, nil
 }
 
 func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, payload *extractionContext, agentID string) longmemory.ExtractionBatch {

@@ -58,6 +58,9 @@ type Response struct {
 
 type LLMRequestOptions struct {
 	AnthropicCacheEdits []CacheEdit `json:"anthropic_cache_edits,omitempty"`
+	MaxTokens           int         `json:"-"`
+	RequiredTool        string      `json:"-"`
+	DisableThinking     bool        `json:"-"`
 }
 
 type CompleteOptions struct {
@@ -230,9 +233,9 @@ func (c *LLMClientBase) RetryRequest(
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
 		resp, err := makeRequest(reqCtx, c.HTTPClient)
-		cancel()
 
 		if err != nil {
+			cancel()
 			lastErr = err
 			if attempt < cfg.MaxRetries {
 				if !sleepBackoff(ctx, attempt, cfg) {
@@ -244,6 +247,7 @@ func (c *LLMClientBase) RetryRequest(
 		}
 
 		if resp == nil {
+			cancel()
 			lastErr = fmt.Errorf("nil HTTP response")
 			if attempt < cfg.MaxRetries {
 				if !sleepBackoff(ctx, attempt, cfg) {
@@ -256,6 +260,7 @@ func (c *LLMClientBase) RetryRequest(
 
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		cancel()
 		if readErr != nil {
 			lastErr = readErr
 			if attempt < cfg.MaxRetries {
@@ -328,54 +333,12 @@ func (c *AnthropicClient) Complete(
 	messages []map[string]any,
 	opts CompleteOptions,
 ) (string, error) {
-	url := c.BaseURL + "/v1/messages"
-	headers := c.buildHeaders()
-
-	systemBlock := []map[string]any{
-		{
-			"type":          "text",
-			"text":          systemPrompt,
-			"cache_control": map[string]any{"type": "ephemeral"},
-		},
-	}
-
-	body := map[string]any{
-		"model":    c.Model,
-		"system":   systemBlock,
-		"messages": messages,
-		"stream":   false,
-	}
-
-	if len(opts.Tools) > 0 {
-		body["tools"] = opts.Tools
-	}
-	if c.ThinkingBudgetTokens != nil && *c.ThinkingBudgetTokens > 0 {
-		body["thinking"] = map[string]any{
-			"type":          "enabled",
-			"budget_tokens": *c.ThinkingBudgetTokens,
-		}
-	}
-
-	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
-		return doJSONRequest(reqCtx, httpClient, http.MethodPost, url, headers, body)
-	}, 30*time.Second)
+	response, err := collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools,
+		&LLMRequestOptions{MaxTokens: opts.MaxTokens}))
 	if err != nil {
 		return "", err
 	}
-
-	contentBlocks, _ := data["content"].([]any)
-	var parts []string
-	for _, rawBlock := range contentBlocks {
-		block, ok := rawBlock.(map[string]any)
-		if !ok {
-			continue
-		}
-		if getString(block, "type") == "text" {
-			parts = append(parts, getString(block, "text"))
-		}
-	}
-
-	return strings.Join(parts, ""), nil
+	return response.Text, nil
 }
 
 func (c *AnthropicClient) CompleteStructured(
@@ -384,56 +347,9 @@ func (c *AnthropicClient) CompleteStructured(
 	messages []map[string]any,
 	opts StructuredCompletionOptions,
 ) (Response, error) {
-	url := c.BaseURL + "/v1/messages"
-	headers := c.buildHeaders()
-	body := map[string]any{
-		"model": c.Model, "system": []map[string]any{{"type": "text", "text": systemPrompt}},
-		"messages": messages, "stream": false,
-	}
-	if opts.MaxTokens > 0 {
-		body["max_tokens"] = opts.MaxTokens
-	}
-	if len(opts.Tools) > 0 {
-		body["tools"] = opts.Tools
-	}
-	if opts.RequiredTool != "" {
-		body["tool_choice"] = map[string]any{"type": "tool", "name": opts.RequiredTool}
-	}
-	if opts.DisableThinking && supportsThinkingControl(c.Model) {
-		body["thinking"] = map[string]any{"type": "disabled"}
-	} else if !opts.DisableThinking && c.ThinkingBudgetTokens != nil && *c.ThinkingBudgetTokens > 0 {
-		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": *c.ThinkingBudgetTokens}
-	}
-	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
-		return doJSONRequest(reqCtx, httpClient, http.MethodPost, url, headers, body)
-	}, 30*time.Second)
-	if err != nil {
-		return Response{}, err
-	}
-	response := Response{StopReason: getString(data, "stop_reason")}
-	if usage, ok := data["usage"].(map[string]any); ok {
-		response.InputTokens = getInt(usage, "input_tokens")
-		response.OutputTokens = getInt(usage, "output_tokens")
-	}
-	contentBlocks, _ := data["content"].([]any)
-	var textParts []string
-	for _, raw := range contentBlocks {
-		block, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		switch getString(block, "type") {
-		case "text":
-			textParts = append(textParts, getString(block, "text"))
-		case "tool_use":
-			input, _ := block["input"].(map[string]any)
-			response.ToolCalls = append(response.ToolCalls, map[string]any{
-				"id": getString(block, "id"), "name": getString(block, "name"), "input": input,
-			})
-		}
-	}
-	response.Text = strings.Join(textParts, "")
-	return response, nil
+	return collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools, &LLMRequestOptions{
+		MaxTokens: opts.MaxTokens, RequiredTool: opts.RequiredTool, DisableThinking: opts.DisableThinking,
+	}))
 }
 
 func (c *AnthropicClient) StreamChat(
@@ -480,10 +396,18 @@ func (c *AnthropicClient) StreamChat(
 		"messages": messages,
 		"stream":   true,
 	}
+	if options != nil && options.MaxTokens > 0 {
+		bodyMap["max_tokens"] = options.MaxTokens
+	}
 	if len(apiTools) > 0 {
 		bodyMap["tools"] = apiTools
 	}
-	if c.ThinkingBudgetTokens != nil && *c.ThinkingBudgetTokens > 0 {
+	if options != nil && options.RequiredTool != "" {
+		bodyMap["tool_choice"] = map[string]any{"type": "tool", "name": options.RequiredTool}
+	}
+	if options != nil && options.DisableThinking && supportsThinkingControl(c.Model) {
+		bodyMap["thinking"] = map[string]any{"type": "disabled"}
+	} else if c.ThinkingBudgetTokens != nil && *c.ThinkingBudgetTokens > 0 {
 		bodyMap["thinking"] = map[string]any{
 			"type":          "enabled",
 			"budget_tokens": *c.ThinkingBudgetTokens,
@@ -719,34 +643,12 @@ func (c *OpenAICompatibleClient) Complete(
 	messages []map[string]any,
 	opts CompleteOptions,
 ) (string, error) {
-	url := c.chatCompletionsURL()
-	headers := c.buildHeaders()
-	openaiMessages := c.buildMessages(systemPrompt, messages)
-
-	body := map[string]any{
-		"model":    c.Model,
-		"messages": openaiMessages,
-		"stream":   false,
-	}
-	if len(opts.Tools) > 0 {
-		body["tools"] = AnthropicToolsToOpenAI(opts.Tools)
-	}
-
-	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
-		return doJSONRequest(reqCtx, httpClient, http.MethodPost, url, headers, body)
-	}, 30*time.Second)
+	response, err := collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools,
+		&LLMRequestOptions{MaxTokens: opts.MaxTokens}))
 	if err != nil {
 		return "", err
 	}
-
-	choices, _ := data["choices"].([]any)
-	if len(choices) == 0 {
-		return "", nil
-	}
-
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	return getString(message, "content"), nil
+	return response.Text, nil
 }
 
 func (c *OpenAICompatibleClient) CompleteStructured(
@@ -755,54 +657,9 @@ func (c *OpenAICompatibleClient) CompleteStructured(
 	messages []map[string]any,
 	opts StructuredCompletionOptions,
 ) (Response, error) {
-	body := map[string]any{"model": c.Model, "messages": c.buildMessages(systemPrompt, messages), "stream": false}
-	if opts.MaxTokens > 0 {
-		body["max_completion_tokens"] = opts.MaxTokens
-	}
-	if len(opts.Tools) > 0 {
-		body["tools"] = AnthropicToolsToOpenAI(opts.Tools)
-	}
-	if opts.RequiredTool != "" {
-		body["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": opts.RequiredTool}}
-	}
-	if opts.DisableThinking && supportsThinkingControl(c.Model) {
-		body["thinking"] = map[string]any{"type": "disabled"}
-	}
-	data, err := c.RetryRequest(ctx, func(reqCtx context.Context, httpClient *http.Client) (*http.Response, error) {
-		return doJSONRequest(reqCtx, httpClient, http.MethodPost, c.chatCompletionsURL(), c.buildHeaders(), body)
-	}, 30*time.Second)
-	if err != nil {
-		return Response{}, err
-	}
-	response := Response{}
-	if usage, ok := data["usage"].(map[string]any); ok {
-		response.InputTokens = getInt(usage, "prompt_tokens")
-		response.OutputTokens = getInt(usage, "completion_tokens")
-	}
-	choices, _ := data["choices"].([]any)
-	if len(choices) == 0 {
-		return response, nil
-	}
-	choice, _ := choices[0].(map[string]any)
-	response.StopReason = getString(choice, "finish_reason")
-	message, _ := choice["message"].(map[string]any)
-	response.Text = getString(message, "content")
-	toolCalls, _ := message["tool_calls"].([]any)
-	for _, raw := range toolCalls {
-		call, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		fn, _ := call["function"].(map[string]any)
-		input := map[string]any{}
-		if arguments := getString(fn, "arguments"); arguments != "" {
-			_ = json.Unmarshal([]byte(arguments), &input)
-		}
-		response.ToolCalls = append(response.ToolCalls, map[string]any{
-			"id": getString(call, "id"), "name": getString(fn, "name"), "input": input,
-		})
-	}
-	return response, nil
+	return collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools, &LLMRequestOptions{
+		MaxTokens: opts.MaxTokens, RequiredTool: opts.RequiredTool, DisableThinking: opts.DisableThinking,
+	}))
 }
 
 func (c *OpenAICompatibleClient) StreamChat(
@@ -822,9 +679,20 @@ func (c *OpenAICompatibleClient) StreamChat(
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 	}
+	if options != nil && options.MaxTokens > 0 {
+		bodyMap["max_completion_tokens"] = options.MaxTokens
+	}
 
 	if len(tools) > 0 {
 		bodyMap["tools"] = AnthropicToolsToOpenAI(tools)
+	}
+	if options != nil && options.RequiredTool != "" {
+		bodyMap["tool_choice"] = map[string]any{
+			"type": "function", "function": map[string]any{"name": options.RequiredTool},
+		}
+	}
+	if options != nil && options.DisableThinking && supportsThinkingControl(c.Model) {
+		bodyMap["thinking"] = map[string]any{"type": "disabled"}
 	}
 
 	bodyBytes, err := json.Marshal(bodyMap)
@@ -1038,6 +906,60 @@ func (c *OpenAICompatibleClient) streamOpenAICompatible(
 	}()
 
 	return out
+}
+
+func collectCompletionStream(stream <-chan EventResult) (Response, error) {
+	response := Response{}
+	var text strings.Builder
+	for item := range stream {
+		if item.Err != nil {
+			return Response{}, item.Err
+		}
+		event := item.Event
+		switch getString(event, "type") {
+		case "text", "text_delta":
+			text.WriteString(getString(event, "text"))
+		case "tool_use":
+			input, _ := event["input"].(map[string]any)
+			response.ToolCalls = append(response.ToolCalls, map[string]any{
+				"id": getString(event, "id"), "name": getString(event, "name"), "input": input,
+			})
+		case "usage":
+			response.InputTokens = getInt(event, "input_tokens")
+			response.OutputTokens = getInt(event, "output_tokens")
+		case "stop_reason":
+			response.StopReason = getString(event, "stop_reason")
+		case "error":
+			return Response{}, completionStreamError(event)
+		}
+	}
+	response.Text = text.String()
+	return response, nil
+}
+
+func completionStreamError(event map[string]any) error {
+	message := strings.TrimSpace(getString(event, "message"))
+	if message == "" {
+		message = "streaming completion failed"
+	}
+	statusCode := getInt(event, "status_code")
+	if statusCode > 0 {
+		statusErr := NewAPIStatusError(getString(event, "provider"), statusCode,
+			getString(event, "status"), []byte(getString(event, "raw_error")))
+		if retryable, _ := event["retryable"].(bool); retryable {
+			return RetryableStatusError{APIStatusError: statusErr}
+		}
+		return statusErr
+	}
+	if retryable, _ := event["retryable"].(bool); retryable {
+		return NewRetryableError(message)
+	}
+	switch strings.ToLower(strings.TrimSpace(getString(event, "error_type"))) {
+	case "transport_error", "api_stream_error":
+		return NewRetryableError(message)
+	default:
+		return fmt.Errorf("%s", message)
+	}
 }
 
 func (c *OpenAICompatibleClient) providerName() string {

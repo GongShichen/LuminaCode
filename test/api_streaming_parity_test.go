@@ -17,6 +17,79 @@ import (
 	"LuminaCode/api"
 )
 
+func writeSSEEvent(w http.ResponseWriter, event map[string]any) {
+	encoded, _ := json.Marshal(event)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
+}
+
+func writeOpenAITextStream(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	writeSSEEvent(w, map[string]any{
+		"id": "msg-1", "choices": []any{map[string]any{
+			"delta": map[string]any{"content": text}, "finish_reason": "stop",
+		}}, "usage": map[string]any{"prompt_tokens": 2, "completion_tokens": 3},
+	})
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+}
+
+func writeOpenAIToolStream(w http.ResponseWriter, name string, input map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	encoded, _ := json.Marshal(input)
+	midpoint := len(encoded) / 2
+	firstCall := map[string]any{
+		"index": 0, "id": "call-1",
+		"function": map[string]any{"name": name, "arguments": string(encoded[:midpoint])},
+	}
+	writeSSEEvent(w, map[string]any{
+		"id": "msg-1", "choices": []any{map[string]any{
+			"delta": map[string]any{"tool_calls": []any{firstCall}},
+		}},
+	})
+	secondCall := map[string]any{
+		"index": 0, "function": map[string]any{"arguments": string(encoded[midpoint:])},
+	}
+	writeSSEEvent(w, map[string]any{
+		"id": "msg-1", "choices": []any{map[string]any{
+			"delta": map[string]any{"tool_calls": []any{secondCall}}, "finish_reason": "tool_calls",
+		}}, "usage": map[string]any{"prompt_tokens": 2, "completion_tokens": 4},
+	})
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+}
+
+func writeAnthropicTextStream(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	writeSSEEvent(w, map[string]any{"type": "message_start", "message": map[string]any{
+		"id": "msg-1", "usage": map[string]any{"input_tokens": 2},
+	}})
+	writeSSEEvent(w, map[string]any{"type": "content_block_delta", "delta": map[string]any{
+		"type": "text_delta", "text": text,
+	}})
+	writeSSEEvent(w, map[string]any{"type": "message_delta", "delta": map[string]any{
+		"stop_reason": "end_turn",
+	}, "usage": map[string]any{"output_tokens": 3}})
+}
+
+func writeAnthropicToolStream(w http.ResponseWriter, name string, input map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	writeSSEEvent(w, map[string]any{"type": "message_start", "message": map[string]any{
+		"id": "msg-1", "usage": map[string]any{"input_tokens": 2},
+	}})
+	writeSSEEvent(w, map[string]any{"type": "content_block_start", "content_block": map[string]any{
+		"type": "tool_use", "id": "call-1", "name": name,
+	}})
+	encoded, _ := json.Marshal(input)
+	midpoint := len(encoded) / 2
+	for _, part := range []string{string(encoded[:midpoint]), string(encoded[midpoint:])} {
+		writeSSEEvent(w, map[string]any{"type": "content_block_delta", "delta": map[string]any{
+			"type": "input_json_delta", "partial_json": part,
+		}})
+	}
+	writeSSEEvent(w, map[string]any{"type": "content_block_stop"})
+	writeSSEEvent(w, map[string]any{"type": "message_delta", "delta": map[string]any{
+		"stop_reason": "tool_use",
+	}, "usage": map[string]any{"output_tokens": 4}})
+}
+
 func TestOpenAICompatibleMessageConversionAcceptsGoBlockSlicesLikePythonLists(t *testing.T) {
 	var requestBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,8 +100,7 @@ func TestOpenAICompatibleMessageConversionAcceptsGoBlockSlicesLikePythonLists(t 
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -82,8 +154,7 @@ func TestOpenAICompatibleToolCallArgumentsUsePythonJSONDumpsFormatting(t *testin
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -132,8 +203,7 @@ func TestOpenAICompatibleDropsMixedIDToolResultCarrierLikePython(t *testing.T) {
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -192,8 +262,7 @@ func TestOpenAICompatibleSynthesizesMissingToolMessageLikePython(t *testing.T) {
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -242,8 +311,7 @@ func TestOpenAICompatibleAPITypeSupportsCustomModelNames(t *testing.T) {
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v body=%s", err, bodyBytes)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -261,7 +329,8 @@ func TestOpenAICompatibleAPITypeSupportsCustomModelNames(t *testing.T) {
 	if requestPath != "/chat/completions" {
 		t.Fatalf("expected OpenAI-compatible endpoint for custom model, got %s", requestPath)
 	}
-	if requestBody["model"] != "custom-router-model" || requestBody["stream"] != false {
+	if requestBody["model"] != "custom-router-model" || requestBody["stream"] != true ||
+		requestBody["max_completion_tokens"] != float64(32) {
 		t.Fatalf("unexpected OpenAI-compatible request body: %#v", requestBody)
 	}
 }
@@ -270,8 +339,7 @@ func TestOpenAICompatibleAcceptsFullChatCompletionsBaseURLLikeLuminaDefaults(t *
 	var requestPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -303,8 +371,7 @@ func TestDeepSeekAnthropicDefaultsSendClaudeCompatibleRequest(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" || r.Header.Get("x-api-key") != "" {
 			t.Fatalf("DeepSeek Anthropic-compatible request used the wrong authentication headers: %#v", r.Header)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"content":[{"type":"text","text":"ok"}]}`)
+		writeAnthropicTextStream(w, "ok")
 	}))
 	defer server.Close()
 
@@ -322,7 +389,8 @@ func TestDeepSeekAnthropicDefaultsSendClaudeCompatibleRequest(t *testing.T) {
 	if requestPath != "/v1/messages" {
 		t.Fatalf("deepseek anthropic base should use Claude-compatible messages path, got %s", requestPath)
 	}
-	if requestBody["model"] != "deepseek-v4-pro[1m]" || requestBody["stream"] != false {
+	if requestBody["model"] != "deepseek-v4-pro[1m]" || requestBody["stream"] != true ||
+		requestBody["max_tokens"] != float64(32) {
 		t.Fatalf("unexpected anthropic request body: %#v", requestBody)
 	}
 }
@@ -337,8 +405,7 @@ func TestDeepSeekStructuredCompletionDisablesThinkingForForcedTool(t *testing.T)
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Fatalf("missing DeepSeek bearer authentication: %#v", r.Header)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"content":[{"type":"tool_use","id":"call-1","name":"ExpandMemoryQuery","input":{"queries":["Aurora"]}}],"stop_reason":"tool_use"}`)
+		writeAnthropicToolStream(w, "ExpandMemoryQuery", map[string]any{"queries": []any{"Aurora"}})
 	}))
 	defer server.Close()
 	client, err := api.NewAPIClient("test-key", server.URL, "deepseek-v4-pro[1m]", 256, nil, nil, "anthropic")
@@ -355,6 +422,41 @@ func TestDeepSeekStructuredCompletionDisablesThinkingForForcedTool(t *testing.T)
 	if thinking["type"] != "disabled" {
 		t.Fatalf("forced tool request did not disable thinking: %#v", requestBody)
 	}
+	if requestBody["stream"] != true {
+		t.Fatalf("structured completion must stream: %#v", requestBody)
+	}
+}
+
+func TestOpenAICompatibleStructuredCompletionStreamsSplitToolInput(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+			t.Fatalf("invalid request body: %v", err)
+		}
+		writeOpenAIToolStream(w, "ExtractMemoryBatch", map[string]any{"memories": []any{}})
+	}))
+	defer server.Close()
+	client, err := api.NewAPIClient("test-key", server.URL, "deepseek-chat", 256, nil, nil, "openai_compatible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.CompleteStructured(context.Background(), "sys", nil, api.StructuredCompletionOptions{
+		MaxTokens: 128, RequiredTool: "ExtractMemoryBatch", DisableThinking: true,
+		Tools: []map[string]any{{"name": "ExtractMemoryBatch", "input_schema": map[string]any{"type": "object"}}},
+	})
+	if err != nil || len(response.ToolCalls) != 1 {
+		t.Fatalf("streamed structured completion failed: response=%#v error=%v", response, err)
+	}
+	input, _ := response.ToolCalls[0]["input"].(map[string]any)
+	if _, ok := input["memories"]; !ok {
+		t.Fatalf("split tool arguments were not reconstructed: %#v", response.ToolCalls[0])
+	}
+	toolChoice, _ := requestBody["tool_choice"].(map[string]any)
+	if requestBody["stream"] != true || requestBody["max_completion_tokens"] != float64(128) ||
+		toolChoice["type"] != "function" {
+		t.Fatalf("structured request did not preserve streaming options: %#v", requestBody)
+	}
 }
 
 func TestOpenAICompatibleChatCompletionsURLNormalizesDeepSeekBaseURLLikePython(t *testing.T) {
@@ -363,8 +465,7 @@ func TestOpenAICompatibleChatCompletionsURLNormalizesDeepSeekBaseURLLikePython(t
 			var requestPath string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestPath = r.URL.Path
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+				writeOpenAITextStream(w, "ok")
 			}))
 			defer server.Close()
 
@@ -646,8 +747,7 @@ func TestOpenAICompatibleCompleteConditionalRetryIsCaseSensitiveLikePython(t *te
 			http.Error(w, "Permission overload", http.StatusServiceUnavailable)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		writeOpenAITextStream(w, "ok")
 	}))
 	defer server.Close()
 

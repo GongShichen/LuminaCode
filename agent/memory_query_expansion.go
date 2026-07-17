@@ -36,6 +36,8 @@ func expandMemoryQuery(ctx context.Context, cfg config.Config, query longmemory.
 			time.Duration(cfg.MemoryQueryExpansionTimeoutSeconds*float64(time.Second)))
 	}
 	defer cancel()
+	expansionCtx = api.ContextWithStreamIdleTimeout(expansionCtx,
+		time.Duration(cfg.APIStreamIdleTimeoutSeconds*float64(time.Second)))
 	payload := map[string]any{
 		"query":          query.Text,
 		"recent_context": query.RecentContext,

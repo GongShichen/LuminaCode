@@ -421,7 +421,9 @@ func (s *Store) summarize(ctx context.Context, startTurn, endTurn int, previews 
 			return "", "", nil, err
 		}
 		complete = func(ctx context.Context, systemPrompt string, messages []map[string]any, maxTokens int) (string, error) {
-			return client.Complete(ctx, systemPrompt, messages, api.CompleteOptions{MaxTokens: maxTokens})
+			streamCtx := api.ContextWithStreamIdleTimeout(ctx,
+				time.Duration(s.cfg.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+			return client.Complete(streamCtx, systemPrompt, messages, api.CompleteOptions{MaxTokens: maxTokens})
 		}
 	}
 	text, err := complete(ctx, system, []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": user}}}}, s.cfg.SessionMemorySummaryMaxTokens)

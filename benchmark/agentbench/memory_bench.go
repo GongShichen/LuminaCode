@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -238,7 +240,7 @@ func runLongMemEvalSuite(ctx context.Context, options RunnerOptions) (string, []
 	var pending []longMemEvalJob
 	for i, c := range cases {
 		id := firstNonEmptyString(c.QuestionID, "longmemeval-case")
-		if result, ok := checkpointed[id]; ok {
+		if result, ok := checkpointed[id]; ok && completedLongMemEvalCheckpoint(result) {
 			reportMemoryBenchmarkProgress(options.Suite, i+1, len(cases), id+" checkpoint")
 			results[i] = result
 			continue
@@ -293,6 +295,10 @@ func runLongMemEvalSuite(ctx context.Context, options RunnerOptions) (string, []
 		}
 	}
 	return path, compactMemoryResults(results), nil
+}
+
+func completedLongMemEvalCheckpoint(result CaseResult) bool {
+	return result.Case.ID != "" && result.ErrorType == "" && strings.TrimSpace(result.Hypothesis) != ""
 }
 
 func runMemoryArenaSuite(ctx context.Context, options RunnerOptions) (string, []CaseResult, error) {
@@ -673,7 +679,7 @@ func prepareMemoryCase(ctx context.Context, spec CaseSpec, options RunnerOptions
 	result := CaseResult{Case: spec, ExpectedSatisfied: true}
 	setArtifactPaths(&result, artifactDir)
 	caseDir := filepath.Join(options.WorkDir, "cases", sanitizeCaseID(spec.ID))
-	if err := os.RemoveAll(caseDir); err != nil {
+	if err := resetMemoryCaseDirectory(caseDir, !options.NoResume); err != nil {
 		result.ErrorType = "workdir_cleanup_failed: " + err.Error()
 		return result, caseCtx, caseDir, artifactDir, start, timeline, cancel
 	}
@@ -691,6 +697,44 @@ func prepareMemoryCase(ctx context.Context, spec CaseSpec, options RunnerOptions
 	}
 	result.WorkDir = caseDir
 	return result, caseCtx, caseDir, artifactDir, start, timeline, cancel
+}
+
+func resetMemoryCaseDirectory(caseDir string, preserveMemory bool) error {
+	memoryDir := filepath.Join(caseDir, ".lumina", "memory")
+	storePath := filepath.Join(memoryDir, "lumina-memory.sqlite")
+	if !preserveMemory {
+		return os.RemoveAll(caseDir)
+	}
+	if info, err := os.Stat(storePath); err != nil || info.IsDir() {
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return os.RemoveAll(caseDir)
+	}
+	stashDir := caseDir + ".memory-resume"
+	if err := os.RemoveAll(stashDir); err != nil {
+		return err
+	}
+	if err := os.Rename(memoryDir, stashDir); err != nil {
+		return err
+	}
+	restore := func() {
+		_ = os.MkdirAll(filepath.Dir(memoryDir), 0o755)
+		_ = os.Rename(stashDir, memoryDir)
+	}
+	if err := os.RemoveAll(caseDir); err != nil {
+		restore()
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(memoryDir), 0o755); err != nil {
+		restore()
+		return err
+	}
+	if err := os.Rename(stashDir, memoryDir); err != nil {
+		restore()
+		return err
+	}
+	return nil
 }
 
 func finishMemoryCase(ctx context.Context, result CaseResult, artifactDir string, start time.Time, timeline []TimelineEvent, agentResult AgentRunResult, expected any, storePath string, hits []string, cfg config.Config, metricInput memoryMetricInput) CaseResult {
@@ -1211,7 +1255,10 @@ func ingestLongMemEvalHistory(ctx context.Context, storePath string, c longMemEv
 	extractionCfg.LongTermMemoryEnabled = false
 	extractionCfg.LongTermMemoryStore = storePath
 	for sessionIndex, session := range c.HaystackSessions {
-		sessionID := stringAt(c.HaystackSessionIDs, sessionIndex, fmt.Sprintf("session-%d", sessionIndex+1))
+		sessionID, duplicate := longMemEvalSessionIdentityAt(c, sessionIndex)
+		if duplicate {
+			continue
+		}
 		baseTime := parseLongMemEvalDate(stringAt(c.HaystackDates, sessionIndex, ""))
 		state := agent.NewAgentState()
 		state.MemorySessionID = sessionID
@@ -1249,15 +1296,158 @@ func ingestLongMemEvalHistory(ctx context.Context, storePath string, c longMemEv
 				break
 			}
 		}
-		for state.MemoryExtractionCursor < len(state.Messages) {
-			before := state.MemoryExtractionCursor
-			if _, err := controller.ExtractNow(ctx, &state); err != nil {
+		if err := syncLongMemEvalExtractionCursor(ctx, storePath, sessionID, &state); err != nil {
+			return fmt.Errorf("resume extract session %s: %w", sessionID, err)
+		}
+		if err := completeMemoryExtraction(ctx, &state, func(attemptCtx context.Context) error {
+			_, err := controller.ExtractNow(attemptCtx, &state)
+			return err
+		}, time.Second, 30*time.Second); err != nil {
+			return fmt.Errorf("extract session %s: %w", sessionID, err)
+		}
+	}
+	return nil
+}
+
+func completeMemoryExtraction(ctx context.Context, state *agent.AgentState, extract func(context.Context) error,
+	retryBase, retryMax time.Duration) error {
+	if state == nil {
+		return errors.New("memory extraction state is required")
+	}
+	failures := 0
+	for state.MemoryExtractionCursor < len(state.Messages) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		before := state.MemoryExtractionCursor
+		if err := extract(ctx); err != nil {
+			failures++
+			if err := waitMemoryExtractionRetry(ctx, retryDelay(failures, retryBase, retryMax)); err != nil {
+				return err
+			}
+			continue
+		}
+		failures = 0
+		if state.MemoryExtractionCursor <= before {
+			return fmt.Errorf("made no cursor progress at message %d", before)
+		}
+	}
+	return nil
+}
+
+func retryDelay(failures int, base, maximum time.Duration) time.Duration {
+	if failures <= 0 || base <= 0 {
+		return 0
+	}
+	if maximum < base {
+		maximum = base
+	}
+	delay := base
+	for attempt := 1; attempt < failures && delay < maximum; attempt++ {
+		if delay > maximum/2 {
+			return maximum
+		}
+		delay *= 2
+	}
+	if delay > maximum {
+		return maximum
+	}
+	return delay
+}
+
+func waitMemoryExtractionRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func longMemEvalSessionIDAt(c longMemEvalCase, sessionIndex int) string {
+	sessionID, _ := longMemEvalSessionIdentityAt(c, sessionIndex)
+	return sessionID
+}
+
+func longMemEvalSessionIdentityAt(c longMemEvalCase, sessionIndex int) (string, bool) {
+	base := stringAt(c.HaystackSessionIDs, sessionIndex, fmt.Sprintf("session-%d", sessionIndex+1))
+	var representatives []int
+	for index := 0; index < sessionIndex; index++ {
+		if stringAt(c.HaystackSessionIDs, index, fmt.Sprintf("session-%d", index+1)) != base {
+			continue
+		}
+		known := false
+		for _, representative := range representatives {
+			if longMemEvalSessionContentEqual(c.HaystackSessions[index], c.HaystackSessions[representative]) {
+				known = true
 				break
 			}
-			if state.MemoryExtractionCursor <= before {
-				return fmt.Errorf("extract session %s made no cursor progress at message %d", sessionID, before)
-			}
 		}
+		if !known {
+			representatives = append(representatives, index)
+		}
+	}
+	for variant, representative := range representatives {
+		if longMemEvalSessionContentEqual(c.HaystackSessions[sessionIndex], c.HaystackSessions[representative]) {
+			if variant == 0 {
+				return base, true
+			}
+			return fmt.Sprintf("%s#%d", base, variant+1), true
+		}
+	}
+	if len(representatives) == 0 {
+		return base, false
+	}
+	return fmt.Sprintf("%s#%d", base, len(representatives)+1), false
+}
+
+func longMemEvalSessionContentEqual(left, right []map[string]any) bool {
+	leftIndex := 0
+	rightIndex := 0
+	for {
+		for leftIndex < len(left) && strings.TrimSpace(longMemEvalTurnString(left[leftIndex], "content")) == "" {
+			leftIndex++
+		}
+		for rightIndex < len(right) && strings.TrimSpace(longMemEvalTurnString(right[rightIndex], "content")) == "" {
+			rightIndex++
+		}
+		if leftIndex == len(left) || rightIndex == len(right) {
+			return leftIndex == len(left) && rightIndex == len(right)
+		}
+		if longMemEvalTurnString(left[leftIndex], "role") != longMemEvalTurnString(right[rightIndex], "role") ||
+			longMemEvalTurnString(left[leftIndex], "content") != longMemEvalTurnString(right[rightIndex], "content") {
+			return false
+		}
+		leftIndex++
+		rightIndex++
+	}
+}
+
+func longMemEvalTurnString(turn map[string]any, key string) string {
+	value, _ := turn[key].(string)
+	return value
+}
+
+func syncLongMemEvalExtractionCursor(ctx context.Context, storePath, sessionID string, state *agent.AgentState) error {
+	store, err := longmemory.Open(ctx, storePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	_, index, err := store.GetCursor(ctx, "long-term-extraction:history-replay", sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if index+1 > state.MemoryExtractionCursor {
+		state.MemoryExtractionCursor = index + 1
 	}
 	return nil
 }
@@ -1297,7 +1487,7 @@ func longMemEvalGoldSessions(c longMemEvalCase) map[string]struct{} {
 		for _, turn := range session {
 			hasAnswer, _ := turn["has_answer"].(bool)
 			if hasAnswer {
-				result[stringAt(c.HaystackSessionIDs, sessionIndex, fmt.Sprintf("session-%d", sessionIndex+1))] = struct{}{}
+				result[longMemEvalSessionIDAt(c, sessionIndex)] = struct{}{}
 				break
 			}
 		}
@@ -1308,7 +1498,7 @@ func longMemEvalGoldSessions(c longMemEvalCase) map[string]struct{} {
 func longMemEvalGoldMessages(c longMemEvalCase) map[string]string {
 	gold := map[string]string{}
 	for sessionIndex, session := range c.HaystackSessions {
-		sessionID := stringAt(c.HaystackSessionIDs, sessionIndex, fmt.Sprintf("session-%d", sessionIndex+1))
+		sessionID := longMemEvalSessionIDAt(c, sessionIndex)
 		for turnIndex, turn := range session {
 			content, _ := turn["content"].(string)
 			role, _ := turn["role"].(string)

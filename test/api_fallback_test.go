@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"LuminaCode/api"
 	"LuminaCode/config"
@@ -30,10 +29,12 @@ type structuredClientStub struct {
 	err      error
 	wait     bool
 	calls    int
+	lastOpts api.StructuredCompletionOptions
 }
 
-func (stub *structuredClientStub) CompleteStructured(ctx context.Context, _ string, _ []map[string]any, _ api.StructuredCompletionOptions) (api.Response, error) {
+func (stub *structuredClientStub) CompleteStructured(ctx context.Context, _ string, _ []map[string]any, opts api.StructuredCompletionOptions) (api.Response, error) {
 	stub.calls++
+	stub.lastOpts = opts
 	if stub.wait {
 		<-ctx.Done()
 		return api.Response{}, ctx.Err()
@@ -133,22 +134,34 @@ func TestFallbackClientCompleteAndCombinedFailure(t *testing.T) {
 	}
 }
 
-func TestStructuredFallbackRetainsTotalDeadlineBudget(t *testing.T) {
-	primary := &structuredClientStub{wait: true}
-	secondary := &structuredClientStub{response: api.Response{ToolCalls: []map[string]any{{
+func TestStructuredFallbackDoesNotSpeculativelyCallFallback(t *testing.T) {
+	primary := &structuredClientStub{response: api.Response{ToolCalls: []map[string]any{{
 		"name": "ExpandMemoryQuery", "input": map[string]any{"queries": []any{"Aurora"}},
 	}}}}
+	secondary := &structuredClientStub{err: errors.New("fallback should not run")}
 	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
-	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	response, err := client.CompleteStructured(ctx, "", nil, api.StructuredCompletionOptions{RequiredTool: "ExpandMemoryQuery"})
+	response, err := client.CompleteStructured(context.Background(), "", nil,
+		api.StructuredCompletionOptions{RequiredTool: "ExpandMemoryQuery"})
 	if err != nil || len(response.ToolCalls) != 1 {
-		t.Fatalf("structured fallback did not use remaining deadline: response=%#v error=%v", response, err)
+		t.Fatalf("primary structured completion failed: response=%#v error=%v", response, err)
 	}
-	if primary.calls != 1 || secondary.calls != 1 || time.Since(started) >= 850*time.Millisecond {
-		t.Fatalf("structured fallback exhausted the total deadline: primary=%d fallback=%d elapsed=%s",
-			primary.calls, secondary.calls, time.Since(started))
+	if primary.calls != 1 || secondary.calls != 0 {
+		t.Fatalf("fallback ran before primary failed: primary=%d fallback=%d", primary.calls, secondary.calls)
+	}
+}
+
+func TestStructuredFallbackAcceptsStrictJSONWhenFallbackCannotCallTools(t *testing.T) {
+	primary := &structuredClientStub{err: api.NewAPIStatusError("primary", 429, "quota exhausted", nil)}
+	secondary := &structuredClientStub{response: api.Response{Text: `{"memories":[]}`}}
+	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
+	response, err := client.CompleteStructured(context.Background(), "system", nil, api.StructuredCompletionOptions{
+		Tools: []map[string]any{{"name": "ExtractMemoryBatch"}}, RequiredTool: "ExtractMemoryBatch",
+	})
+	if err != nil || response.Text != `{"memories":[]}` {
+		t.Fatalf("strict JSON fallback failed: response=%#v error=%v", response, err)
+	}
+	if secondary.lastOpts.RequiredTool != "" || len(secondary.lastOpts.Tools) != 0 {
+		t.Fatalf("fallback should receive the portable JSON contract, got %#v", secondary.lastOpts)
 	}
 }
 

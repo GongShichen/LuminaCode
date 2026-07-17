@@ -290,7 +290,9 @@ func (e *LocalEmbedder) prepareEmbeddingInput(text string, kind EmbeddingKind) (
 	if kind == EmbeddingQuery {
 		prefix = "query: "
 	}
-	encoding, err := e.tokenizer.EncodeSingle(prefix+text, true)
+	encoding, err := tokenizeEmbeddingText(func(value string) (*tokenizer.Encoding, error) {
+		return e.tokenizer.EncodeSingle(value, true)
+	}, prefix+text)
 	if err != nil {
 		return embeddingInput{}, fmt.Errorf("tokenize memory text: %w", err)
 	}
@@ -317,6 +319,34 @@ func (e *LocalEmbedder) prepareEmbeddingInput(text string, kind EmbeddingKind) (
 		typeIDs = typeIDs[:len(ids)]
 	}
 	return embeddingInput{ids: intsToInt64(ids), attention: intsToInt64(attention), typeIDs: intsToInt64(typeIDs)}, nil
+}
+
+func tokenizeEmbeddingText(encode func(string) (*tokenizer.Encoding, error), text string) (*tokenizer.Encoding, error) {
+	encoding, err := callEmbeddingTokenizer(encode, text)
+	if err == nil {
+		return encoding, nil
+	}
+	fallback := strings.Join(strings.Fields(strings.ToValidUTF8(text, "\uFFFD")), " ")
+	if fallback == "" || fallback == text {
+		return nil, err
+	}
+	fallbackEncoding, fallbackErr := callEmbeddingTokenizer(encode, fallback)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("original input: %v; normalized whitespace fallback: %w", err, fallbackErr)
+	}
+	return fallbackEncoding, nil
+}
+
+func callEmbeddingTokenizer(encode func(string) (*tokenizer.Encoding, error), text string) (
+	encoding *tokenizer.Encoding, err error,
+) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			encoding = nil
+			err = fmt.Errorf("tokenizer panic: %v", recovered)
+		}
+	}()
+	return encode(text)
 }
 
 func (e *LocalEmbedder) embedBatch(inputs []embeddingInput, maxTokens int) ([][]float32, error) {
