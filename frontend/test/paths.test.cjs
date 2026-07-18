@@ -22,7 +22,7 @@ test("shared AppRoot path contract", () => {
 
 test("darwin and linux use the single home AppRoot", () => {
   for (const platform of ["darwin", "linux"]) {
-    assert.equal(appRoot(platform, {}, "/Users/tester"), path.join("/Users/tester", ".lumina"));
+    assert.equal(appRoot(platform, {}, "/Users/tester"), path.posix.join("/Users/tester", ".lumina"));
   }
 });
 
