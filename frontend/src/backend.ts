@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 
 import type { LaunchOptions } from "./types";
+import { backendLogPath, endpointPath } from "./paths";
 import { delay } from "./utils";
 
 export function parseLaunchOptions(args: string[]): LaunchOptions {
@@ -34,7 +34,7 @@ export function parseLaunchOptions(args: string[]): LaunchOptions {
 }
 
 export function shouldPassthrough(args: string[]): boolean {
-  if (args[0] === "daemon") return true;
+  if (["daemon", "shutdown", "layout", "memory"].includes(args[0] || "")) return true;
   return args.some((arg) => {
     return (
       arg === "-p" ||
@@ -87,9 +87,10 @@ export async function ensureBackend(): Promise<WebSocket> {
       // Fall through and start a fresh backend.
     }
   }
-  fs.mkdirSync(path.dirname(endpointPath()), { recursive: true });
+  fs.mkdirSync(path.dirname(endpointPath()), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(backendLogPath()), { recursive: true, mode: 0o700 });
   const logPath = backendLogPath();
-  const logFd = fs.openSync(logPath, "a");
+  const logFd = fs.openSync(logPath, "a", 0o600);
   fs.writeSync(logFd, `\n--- lumina-backend start ${new Date().toISOString()} ---\n`);
   const before = Date.now();
   const child = spawn(backendBin(), ["daemon", "--host", "127.0.0.1", "--port", "0"], {
@@ -117,14 +118,6 @@ export async function ensureBackend(): Promise<WebSocket> {
     }
   }
   throw new Error("Unable to start lumina-backend daemon");
-}
-
-function endpointPath(): string {
-  return path.join(os.homedir(), ".lumina", "run", "backend.json");
-}
-
-function backendLogPath(): string {
-  return path.join(os.homedir(), ".lumina", "run", "backend.log");
 }
 
 function readEndpoint(): any | null {

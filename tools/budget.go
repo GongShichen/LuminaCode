@@ -14,11 +14,18 @@ func ApplyToolResultBudget(rawOutput, toolUseID, sessionDir string, maxChars int
 }
 
 func ApplyToolResultBudgetWithPreview(rawOutput, toolUseID, sessionDir string, maxChars, previewChars int) (string, error) {
+	return applyToolResultBudgetInDir(rawOutput, toolUseID, filepath.Join(sessionDir, "tool-results"), maxChars, previewChars)
+}
+
+func ApplyToolResultBudgetInDir(rawOutput, toolUseID, resultsDir string, maxChars int) (string, error) {
+	return applyToolResultBudgetInDir(rawOutput, toolUseID, resultsDir, maxChars, 2000)
+}
+
+func applyToolResultBudgetInDir(rawOutput, toolUseID, resultsDir string, maxChars, previewChars int) (string, error) {
 	if charLen(rawOutput) <= maxChars {
 		return rawOutput, nil
 	}
 
-	resultsDir := filepath.Join(sessionDir, "tool-results")
 	filePath := filepath.Join(resultsDir, toolUseID+".txt")
 	sizeLabel := formatSize(len([]byte(rawOutput)))
 
@@ -27,11 +34,11 @@ func ApplyToolResultBudgetWithPreview(rawOutput, toolUseID, sessionDir string, m
 		preview += "\n..."
 	}
 
-	if err := os.MkdirAll(resultsDir, 0o755); err != nil {
+	if err := os.MkdirAll(resultsDir, 0o700); err != nil {
 		truncated := hardTruncate(rawOutput, maxChars)
 		return truncated + fmt.Sprintf("\n\n... [Warning: Failed to persist full output to disk due to error: %s]", err), nil
 	}
-	if err := os.WriteFile(filePath, []byte(rawOutput), 0o644); err != nil {
+	if err := os.WriteFile(filePath, []byte(rawOutput), 0o600); err != nil {
 		truncated := hardTruncate(rawOutput, maxChars)
 		return truncated + fmt.Sprintf("\n\n... [Warning: Failed to persist full output to disk due to error: %s]", err), nil
 	}

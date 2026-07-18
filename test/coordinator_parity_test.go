@@ -89,8 +89,7 @@ func TestCoordinatorRecoversFromUnauthorizedToolAndKeepsNotificationsScopedLikeP
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
-	cfg.CWD = t.TempDir()
+	cfg := config.NewConfigForCWD(t.TempDir())
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "custom-router-model"
@@ -151,8 +150,7 @@ func TestSubagentStubbornUnauthorizedToolExitsAtLowMaxTurnsLikePython(t *testing
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
-	cfg.CWD = t.TempDir()
+	cfg := config.NewConfigForCWD(t.TempDir())
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "custom-router-model"

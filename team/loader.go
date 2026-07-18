@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 
 	"gopkg.in/yaml.v3"
@@ -34,8 +35,62 @@ func (l Loader) TeamDir() string {
 	if strings.TrimSpace(l.Config.TeamDir) != "" {
 		return expandHome(l.Config.TeamDir)
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lumina", "TEAM")
+	return l.Config.Paths.UserTeamsDir
+}
+
+func (l Loader) BundledTeamDir() string {
+	if strings.TrimSpace(l.Config.BundledTeamDir) != "" {
+		return l.Config.BundledTeamDir
+	}
+	return l.Config.Paths.BundledTeamsDir
+}
+
+func (l Loader) ProjectTeamDir() string {
+	start := l.Config.CWD
+	if strings.TrimSpace(l.Config.ProjectPaths.CanonicalRoot) != "" {
+		start = l.Config.ProjectPaths.CanonicalRoot
+	}
+	current, err := filepath.Abs(start)
+	if err != nil {
+		current = start
+	}
+	if info, statErr := os.Stat(current); statErr == nil && !info.IsDir() {
+		current = filepath.Dir(current)
+	}
+	for current != "" {
+		candidate := apppaths.ProjectTeamsDir(current)
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
+func (l Loader) teamRoots() []string {
+	return uniqueTeamRoots([]string{
+		l.ProjectTeamDir(),
+		l.TeamDir(),
+		l.BundledTeamDir(),
+		l.Config.Paths.BundledTeamsDir,
+	})
+}
+
+func (l Loader) teamRoot(name string) string {
+	for _, root := range l.teamRoots() {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		candidate := filepath.Join(root, name)
+		if info, err := os.Stat(filepath.Join(candidate, TeamConfigFile)); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return filepath.Join(l.TeamDir(), name)
 }
 
 func (l Loader) ListTeams() []TeamListItem {
@@ -54,19 +109,29 @@ func (l Loader) ListTeams() []TeamListItem {
 }
 
 func (l Loader) LoadAll() ([]TeamSpec, []error) {
-	root := l.TeamDir()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, nil
-	}
-	sort.Slice(entries, func(i, j int) bool { return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name()) })
-	var specs []TeamSpec
-	var errs []error
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	names := map[string]string{}
+	roots := l.teamRoots()
+	for i := len(roots) - 1; i >= 0; i-- {
+		root := roots[i]
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			continue
 		}
-		spec, err := l.Load(entry.Name())
+		for _, entry := range entries {
+			if entry.IsDir() {
+				names[strings.ToLower(entry.Name())] = entry.Name()
+			}
+		}
+	}
+	ordered := make([]string, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, name)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return strings.ToLower(ordered[i]) < strings.ToLower(ordered[j]) })
+	var specs []TeamSpec
+	var errs []error
+	for _, name := range ordered {
+		spec, err := l.Load(name)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -76,12 +141,36 @@ func (l Loader) LoadAll() ([]TeamSpec, []error) {
 	return specs, errs
 }
 
+func uniqueTeamRoots(roots []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		key, err := filepath.Abs(root)
+		if err != nil {
+			key = filepath.Clean(root)
+		}
+		if resolved, resolveErr := filepath.EvalSymlinks(key); resolveErr == nil {
+			key = resolved
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, root)
+	}
+	return result
+}
+
 func (l Loader) Load(name string) (TeamSpec, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return TeamSpec{}, fmt.Errorf("team name is required")
 	}
-	root := filepath.Join(l.TeamDir(), name)
+	root := l.teamRoot(name)
 	data, err := os.ReadFile(filepath.Join(root, TeamConfigFile))
 	if err != nil {
 		return TeamSpec{}, fmt.Errorf("team %q config not found: %w", name, err)

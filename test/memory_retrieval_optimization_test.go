@@ -133,12 +133,12 @@ func TestRetrievalCacheInvalidatesAfterMemoryWrite(t *testing.T) {
 
 func TestInvalidMemoryWeightsAreReported(t *testing.T) {
 	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "CONFIG")
+	configDir := filepath.Join(root, ".lumina", "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	contents := `{"memory_coverage_relevance_weight":0.8,"memory_coverage_facet_weight":0.2,"memory_coverage_provenance_weight":0.2,"memory_coverage_source_weight":0.1,"memory_coverage_coherence_weight":0.1}`
-	if err := os.WriteFile(filepath.Join(configDir, "defaults.json"), []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)
@@ -150,7 +150,7 @@ func TestInvalidMemoryWeightsAreReported(t *testing.T) {
 
 func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
 	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "CONFIG")
+	configDir := filepath.Join(root, ".lumina", "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
 		"memory_context_max_tokens": 300,
 		"memory_atom_structural_context_max_tokens": 384
 	}`
-	if err := os.WriteFile(filepath.Join(configDir, "defaults.json"), []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)
@@ -176,7 +176,7 @@ func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
 
 func TestInvalidMemoryLifecycleConfigurationIsReported(t *testing.T) {
 	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "CONFIG")
+	configDir := filepath.Join(root, ".lumina", "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestInvalidMemoryLifecycleConfigurationIsReported(t *testing.T) {
 			"dependency_strength": 0
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(configDir, "defaults.json"), []byte(contents), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", root)

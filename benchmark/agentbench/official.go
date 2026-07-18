@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 	bashpkg "LuminaCode/tools/bash"
 )
@@ -345,7 +346,7 @@ func prepareOfficialSuiteAssets(ctx context.Context, options *RunnerOptions) err
 	if output, err := build.CombinedOutput(); err != nil {
 		return fmt.Errorf("build linux lumina binary failed: %w\n%s", err, output)
 	}
-	resources, err := archiveLuminaResources(filepath.Join(repoRoot, ".Lumina"))
+	resources, err := archiveLuminaResources(apppaths.ProjectLocalRoot(repoRoot))
 	if err != nil {
 		return err
 	}

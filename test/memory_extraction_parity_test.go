@@ -113,8 +113,7 @@ func TestExtractionControllerThrottleAndRunner(t *testing.T) {
 
 func TestExtractionControllerAppliesCandidateActions(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.LongTermMemoryEnabled = true
 	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
 	cfg.MemoryBackgroundExtractionInterval = 1

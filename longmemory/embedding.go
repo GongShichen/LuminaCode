@@ -72,9 +72,10 @@ func NewLocalEmbedder(modelName, modelDir string) (*LocalEmbedder, error) {
 	if modelName == "" {
 		modelName = "multilingual-e5-small"
 	}
-	modelDir = ExpandPath(modelDir)
-	if modelDir == "" {
-		modelDir = filepath.Join(filepath.Dir(DefaultStorePath()), "..", "models", "memory", modelName)
+	if strings.TrimSpace(modelDir) == "" {
+		modelDir = DefaultModelPath(modelName)
+	} else {
+		modelDir = ExpandPath(modelDir)
 	}
 	modelDir = filepath.Clean(modelDir)
 	modelPath := filepath.Join(modelDir, "model.onnx")

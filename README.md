@@ -9,7 +9,8 @@ Agent Teams.
 ## Agent Capabilities
 
 - Uses the launch directory as the default project root.
-- Reads `LUMINA.md` / `AGENTS.md`, with user-level fallback under `~/.lumina`.
+- Reads `LUMINA.md` / `AGENTS.md`, with user-level fallback under
+  `<AppRoot>/config/instructions`.
 - Loads project, user, and bundled skills.
 - Runs file, shell, web, MCP, memory, and task tools with permission controls.
 - Keeps resumable sessions with transcript, state, tasks, tool results, skill
@@ -30,7 +31,7 @@ The installed command is split into two processes:
 Interactive sessions use localhost WebSocket:
 
 ```text
-~/.lumina/run/backend.json
+<AppRoot>/state/run/backend.json
 ```
 
 The backend listens on `127.0.0.1`, requires an auth token, supports multiple
@@ -42,7 +43,7 @@ by `lumina-backend`.
 Cross-session memory lives in one local SQLite store:
 
 ```text
-~/.lumina/memory/lumina-memory.sqlite
+<AppRoot>/data/memory/lumina-memory.sqlite
 ```
 
 ### 1. What It Remembers And How
@@ -65,7 +66,8 @@ Cross-session memory lives in one local SQLite store:
   them.
 
 `make install` downloads `multilingual-e5-small` from ModelScope into
-`~/.lumina/models/memory/`; `make uninstall` removes it. `/Memory`,
+`<AppRoot>/cache/models/memory/`; normal uninstall removes this rebuildable
+cache. `/Memory`,
 `/MemorySearch`, `/MemoryForget`, `/MemoryExport`, and `/MemoryImport` provide
 local inspection and control.
 
@@ -233,14 +235,13 @@ Runtime summary:
 - Ordinary Agent context and Team Agent contexts remain isolated.
 
 ```text
-{session_dir}/{parent_session_id}/teams/{team_session_id}/
-{session_dir}/{parent_session_id}/teams/{team_session_id}/agents/{agent_id}/
-~/.lumina/project/{project_root_name}/teams/{team_name}/{team_session_id}/
+<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/
+<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/agents/{agent_id}/
 ```
 
 ### Built-in Teams
 
-Installed under `~/.lumina/TEAM/`:
+Installed under `<AppRoot>/app/resources/teams/`:
 
 - `product-development`: full-stack delivery with `team-leader`, `research`,
   `frontend`, `backend`, `qa`, `reviewer`, `devops`, and `ux-design`. Uses
@@ -250,12 +251,15 @@ Installed under `~/.lumina/TEAM/`:
   `qa`, and `reviewer`. Uses SearxNG `WebSearch` / `WebFetch` and arXiv MCP;
   can export report and evidence files.
 
+Team lookup order is project `.Lumina/TEAM`, user `<AppRoot>/config/teams`, then
+installed `<AppRoot>/app/resources/teams`.
+
 ### Creating a Team
 
 `/NewTeam` asks for a display name and creates:
 
 ```text
-~/.lumina/TEAM/{team_name}/
+<AppRoot>/config/teams/{team_name}/
 ├── team.yaml
 ├── team-system.md
 ├── shared-prompt.md
@@ -353,7 +357,7 @@ The launch directory is the default working directory.
 ## API Configuration
 
 No default model is hard-coded. Configure via env, flags, or
-`~/.lumina/CONFIG/defaults.json`:
+`<AppRoot>/config/settings.json`:
 
 ```sh
 export LUMINA_API_KEY="..."
@@ -372,6 +376,11 @@ lumina \
   --model "deepseek-v4-pro[1m]" \
   --max-tokens 1000000
 ```
+
+Configuration precedence is: compiled defaults, user
+`config/settings.json`, project `.Lumina/CONFIG/defaults.json`, environment,
+then CLI flags. Default paths are derived by `apppaths` and are not written to
+user settings.
 
 `--api-type`: `anthropic`, `openai_compatible`, or `auto`.
 
@@ -403,8 +412,8 @@ Read order:
 
 1. `{cwd}/LUMINA.md`
 2. `{cwd}/AGENTS.md`
-3. `~/.lumina/LUMINA.md`
-4. `~/.lumina/AGENTS.md`
+3. `<AppRoot>/config/instructions/LUMINA.md`
+4. `<AppRoot>/config/instructions/AGENTS.md`
 
 All files are optional.
 
@@ -414,8 +423,8 @@ Skills are `SKILL.md` instruction packages loaded from:
 
 - `{project_root}/skills/`
 - `{project_root}/.Lumina/PROJECT_SKILLS/`
-- `~/.lumina/skills/`
-- `~/.lumina/SKILLS/`
+- `<AppRoot>/config/skills/`
+- `<AppRoot>/app/resources/skills/`
 
 Invoked skill context is injected into the model request without entering the
 visible transcript.
@@ -434,41 +443,42 @@ operations and project MCP servers can require approval.
 Project MCP config: `.mcp.json`. Trust records:
 
 ```text
-~/.lumina/project/{project_root_name}/CONFIG/trusted_mcp.json
+<AppRoot>/data/projects/{project-id}/trust/mcp.json
 ```
 
 Use `/mcp` to inspect registered MCP tools.
 
 ## Sessions and Runtime Data
 
-Installed resources:
+AppRoot v2 uses five ownership layers:
 
 ```text
-~/.lumina/
+<AppRoot>/
 ```
 
-- `CONFIG/defaults.json`
-- `SYSTEM/system-prompt.md`
-- `SYSTEM/extraction_system.md`
-- `SKILLS/`
-- `TEAM/`
-- `frontend/`
+- `app/`: atomically replaceable application payload and bundled resources
+- `config/`: user settings, MCP config, instructions, skills, and teams
+- `data/`: memory, sessions, project manifests/trust/team data, and legacy data
+- `state/`: endpoint, logs, services, migrations, and per-session tool results
+- `cache/`: models, downloads, and temporary rebuildable files
 
 Project runtime data:
 
 ```text
-~/.lumina/project/{project_root_name}/
+<AppRoot>/data/projects/{project-id}/
 ```
 
-- `CONFIG/trusted_mcp.json`
-- `background/tool-results/`
+- `project.json`
+- `trust/mcp.json`
+- `teams/`
 
 Project-authored resources:
 
 - `{project_root}/skills/`
 - `{project_root}/.Lumina/PROJECT_SKILLS/`
 
-Session history uses `session_dir` (`~/.lumina/sessions` by default):
+Active session history uses `<AppRoot>/data/sessions/active` by default; archived
+sessions use `<AppRoot>/data/sessions/archive`:
 
 ```text
 {session_dir}/{session_id}/
@@ -486,7 +496,7 @@ Session history uses `session_dir` (`~/.lumina/sessions` by default):
 Large background outputs:
 
 ```text
-~/.lumina/project/{project_root_name}/background/tool-results/
+<AppRoot>/state/projects/{project-id}/tool-results/{session-id}/
 ```
 
 ## CLI Reference
@@ -523,11 +533,21 @@ passthrough or `lumina-backend`.
 
 ## Installation
 
+Default AppRoot resolution is `$HOME/.lumina` on macOS/Linux and
+`%LOCALAPPDATA%\LuminaCode` on Windows, falling back to
+`%USERPROFILE%\.lumina`. `LUMINA_APP_ROOT` is the only root override;
+`LUMINA_RESOURCE_ROOT` changes bundled resources only. See
+[AppRoot v2](docs/app-root-v2.md) for the complete storage and migration
+contract.
+
 macOS/Linux:
 
 ```sh
 make install
 ```
+
+For unattended installs that must not edit a shell profile, use
+`make install NO_PATH_UPDATE=1`. The Windows equivalent is `-NoPathUpdate`.
 
 Windows:
 
@@ -539,6 +559,8 @@ Doctor:
 
 ```sh
 make doctor
+lumina layout paths --json
+lumina layout doctor --json
 ```
 
 ```powershell
@@ -556,7 +578,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.
 ```
 
 `make uninstall` shuts down backend/MCP/SearxNG, removes installed commands and
-`~/.lumina`, and leaves shell rc files plus project-local `.Lumina` untouched.
+the installer-owned `app/cache/state` layers. It preserves `config`, `data`,
+`layout.json`, shell rc files, and project-local `.Lumina`. Permanent removal is
+explicit:
+
+```sh
+make purge
+# or: make uninstall PURGE=1
+```
+
+```powershell
+.\scripts\uninstall-windows.ps1 -Purge
+```
 
 ## Development
 
@@ -592,6 +625,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 
 - `agent/`: agent loop, state, permissions, memory injection, and tool execution
 - `agentContext/`: context compression and injection pipeline
+- `apppaths/`: cross-platform AppRoot, project identity, doctor, and migration
 - `api/`: streaming LLM clients and provider protocol normalization
 - `backend/`: WebSocket daemon, session manager, and frontend IPC bridge
 - `cli/`: slash command classification and completion helpers

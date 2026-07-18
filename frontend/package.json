@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "tsc --outDir dist",
-    "test": "tsc --noEmit"
+    "test": "tsc --noEmit && npm run build --silent && node --test test/*.test.cjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",

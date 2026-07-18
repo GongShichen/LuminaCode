@@ -5,30 +5,35 @@ CGO_ENABLED ?= 1
 NPM ?= npm
 BUILD_DIR ?= tmp
 INSTALL_DIR ?= $(shell os=$$(uname -s); if [ "$$os" = "Darwin" ] && [ -d /opt/homebrew/bin ] && [ -w /opt/homebrew/bin ]; then printf /opt/homebrew/bin; elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then printf /usr/local/bin; else printf '%s/.local/bin' "$$HOME"; fi)
-APP_ROOT ?= $(HOME)/.lumina
+APP_ROOT ?= $(or $(LUMINA_APP_ROOT),$(HOME)/.lumina)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf dev)
+PURGE ?= 0
+SKIP_MANAGED_COMPONENTS ?= 0
+NO_PATH_UPDATE ?= 0
 BUILD_PATH := $(BUILD_DIR)/$(APP_NAME)
 BACKEND_BUILD_PATH := $(BUILD_DIR)/$(BACKEND_NAME)
 INSTALL_PATH := $(INSTALL_DIR)/$(APP_NAME)
 BACKEND_INSTALL_PATH := $(INSTALL_DIR)/$(BACKEND_NAME)
 
-.PHONY: help build install uninstall doctor clean
+.PHONY: help build install uninstall purge doctor clean
 
 help:
 	@printf '%s\n' \
 		'LuminaCode Makefile' \
 		'' \
 		'Targets:' \
-		'  make build      Build ./tmp/lumina and ./tmp/lumina-backend' \
-		'  make install    Install TS lumina frontend, Go lumina-backend, and resources into ~/.lumina' \
-		'  make doctor     Show detected OS, shell, rc file, and install path' \
-		'  make uninstall  Stop backend/SearxNG and remove installed Lumina files' \
+		'  make build      Build the frontend launcher and Go backend' \
+		'  make install    Install or atomically upgrade AppRoot v2' \
+		'  make doctor     Inspect the resolved AppRoot and managed components' \
+		'  make uninstall  Remove app/cache/state; preserve config/data/layout.json' \
+		'  make purge      Remove the complete AppRoot, including user data' \
 		'  make clean      Remove local build output' \
-		'' \
-		'Default install dir prefers writable /opt/homebrew/bin or /usr/local/bin, then ~/.local/bin.' \
 		'' \
 		'Overrides:' \
 		'  make install INSTALL_DIR=/usr/local/bin' \
-		'  make install APP_ROOT=/opt/lumina'
+		'  make install APP_ROOT=/opt/lumina' \
+		'  make install NO_PATH_UPDATE=1' \
+		'  make uninstall PURGE=1'
 
 build:
 	@mkdir -p "$(BUILD_DIR)"
@@ -38,18 +43,21 @@ build:
 	@set -eu; \
 	repo_frontend="$(CURDIR)/frontend"; \
 	build_dir_abs="$(CURDIR)/$(BUILD_DIR)"; \
+	configured_app_root="$(APP_ROOT)"; \
 	{ \
 		printf '%s\n' '#!/usr/bin/env sh'; \
 		printf '%s\n' 'set -eu'; \
 		printf '%s\n' 'script_dir="$$(CDPATH= cd -- "$$(dirname -- "$$0")" && pwd)"'; \
 		printf '%s\n' 'if [ -x "$$script_dir/$(BACKEND_NAME)" ]; then export LUMINA_BACKEND_BIN="$$script_dir/$(BACKEND_NAME)"; fi'; \
-		printf '%s\n' 'resource_root="$${LUMINA_RESOURCE_ROOT:-$$HOME/.lumina}"'; \
 		printf '%s\n' "if [ \"\$$script_dir\" = \"$$build_dir_abs\" ]; then"; \
 		printf '%s\n' '  frontend_root="$${LUMINA_FRONTEND_ROOT:-'"$$repo_frontend"'}"'; \
+		printf '%s\n' '  export LUMINA_RESOURCE_ROOT="$${LUMINA_RESOURCE_ROOT:-'"$(CURDIR)"'}"'; \
 		printf '%s\n' 'else'; \
-		printf '%s\n' '  frontend_root="$${LUMINA_FRONTEND_ROOT:-$$resource_root/frontend}"'; \
+		printf '%s\n' '  export LUMINA_APP_ROOT="$${LUMINA_APP_ROOT:-'"$$configured_app_root"'}"'; \
+		printf '%s\n' '  frontend_root="$${LUMINA_FRONTEND_ROOT:-$$LUMINA_APP_ROOT/app/frontend}"'; \
+		printf '%s\n' '  export LUMINA_RESOURCE_ROOT="$${LUMINA_RESOURCE_ROOT:-$$LUMINA_APP_ROOT/app/resources}"'; \
 		printf '%s\n' 'fi'; \
-		printf '%s\n' "if [ ! -f \"\$$frontend_root/dist/index.js\" ]; then frontend_root=\"$$repo_frontend\"; fi"; \
+		printf '%s\n' 'if [ ! -f "$$frontend_root/dist/index.js" ]; then echo "LuminaCode frontend is missing: $$frontend_root" >&2; exit 1; fi'; \
 		printf '%s\n' 'export NODE_PATH="$$frontend_root/node_modules$${NODE_PATH:+:$$NODE_PATH}"'; \
 		printf '%s\n' 'exec node "$$frontend_root/dist/index.js" "$$@"'; \
 	} > "$(BUILD_PATH)"; \
@@ -58,270 +66,66 @@ build:
 install: build
 	@set -eu; \
 	os="$$(uname -s)"; \
-	case "$$os" in \
-		Darwin) os_name="macOS" ;; \
-		Linux) os_name="Linux" ;; \
-		*) echo "Unsupported OS: $$os"; exit 1 ;; \
-	esac; \
-	shell_path=""; \
-	if [ "$$os" = "Darwin" ]; then \
-		shell_path="$$(dscl . -read "/Users/$$(id -un)" UserShell 2>/dev/null | awk '{print $$2}' || true)"; \
-	else \
-		shell_path="$$(getent passwd "$$(id -un)" 2>/dev/null | cut -d: -f7 || true)"; \
-		if [ -z "$$shell_path" ]; then \
-			shell_path="$$(awk -F: -v user="$$(id -un)" '$$1 == user {print $$7}' /etc/passwd 2>/dev/null || true)"; \
-		fi; \
-	fi; \
-	if [ -z "$$shell_path" ]; then \
+	case "$$os" in Darwin) os_name="macOS" ;; Linux) os_name="Linux" ;; *) echo "Unsupported OS: $$os"; exit 1 ;; esac; \
+	case "$(APP_ROOT)" in /*) ;; *) echo "APP_ROOT must be absolute: $(APP_ROOT)"; exit 1 ;; esac; \
+	if [ "$(APP_ROOT)" = "/" ]; then echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; exit 1; fi; \
+	rc_file=""; \
+	if [ "$(NO_PATH_UPDATE)" != "1" ]; then \
 		shell_path="$${SHELL:-/bin/sh}"; \
+		if [ "$$os" = "Darwin" ]; then detected="$$(dscl . -read "/Users/$$(id -un)" UserShell 2>/dev/null | awk '{print $$2}' || true)"; [ -z "$$detected" ] || shell_path="$$detected"; \
+		else detected="$$(getent passwd "$$(id -un)" 2>/dev/null | cut -d: -f7 || true)"; [ -z "$$detected" ] || shell_path="$$detected"; fi; \
+		shell_name="$$(basename "$$shell_path")"; \
+		case "$$shell_name" in zsh) rc_file="$${ZDOTDIR:-$$HOME}/.zshrc" ;; bash) if [ "$$os" = "Darwin" ]; then rc_file="$$HOME/.bash_profile"; else rc_file="$$HOME/.bashrc"; fi ;; *) rc_file="$$HOME/.profile" ;; esac; \
 	fi; \
-	shell_name="$$(basename "$$shell_path")"; \
-	case "$$shell_name" in \
-		zsh) rc_file="$${ZDOTDIR:-$$HOME}/.zshrc" ;; \
-		bash) \
-			if [ "$$os" = "Darwin" ]; then \
-				rc_file="$$HOME/.bash_profile"; \
-			else \
-				rc_file="$$HOME/.bashrc"; \
-			fi ;; \
-		*) \
-			rc_file="$$HOME/.profile"; \
-			echo "Unsupported login shell '$$shell_name'; using $$rc_file for PATH setup." ;; \
-	esac; \
+	chmod 0755 scripts/install-app-layout.sh; \
+	NPM="$(NPM)" scripts/install-app-layout.sh "$(APP_ROOT)" "$(CURDIR)/$(BACKEND_BUILD_PATH)" "$(VERSION)"; \
 	mkdir -p "$(INSTALL_DIR)"; \
 	install -m 0755 "$(BUILD_PATH)" "$(INSTALL_PATH)"; \
 	install -m 0755 "$(BACKEND_BUILD_PATH)" "$(BACKEND_INSTALL_PATH)"; \
-	if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
-		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
-		exit 1; \
-	fi; \
-	mkdir -p "$(APP_ROOT)"; \
-	preserved_config=""; \
-	if [ -f "$(APP_ROOT)/CONFIG/defaults.json" ]; then \
-		preserved_config="$$(mktemp)"; \
-		cp "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
-	fi; \
-	rm -rf "$(APP_ROOT)/SYSTEM" "$(APP_ROOT)/TEAM" "$(APP_ROOT)/SKILLS" "$(APP_ROOT)/frontend"; \
-	cp -R ".Lumina/." "$(APP_ROOT)/"; \
-	if [ ! -f "$(APP_ROOT)/CONFIG/defaults.json" ] && [ -f "$(APP_ROOT)/CONFIG/defaults.json.example" ]; then \
-		cp "$(APP_ROOT)/CONFIG/defaults.json.example" "$(APP_ROOT)/CONFIG/defaults.json"; \
-	fi; \
-	cp "setup-searxng.sh" "$(APP_ROOT)/setup-searxng.sh"; \
-	chmod 0755 "$(APP_ROOT)/setup-searxng.sh"; \
-	rm -rf "$(APP_ROOT)/frontend"; \
-	mkdir -p "$(APP_ROOT)/frontend"; \
-	cp -R "frontend/dist" "frontend/node_modules" "frontend/package.json" "$(APP_ROOT)/frontend/"; \
-	if [ -n "$$preserved_config" ]; then \
-		mkdir -p "$(APP_ROOT)/CONFIG"; \
-		python3 -c 'import json,pathlib,sys; t,u=map(pathlib.Path,sys.argv[1:]); d=json.loads(t.read_text()); d.update(json.loads(u.read_text())); t.write_text(json.dumps(d,ensure_ascii=False,indent=2)+"\n")' "$(APP_ROOT)/CONFIG/defaults.json" "$$preserved_config"; \
-		rm -f "$$preserved_config"; \
-	fi; \
-	if APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh configure; then \
-		searxng_status="configured"; \
+	if [ "$(SKIP_MANAGED_COMPONENTS)" = "1" ]; then searxng_status=skipped; arxiv_status=skipped; embedding_status=skipped; \
 	else \
-		searxng_status="configure failed"; \
-		echo "Warning: SearxNG configuration failed. Run ./setup-searxng.sh configure manually."; \
+		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-searxng.sh" configure; then searxng_status=configured; else searxng_status=failed; fi; \
+		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" install; then arxiv_status=configured; else arxiv_status=failed; fi; \
+		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" install; then embedding_status=installed; else embedding_status=failed; fi; \
 	fi; \
-	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-arxiv-mcp.sh install; then \
-		arxiv_status="configured"; \
-	else \
-		arxiv_status="configure failed"; \
-		echo "Warning: arXiv MCP setup failed. Run ./scripts/setup-arxiv-mcp.sh install manually."; \
+	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then path_line='export PATH="$$HOME/.local/bin:$$PATH"'; path_marker='$$HOME/.local/bin'; else path_line='export PATH="$(INSTALL_DIR):$$PATH"'; path_marker='$(INSTALL_DIR)'; fi; \
+	app_root_line=""; \
+	if [ "$(APP_ROOT)" != "$$HOME/.lumina" ]; then app_root_line='export LUMINA_APP_ROOT="$(APP_ROOT)"'; fi; \
+	if [ "$(NO_PATH_UPDATE)" != "1" ]; then \
+		mkdir -p "$$(dirname "$$rc_file")"; touch "$$rc_file"; \
+		if ! printf '%s' "$$PATH" | tr ':' '\n' | grep -Fxqs "$(INSTALL_DIR)" && ! grep -Fqs "$$path_marker" "$$rc_file"; then { printf '\n# LuminaCode CLI\n'; printf '%s\n' "$$path_line"; } >> "$$rc_file"; fi; \
+		if [ -n "$$app_root_line" ] && ! grep -Fqs 'LUMINA_APP_ROOT' "$$rc_file"; then { printf '\n# LuminaCode AppRoot\n'; printf '%s\n' "$$app_root_line"; } >> "$$rc_file"; fi; \
 	fi; \
-	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh install; then \
-		embedding_status="installed"; \
-	else \
-		embedding_status="install failed"; \
-		echo "Warning: memory embedding setup failed. Run ./scripts/setup-memory-embedding.sh install manually."; \
-	fi; \
-	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then \
-		path_line='export PATH="$$HOME/.local/bin:$$PATH"'; \
-		path_marker='$$HOME/.local/bin'; \
-	else \
-		path_line='export PATH="$(INSTALL_DIR):$$PATH"'; \
-		path_marker='$(INSTALL_DIR)'; \
-	fi; \
-	resource_line=""; \
-	if [ "$(APP_ROOT)" != "$$HOME/.lumina" ]; then \
-		resource_line='export LUMINA_RESOURCE_ROOT="$(APP_ROOT)"'; \
-	fi; \
-	added_path=0; \
-	added_resource_root=0; \
-	mkdir -p "$$(dirname "$$rc_file")"; \
-	touch "$$rc_file"; \
-	if ! printf '%s' "$$PATH" | tr ':' '\n' | grep -Fxqs "$(INSTALL_DIR)" && ! grep -Fqs "$$path_marker" "$$rc_file" && ! grep -Fqs "$(INSTALL_DIR)" "$$rc_file"; then \
-		{ printf '\n# LuminaCode CLI\n'; printf '%s\n' "$$path_line"; } >> "$$rc_file"; \
-		added_path=1; \
-	fi; \
-	if [ -n "$$resource_line" ] && ! grep -Fqs "LUMINA_RESOURCE_ROOT" "$$rc_file"; then \
-		{ printf '\n# LuminaCode resources\n'; printf '%s\n' "$$resource_line"; } >> "$$rc_file"; \
-		added_resource_root=1; \
-	fi; \
-	if [ "$(INSTALL_PATH)" != "$$HOME/.local/bin/$(APP_NAME)" ]; then \
-		rm -f "$$HOME/.local/bin/$(APP_NAME)"; \
-	fi; \
-	if [ "$(BACKEND_INSTALL_PATH)" != "$$HOME/.local/bin/$(BACKEND_NAME)" ]; then \
-		rm -f "$$HOME/.local/bin/$(BACKEND_NAME)"; \
-	fi; \
-	echo "Installed $(APP_NAME) to $(INSTALL_PATH)"; \
-	echo "Installed $(BACKEND_NAME) to $(BACKEND_INSTALL_PATH)"; \
-	echo "Installed resources to $(APP_ROOT)"; \
-	echo "SearxNG WebSearch: $$searxng_status"; \
-	echo "arXiv MCP: $$arxiv_status"; \
-	echo "Memory embedding: $$embedding_status"; \
-	echo "To start local SearxNG: ./setup-searxng.sh install"; \
-	if [ -n "$$preserved_config" ]; then \
-		echo "Preserved existing $(APP_ROOT)/CONFIG/defaults.json"; \
-	fi; \
-	echo "Detected $$os_name with $$shell_name ($$shell_path)"; \
-	if [ "$$added_path" = "1" ]; then \
-		echo "Updated PATH in $$rc_file"; \
-	elif printf '%s' "$$PATH" | tr ':' '\n' | grep -Fxqs "$(INSTALL_DIR)"; then \
-		echo "$(INSTALL_DIR) is already in current PATH"; \
-	else \
-		echo "PATH entry already exists in $$rc_file"; \
-	fi; \
-	if [ "$$added_resource_root" = "1" ]; then \
-		echo "Updated LUMINA_RESOURCE_ROOT in $$rc_file"; \
-	elif [ -n "$$resource_line" ]; then \
-		echo "LUMINA_RESOURCE_ROOT already exists in $$rc_file"; \
-	else \
-		echo "Default resource root does not require LUMINA_RESOURCE_ROOT"; \
-	fi; \
-	if command -v "$(APP_NAME)" >/dev/null 2>&1; then \
-		echo "Ready: $$(command -v "$(APP_NAME)")"; \
-	elif [ "$$added_path" = "1" ] || [ "$$added_resource_root" = "1" ]; then \
-		echo "Run: source $$rc_file"; \
-	fi
+	echo "Installed LuminaCode $(VERSION) on $$os_name"; \
+	echo "CLI: $(INSTALL_PATH)"; \
+	echo "Backend: $(BACKEND_INSTALL_PATH)"; \
+	echo "AppRoot: $(APP_ROOT)"; \
+	echo "SearxNG: $$searxng_status; arXiv MCP: $$arxiv_status; embedding: $$embedding_status"; \
+	if [ "$(NO_PATH_UPDATE)" != "1" ] && ! command -v "$(APP_NAME)" >/dev/null 2>&1; then echo "Open a new shell or run: source $$rc_file"; fi
 
 doctor:
 	@set -eu; \
-	os="$$(uname -s)"; \
-	case "$$os" in \
-		Darwin) os_name="macOS" ;; \
-		Linux) os_name="Linux" ;; \
-		*) os_name="unsupported ($$os)" ;; \
-	esac; \
-	shell_path=""; \
-	if [ "$$os" = "Darwin" ]; then \
-		shell_path="$$(dscl . -read "/Users/$$(id -un)" UserShell 2>/dev/null | awk '{print $$2}' || true)"; \
-	elif [ "$$os" = "Linux" ]; then \
-		shell_path="$$(getent passwd "$$(id -un)" 2>/dev/null | cut -d: -f7 || true)"; \
-		if [ -z "$$shell_path" ]; then \
-			shell_path="$$(awk -F: -v user="$$(id -un)" '$$1 == user {print $$7}' /etc/passwd 2>/dev/null || true)"; \
-		fi; \
-	fi; \
-	if [ -z "$$shell_path" ]; then \
-		shell_path="$${SHELL:-/bin/sh}"; \
-	fi; \
-	shell_name="$$(basename "$$shell_path")"; \
-	case "$$shell_name" in \
-		zsh) rc_file="$${ZDOTDIR:-$$HOME}/.zshrc" ;; \
-		bash) \
-			if [ "$$os" = "Darwin" ]; then \
-				rc_file="$$HOME/.bash_profile"; \
-			else \
-				rc_file="$$HOME/.bashrc"; \
-			fi ;; \
-		*) rc_file="$$HOME/.profile" ;; \
-	esac; \
-	printf 'OS:           %s\n' "$$os_name"; \
-	printf 'Login shell:  %s\n' "$$shell_path"; \
-	printf 'Shell type:   %s\n' "$$shell_name"; \
-	printf 'RC file:      %s\n' "$$rc_file"; \
-	printf 'Install path: %s\n' "$(INSTALL_PATH)"; \
-	printf 'Backend path: %s\n' "$(BACKEND_INSTALL_PATH)"; \
-	printf 'Resource root:%s\n' " $(APP_ROOT)"; \
-	if printf '%s' "$$PATH" | tr ':' '\n' | grep -Fxqs "$(INSTALL_DIR)"; then \
-		printf 'PATH status:  install dir is in current PATH\n'; \
-	else \
-		printf 'PATH status:  install dir is not in current PATH\n'; \
-	fi; \
-	if [ -d "$(APP_ROOT)/CONFIG" ] && [ -d "$(APP_ROOT)/SYSTEM" ] && [ -d "$(APP_ROOT)/SKILLS" ]; then \
-		printf 'Resources:    installed\n'; \
-	else \
-		printf 'Resources:    not installed\n'; \
-	fi; \
-	if [ -f "$(APP_ROOT)/CONFIG/defaults.json" ]; then \
-		web_base="$$(python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); print(d.get("web_search_base_url",""))' "$(APP_ROOT)/CONFIG/defaults.json" 2>/dev/null || true)"; \
-		if [ -n "$$web_base" ]; then \
-			printf 'WebSearch:    %s\n' "$$web_base"; \
-			if command -v curl >/dev/null 2>&1 && curl -fsS "$$web_base/search?q=lumina&format=json" >/dev/null 2>&1; then \
-				printf 'SearxNG:      JSON API ready\n'; \
-			else \
-				printf 'SearxNG:      not reachable or JSON disabled\n'; \
-			fi; \
-		else \
-			printf 'WebSearch:    not configured\n'; \
-		fi; \
-	else \
-		printf 'WebSearch:    not configured\n'; \
-	fi; \
-	if [ -x "$(APP_ROOT)/mcp/arxiv-mcp/.venv/bin/python" ] || [ -x "$(APP_ROOT)/mcp/arxiv-mcp/.venv/Scripts/python.exe" ]; then \
-		printf 'arXiv MCP:    installed\n'; \
-	else \
-		printf 'arXiv MCP:    not installed\n'; \
-	fi; \
-	if LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh status >/dev/null 2>&1; then \
-		if [ -x "$(BACKEND_INSTALL_PATH)" ] && LUMINA_RESOURCE_ROOT="$(APP_ROOT)" "$(BACKEND_INSTALL_PATH)" memory doctor >/dev/null 2>&1; then \
-			printf 'Embedding:    installed, verified, inference ready\n'; \
-		else \
-			printf 'Embedding:    files verified; inference check failed\n'; \
-		fi; \
-	else \
-		printf 'Embedding:    missing or invalid\n'; \
-	fi; \
-	if command -v "$(APP_NAME)" >/dev/null 2>&1; then \
-		printf 'Command:      %s\n' "$$(command -v "$(APP_NAME)")"; \
-	else \
-		printf 'Command:      not found in current PATH\n'; \
-	fi; \
-	if command -v "$(BACKEND_NAME)" >/dev/null 2>&1; then \
-		printf 'Backend:      %s\n' "$$(command -v "$(BACKEND_NAME)")"; \
-	else \
-		printf 'Backend:      not found in current PATH\n'; \
-	fi
+	backend="$(BACKEND_INSTALL_PATH)"; \
+	if [ ! -x "$$backend" ]; then backend="$(BACKEND_BUILD_PATH)"; fi; \
+	if [ ! -x "$$backend" ]; then echo "lumina-backend is not installed or built"; exit 1; fi; \
+	LUMINA_APP_ROOT="$(APP_ROOT)" "$$backend" layout doctor; \
+	if [ -x "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" status; fi; \
+	if [ -x "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" status || true; fi
 
 uninstall:
-	@if [ -x "$(BACKEND_INSTALL_PATH)" ]; then \
-		"$(BACKEND_INSTALL_PATH)" shutdown >/dev/null 2>&1 || true; \
-	elif command -v "$(BACKEND_NAME)" >/dev/null 2>&1; then \
-		"$(BACKEND_NAME)" shutdown >/dev/null 2>&1 || true; \
-	fi
-	@if [ -z "$(APP_ROOT)" ] || [ "$(APP_ROOT)" = "/" ]; then \
-		echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; \
-		exit 1; \
-	fi
-	@if [ -x "$(APP_ROOT)/setup-searxng.sh" ]; then \
-		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/setup-searxng.sh" uninstall; then \
-			echo "Removed managed SearxNG"; \
-		else \
-			echo "Warning: failed to uninstall managed SearxNG; remove it manually with setup-searxng.sh uninstall."; \
-		fi; \
-	elif [ -x "./setup-searxng.sh" ]; then \
-		if LUMINA_APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh uninstall; then \
-			echo "Removed managed SearxNG"; \
-		else \
-			echo "Warning: failed to uninstall managed SearxNG; remove it manually with setup-searxng.sh uninstall."; \
-		fi; \
-	fi
-	@if [ -x "./scripts/setup-memory-embedding.sh" ]; then \
-		LUMINA_APP_ROOT="$(APP_ROOT)" ./scripts/setup-memory-embedding.sh uninstall || true; \
-	fi
-	@rm -f "$(INSTALL_PATH)"
-	@rm -f "$(BACKEND_INSTALL_PATH)"
-	@if [ "$(INSTALL_PATH)" != "$(HOME)/.local/bin/$(APP_NAME)" ]; then \
-		rm -f "$(HOME)/.local/bin/$(APP_NAME)"; \
-	fi
-	@if [ "$(BACKEND_INSTALL_PATH)" != "$(HOME)/.local/bin/$(BACKEND_NAME)" ]; then \
-		rm -f "$(HOME)/.local/bin/$(BACKEND_NAME)"; \
-	fi
-	@rm -rf "$(APP_ROOT)"
-	@rm -f "$(HOME)/.lumina/run/backend.json"
-	@echo "Removed $(INSTALL_PATH)"
-	@echo "Removed $(BACKEND_INSTALL_PATH)"
-	@echo "Removed $(APP_ROOT)"
-	@echo "PATH lines in shell rc files are left untouched."
+	@set -eu; \
+	case "$(APP_ROOT)" in /*) ;; *) echo "APP_ROOT must be absolute: $(APP_ROOT)"; exit 1 ;; esac; \
+	if [ "$(APP_ROOT)" = "/" ]; then echo "Refusing unsafe APP_ROOT: $(APP_ROOT)"; exit 1; fi; \
+	if [ -x "$(BACKEND_INSTALL_PATH)" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(BACKEND_INSTALL_PATH)" shutdown >/dev/null 2>&1 || true; fi; \
+	if [ -x "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" uninstall || true; elif [ -x scripts/setup-arxiv-mcp.sh ]; then LUMINA_APP_ROOT="$(APP_ROOT)" scripts/setup-arxiv-mcp.sh uninstall || true; fi; \
+	if [ -x "$(APP_ROOT)/app/scripts/setup-searxng.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-searxng.sh" uninstall || true; elif [ -x setup-searxng.sh ]; then LUMINA_APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh uninstall || true; fi; \
+	rm -f "$(INSTALL_PATH)" "$(BACKEND_INSTALL_PATH)"; \
+	if [ "$(PURGE)" = "1" ]; then rm -rf "$(APP_ROOT)"; echo "Purged $(APP_ROOT)"; \
+	else rm -rf "$(APP_ROOT)/app" "$(APP_ROOT)/cache" "$(APP_ROOT)/state"; echo "Preserved $(APP_ROOT)/config, $(APP_ROOT)/data, and layout.json"; fi; \
+	echo "Uninstall complete. Shell rc PATH entries were not modified."
+
+purge:
+	@$(MAKE) uninstall PURGE=1
 
 clean:
-	@rm -rf "$(BUILD_DIR)/$(APP_NAME)" "$(BUILD_DIR)/$(BACKEND_NAME)" frontend/dist
+	@rm -rf "$(BUILD_PATH)" "$(BACKEND_BUILD_PATH)" frontend/dist

@@ -62,7 +62,7 @@ func NewWebSearchTool() *WebSearchTool {
 func (t *WebSearchTool) ValidateInput(execCtx ExecutionContext, input any) (bool, string) {
 	cfg := configFromExecCtx(execCtx)
 	if !cfg.WebSearchEnabled {
-		return false, "web_search_enabled is false in ~/.lumina/CONFIG/defaults.json"
+		return false, "web_search_enabled is false in the LuminaCode user settings"
 	}
 	if !strings.EqualFold(strings.TrimSpace(cfg.WebSearchProvider), "searxng") {
 		return false, fmt.Sprintf("unsupported web_search_provider %q; expected searxng", cfg.WebSearchProvider)
@@ -106,7 +106,7 @@ func NewWebFetchTool() *WebFetchTool {
 func (t *WebFetchTool) ValidateInput(execCtx ExecutionContext, input any) (bool, string) {
 	cfg := configFromExecCtx(execCtx)
 	if !cfg.WebFetchEnabled {
-		return false, "web_fetch_enabled is false in ~/.lumina/CONFIG/defaults.json"
+		return false, "web_fetch_enabled is false in the LuminaCode user settings"
 	}
 	in := deref[WebFetchInput](input)
 	if strings.TrimSpace(in.URL) == "" {

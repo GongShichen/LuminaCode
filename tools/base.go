@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -267,6 +268,9 @@ func (t *BaseTool) FormatLargeResult(_ context.Context, content string, maxChars
 	cfg := config.GetConfig()
 	if cfg.MaxToolResultCharsAbsolute > 0 && charLen(content) > cfg.MaxToolResultCharsAbsolute {
 		content = ClampToAbsoluteMax(content, cfg.MaxToolResultCharsAbsolute)
+	}
+	if filepath.Base(filepath.Dir(filepath.Clean(sessionDir))) == "tool-results" {
+		return ApplyToolResultBudgetInDir(content, toolUseID, sessionDir, maxChars)
 	}
 	return ApplyToolResultBudget(content, toolUseID, sessionDir, maxChars)
 }

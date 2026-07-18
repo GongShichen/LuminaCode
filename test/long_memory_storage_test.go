@@ -340,10 +340,11 @@ func TestMemoryMaintenanceJobsPersistRetryState(t *testing.T) {
 	}
 }
 
-func TestLegacyMarkdownMemoryMigratesWithoutDeletingSource(t *testing.T) {
+func TestLegacyMarkdownMemoryMigratesFromV2QuarantineAndArchivesSource(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	legacyPath := filepath.Join(home, ".Lumina", "projects", "sample-project", "memory", "feedback", "rule.md")
+	legacyRoot := filepath.Join(home, ".lumina", "data", "legacy", "v1")
+	legacyPath := filepath.Join(legacyRoot, "projects", "sample-project", "memory", "feedback", "rule.md")
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -360,10 +361,14 @@ func TestLegacyMarkdownMemoryMigratesWithoutDeletingSource(t *testing.T) {
 	if err != nil || len(entries) != 1 || entries[0].MemoryType != longmemory.TypeFeedback {
 		t.Fatalf("legacy memory was not migrated: %#v err=%v", entries, err)
 	}
-	if _, err := os.Stat(legacyPath); err != nil {
-		t.Fatalf("legacy source file was removed: %v", err)
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy source file was not archived: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".lumina", "memory", "migration-log.jsonl")); err != nil {
+	archived := filepath.Join(legacyRoot, "memory", "markdown", "projects", "sample-project", "memory", "feedback", "rule.md")
+	if _, err := os.Stat(archived); err != nil {
+		t.Fatalf("legacy source archive is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".lumina", "state", "migrations", "memory-legacy-import.jsonl")); err != nil {
 		t.Fatalf("migration log was not written: %v", err)
 	}
 }

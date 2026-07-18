@@ -1,6 +1,7 @@
 package agentContext
 
 import (
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 	"context"
 	"errors"
@@ -56,7 +57,7 @@ func resolveTemplatePath() string {
 	if cwd, err := os.Getwd(); err == nil {
 		current := cwd
 		for {
-			candidate := filepath.Join(current, ".Lumina", "SYSTEM", "system-prompt.md")
+			candidate := apppaths.ProjectSystemPrompt(current)
 			if fileExists(candidate) {
 				return candidate
 			}
@@ -69,7 +70,7 @@ func resolveTemplatePath() string {
 	}
 
 	if root := config.FindLuminaRoot(""); root != "" {
-		candidate := config.LuminaResourcePath(root, "SYSTEM", "system-prompt.md")
+		candidate := config.LuminaResourcePath(root, apppaths.LegacySystemDirName, apppaths.SystemPromptFileName)
 		if fileExists(candidate) {
 			return candidate
 		}
@@ -77,13 +78,13 @@ func resolveTemplatePath() string {
 
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
-		return filepath.Join(".Lumina", "SYSTEM", "system-prompt.md")
+		return apppaths.ProjectSystemPrompt(".")
 	}
 
 	current := filepath.Dir(filename)
 
 	for i := 0; i < 6; i++ {
-		candidate := filepath.Join(current, ".Lumina", "SYSTEM", "system-prompt.md")
+		candidate := apppaths.ProjectSystemPrompt(current)
 		if fileExists(candidate) {
 			return candidate
 		}
@@ -99,13 +100,20 @@ func resolveTemplatePath() string {
 	return filepath.Join(
 		filepath.Dir(filename),
 		"..",
-		".Lumina",
-		"SYSTEM",
-		"system-prompt.md",
+		apppaths.ProjectLocalDirName,
+		apppaths.LegacySystemDirName,
+		apppaths.SystemPromptFileName,
 	)
 }
 
 func resolveTemplatePathForCWD(cwd string) string {
+	if path, ok := projectTemplatePathForCWD(cwd); ok {
+		return path
+	}
+	return getTemplatePath()
+}
+
+func projectTemplatePathForCWD(cwd string) (string, bool) {
 	if cwd != "" {
 		current, err := resolveAbsPath(cwd)
 		if err == nil {
@@ -113,9 +121,9 @@ func resolveTemplatePathForCWD(cwd string) string {
 				current = filepath.Dir(current)
 			}
 			for {
-				candidate := filepath.Join(current, ".Lumina", "SYSTEM", "system-prompt.md")
+				candidate := apppaths.ProjectSystemPrompt(current)
 				if fileExists(candidate) {
-					return candidate
+					return candidate, true
 				}
 				parent := filepath.Dir(current)
 				if parent == current {
@@ -125,7 +133,7 @@ func resolveTemplatePathForCWD(cwd string) string {
 			}
 		}
 	}
-	return getTemplatePath()
+	return "", false
 }
 
 type PromptSection struct {
@@ -218,7 +226,13 @@ func loadSystemPromptTemplateSectionsForCWD(cwd string) ([]PromptSection, error)
 }
 
 func loadSystemPromptTemplateSectionsWithConfig(cwd string, cfg config.Config) ([]PromptSection, string, error) {
-	if cfg.IsolatedSkillsOnly && strings.TrimSpace(cfg.SystemPromptPath) != "" {
+	if !cfg.IsolatedSkillsOnly {
+		if path, ok := projectTemplatePathForCWD(cwd); ok {
+			sections, err := loadSystemPromptTemplateSectionsFromPath(path)
+			return sections, path, err
+		}
+	}
+	if strings.TrimSpace(cfg.SystemPromptPath) != "" {
 		if sections, err := loadSystemPromptTemplateSectionsFromPath(cfg.SystemPromptPath); err == nil {
 			return sections, cfg.SystemPromptPath, nil
 		}
@@ -406,8 +420,8 @@ func DiscoverProjectDocs(cwd string, cfg config.Config) (ProjectDocDiscoveryResu
 		return result, nil
 	}
 
-	if home := instructionHomeDir(); home != "" {
-		doc, homeErr := readProjectInstructionFileWithOptions(filepath.Join(home, ".lumina"), cfg.ProjectDocFilenamesOrDefault(), cfg.ProjectDocMaxBytesOrDefault())
+	if cfg.Paths.InstructionsDir != "" {
+		doc, homeErr := readProjectInstructionFileWithOptions(cfg.Paths.InstructionsDir, cfg.ProjectDocFilenamesOrDefault(), cfg.ProjectDocMaxBytesOrDefault())
 		if homeErr == nil {
 			result.Docs = []ProjectDoc{doc}
 			result.FallbackPath = doc.Path

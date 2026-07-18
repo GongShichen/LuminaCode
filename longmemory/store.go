@@ -51,9 +51,10 @@ func OpenWithBusyTimeout(ctx context.Context, path string, busyTimeout time.Dura
 	if path == "" {
 		path = DefaultStorePath()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(filepath.Dir(path), 0o700)
 	// Configure the timeout in the DSN so every pooled connection waits for a
 	// short-lived WAL writer instead of immediately surfacing SQLITE_BUSY.
 	// PRAGMA busy_timeout executed once would only affect whichever connection
@@ -88,6 +89,7 @@ func OpenWithBusyTimeout(ctx context.Context, path string, busyTimeout time.Dura
 		state.complete = true
 	}
 	state.Unlock()
+	_ = os.Chmod(path, 0o600)
 	return s, nil
 }
 

@@ -41,7 +41,7 @@ func recallLongTermMemories(ctx context.Context, cfg config.Config, state *Agent
 	if limit <= 0 {
 		limit = 32
 	}
-	scopes := longmemory.RuntimeScopes(cfg.CWD, memoryAgentType(state), state.MemoryTeamName, memoryTeamAgentID(state))
+	scopes := longmemory.RuntimeScopesCanonical(cfg.ProjectRoot(), memoryAgentType(state), state.MemoryTeamName, memoryTeamAgentID(state))
 	queryTime := state.MemoryQueryTime
 	if queryTime.IsZero() {
 		queryTime = time.Now().UTC()

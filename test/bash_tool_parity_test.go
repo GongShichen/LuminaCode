@@ -284,7 +284,7 @@ func TestBashBackgroundTaskRunsAfterLaunch(t *testing.T) {
 	if outputPath == "" {
 		t.Fatalf("could not parse output path from %q", result.Content)
 	}
-	wantPrefix := filepath.Join(config.ProjectRuntimeDir(dir), "background", "tool-results") + string(os.PathSeparator)
+	wantPrefix := filepath.Join(dir, "runtime", "tool-results", "_legacy") + string(os.PathSeparator)
 	if !strings.HasPrefix(outputPath, wantPrefix) {
 		t.Fatalf("background output should stay under project runtime tool-results, got %q want prefix %q", outputPath, wantPrefix)
 	}
@@ -350,7 +350,10 @@ func extractBackgroundOutputPath(content string) string {
 }
 
 func yoloBashContext(cwd string, extra map[string]any) coretools.ExecutionContext {
-	ctx := coretools.ExecutionContext{"cwd": cwd, "config": config.Config{Yolo: true}}
+	ctx := coretools.ExecutionContext{
+		"cwd": cwd, "config": config.Config{Yolo: true},
+		"runtime_dir": filepath.Join(cwd, "runtime"),
+	}
 	for key, value := range extra {
 		ctx[key] = value
 	}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"LuminaCode/apppaths"
+
 	"github.com/google/uuid"
 )
 
@@ -36,7 +38,7 @@ func CreateWorktree(ctx context.Context, repoRoot, baseRef, agentType, worktrees
 		baseRef = "HEAD"
 	}
 	if worktreesDir == "" {
-		worktreesDir = ".Lumina/worktrees"
+		worktreesDir = filepath.Join(apppaths.ProjectLocalDirName, apppaths.ProjectWorktreesDirName)
 	}
 	result := WorktreeResult{RepoRoot: repoRoot, BaseRef: baseRef}
 	if !filepath.IsAbs(worktreesDir) {

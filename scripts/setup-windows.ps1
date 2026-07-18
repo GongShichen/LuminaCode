@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$AppRoot = "",
     [string]$ApiKey = $(if ($env:LUMINA_API_KEY) { $env:LUMINA_API_KEY } elseif ($env:LLM_API_KEY) { $env:LLM_API_KEY } else { "" }),
     [string]$BaseUrl = $(if ($env:LUMINA_API_BASE_URL) { $env:LUMINA_API_BASE_URL } elseif ($env:LLM_BASE_URL) { $env:LLM_BASE_URL } else { "" }),
     [string]$Model = $(if ($env:LUMINA_API_MODEL) { $env:LUMINA_API_MODEL } elseif ($env:LLM_DEFAULT_MODEL) { $env:LLM_DEFAULT_MODEL } else { "" }),
@@ -15,6 +16,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app-paths.ps1")
+$paths = Get-LuminaPaths -AppRoot $AppRoot
+$AppRoot = $paths.Root
 
 function Assert-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -83,25 +87,13 @@ function Write-LuminaDefaults {
         Copy-Item -LiteralPath $Path -Destination "$Path.bak.$timestamp" -Force
     }
 
-    $config = [ordered]@{
-        api_key = $ApiKey
-        api_base_url = $BaseUrl
-        api_model = $Model
-        api_type = $ApiType
-        api_max_tokens = $MaxTokens
-        api_stream_idle_timeout_seconds = 180.0
-        session_dir = "~/.Lumina/sessions"
-        session_memory_enabled = $true
-        auto_memory_enabled = $true
-        skills_enabled = $true
-        bundled_skills_dir = ".Lumina/SKILLS"
-        system_prompt_path = ".Lumina/SYSTEM/system-prompt.md"
-        memory_extraction_prompt_path = ".Lumina/SYSTEM/extraction_system.md"
-        worktree_base_ref = "HEAD"
-        worktree_dir = ".Lumina/worktrees"
-    }
-
-    $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Path -Encoding UTF8
+    $config = Read-LuminaJsonHashtable -Path $Path
+    if ($ApiKey) { $config["api_key"] = $ApiKey }
+    if ($BaseUrl) { $config["api_base_url"] = $BaseUrl }
+    if ($Model) { $config["api_model"] = $Model }
+    $config["api_type"] = $ApiType
+    $config["api_max_tokens"] = $MaxTokens
+    Write-LuminaAtomicJson -Path $Path -Value $config
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -109,7 +101,7 @@ $tmpDir = Join-Path $repoRoot "tmp"
 $backendPath = Join-Path $tmpDir "lumina-backend.exe"
 $launcherPath = Join-Path $tmpDir "lumina.cmd"
 $frontendDist = Join-Path $repoRoot "frontend\dist\index.js"
-$defaultsPath = Join-Path $HOME ".lumina\CONFIG\defaults.json"
+$defaultsPath = $paths.Settings
 
 Write-Host "LuminaCode Windows setup"
 Write-Host "Repo: $repoRoot"

@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/apppaths"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
 	"LuminaCode/maintenance"
@@ -127,6 +129,9 @@ func (m *SessionManager) createWithState(sessionID, cwd string, state *agent.Age
 	if strings.TrimSpace(cwd) != "" && cwd != cfg.CWD {
 		cfg = config.NewConfigForCWD(cwd)
 		applyPinnedDaemonConfig(&cfg, m.baseConfig)
+	}
+	if err := apppaths.EnsureProjectManifest(cfg.ProjectPaths, time.Now()); err != nil {
+		return nil, err
 	}
 	engine := agent.NewQueryEngine(&cfg)
 	if recovery := m.store.LoadSkillRecovery(sessionID); recovery != nil && engine.CoreEngine != nil {

@@ -55,7 +55,7 @@ func ExportMarkdown(ctx context.Context, store *Store, dir string) (string, erro
 	if strings.TrimSpace(dir) == "" {
 		dir = filepath.Join(filepath.Dir(store.Path()), "export")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	entries, err := store.List(ctx, SearchOptions{Limit: 100000, IncludeInactive: true})
@@ -86,7 +86,7 @@ entities: %s
 `, entry.MemoryID, entry.ScopeType, entry.ScopeKey, entry.MemoryType, entry.Status, entry.Importance, entry.Confidence,
 			entry.SourceSessionID, entry.SourceAgentID, entry.CreatedAt.Format(time.RFC3339), entry.UpdatedAt.Format(time.RFC3339),
 			strings.Join(entry.Tags, ", "), strings.Join(entry.Entities, ", "), entry.Title, entry.Content)
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 			return "", err
 		}
 	}

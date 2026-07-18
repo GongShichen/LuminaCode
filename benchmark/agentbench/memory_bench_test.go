@@ -127,7 +127,7 @@ func TestSyncLongMemEvalExtractionCursorResumesPersistedSession(t *testing.T) {
 func TestResetMemoryCaseDirectoryPreservesOnlyMemoryOnResume(t *testing.T) {
 	t.Parallel()
 	caseDir := filepath.Join(t.TempDir(), "case")
-	memoryDir := filepath.Join(caseDir, ".lumina", "memory")
+	memoryDir := filepath.Join(caseDir, "data", "memory")
 	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

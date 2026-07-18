@@ -1,10 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$AppRoot = $(if ($env:LUMINA_APP_ROOT) { $env:LUMINA_APP_ROOT } else { Join-Path $HOME ".lumina" }),
+    [ValidateSet("install", "status", "uninstall")]
+    [string]$Action = "install",
+    [string]$AppRoot = "",
     [string]$RepoUrl = $(if ($env:LUMINA_ARXIV_MCP_REPO) { $env:LUMINA_ARXIV_MCP_REPO } else { "https://github.com/kelvingao/arxiv-mcp.git" })
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app-paths.ps1")
+$paths = Get-LuminaPaths -AppRoot $AppRoot
+$AppRoot = $paths.Root
 
 function Assert-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -41,7 +46,7 @@ function Merge-McpConfig {
         cwd = $SourceDir
     }
     if (Test-Path $ConfigPath) {
-        $data = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json -AsHashtable
+        $data = Read-LuminaJsonHashtable -Path $ConfigPath
     } else {
         $data = @{}
     }
@@ -49,24 +54,50 @@ function Merge-McpConfig {
         $data["mcpServers"] = @{}
     }
     if (Test-Path $ManagedPath) {
-        $managed = Get-Content -LiteralPath $ManagedPath -Raw | ConvertFrom-Json -AsHashtable
+        $managed = Read-LuminaJsonHashtable -Path $ManagedPath
     } else {
         $managed = @{}
     }
     $existing = $(if ($data["mcpServers"].ContainsKey("arxiv")) { $data["mcpServers"]["arxiv"] } else { $null })
     $managedExisting = $(if ($managed.ContainsKey("mcpServers") -and $managed["mcpServers"].ContainsKey("arxiv")) { $managed["mcpServers"]["arxiv"] } else { $null })
-    $owned = ($null -eq $existing) -or (($null -ne $managedExisting) -and (($existing | ConvertTo-Json -Depth 12) -eq ($managedExisting | ConvertTo-Json -Depth 12))) -or ([string]$existing.command -like "*\.lumina\mcp\arxiv-mcp*")
+    $legacyCommand = ([string]$existing.command).Replace("\", "/")
+    $owned = ($null -eq $existing) -or (($null -ne $managedExisting) -and (($existing | ConvertTo-Json -Depth 12 -Compress) -eq ($managedExisting | ConvertTo-Json -Depth 12 -Compress))) -or ($legacyCommand -like "*/mcp/arxiv-mcp/*")
     if (-not $owned) {
         Write-Host "arXiv MCP already exists in mcp.json; leaving user config unchanged."
         return
     }
     $data["mcpServers"]["arxiv"] = $server
-    $data | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    Write-LuminaAtomicJson -Path $ConfigPath -Value $data
     if (-not $managed.ContainsKey("mcpServers")) {
         $managed["mcpServers"] = @{}
     }
     $managed["mcpServers"]["arxiv"] = $server
-    $managed | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ManagedPath -Encoding UTF8
+    Write-LuminaAtomicJson -Path $ManagedPath -Value $managed
+}
+
+function Remove-ManagedMcpConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][string]$ManagedPath
+    )
+    $data = Read-LuminaJsonHashtable -Path $ConfigPath
+    $managed = Read-LuminaJsonHashtable -Path $ManagedPath
+    $servers = $(if ($data.ContainsKey("mcpServers")) { $data["mcpServers"] } else { @{} })
+    $managedServers = $(if ($managed.ContainsKey("mcpServers")) { $managed["mcpServers"] } else { @{} })
+    $current = $(if ($servers.ContainsKey("arxiv")) { $servers["arxiv"] } else { $null })
+    $owned = $(if ($managedServers.ContainsKey("arxiv")) { $managedServers["arxiv"] } else { $null })
+    if (($null -ne $current) -and ($null -ne $owned) -and (($current | ConvertTo-Json -Depth 12 -Compress) -eq ($owned | ConvertTo-Json -Depth 12 -Compress))) {
+        $servers.Remove("arxiv")
+        $data["mcpServers"] = $servers
+        Write-LuminaAtomicJson -Path $ConfigPath -Value $data
+    } elseif ($null -ne $current) {
+        Write-Host "arXiv MCP config was modified by the user; preserving it."
+    }
+    $managedServers.Remove("arxiv")
+    $managed["mcpServers"] = $managedServers
+    if (Test-Path $ManagedPath) {
+        Write-LuminaAtomicJson -Path $ManagedPath -Value $managed
+    }
 }
 
 function Patch-SourceCompatibility {
@@ -82,7 +113,7 @@ function Patch-SourceCompatibility {
     $old = '    description="MCP server for retrieving papers from arXiv based on keywords",' + "`n"
     if ($text.Contains($old)) {
         $text = $text.Replace($old, "")
-        Set-Content -LiteralPath $serverPy -Value $text -Encoding UTF8NoBOM
+        [IO.File]::WriteAllText($serverPy, $text, (New-Object Text.UTF8Encoding($false)))
         Write-Host "Patched arxiv-mcp FastMCP description compatibility."
     } else {
         Write-Host "arxiv-mcp FastMCP compatibility patch already applied or unnecessary."
@@ -108,15 +139,30 @@ from server import main
 
 asyncio.run(main())
 "@
-    Set-Content -LiteralPath $RunnerFile -Value $content -Encoding UTF8NoBOM
+    [IO.File]::WriteAllText($RunnerFile, $content, (New-Object Text.UTF8Encoding($false)))
 }
 
-$mcpRoot = Join-Path $AppRoot "mcp\arxiv-mcp"
+$mcpRoot = Join-Path $paths.Extensions "arxiv-mcp"
 $sourceDir = Join-Path $mcpRoot "source"
 $venvDir = Join-Path $mcpRoot ".venv"
 $runnerFile = Join-Path $mcpRoot "run-arxiv-mcp.py"
-$configPath = Join-Path $AppRoot "CONFIG\mcp.json"
-$managedPath = Join-Path $AppRoot "CONFIG\managed-mcp.json"
+$configPath = $paths.McpConfig
+$managedPath = $paths.ManagedMcp
+
+if ($Action -eq "status") {
+    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+    Write-Host "Source: $(if (Test-Path $sourceDir) { $sourceDir } else { "missing ($sourceDir)" })"
+    Write-Host "Python: $(if (Test-Path $venvPython) { $venvPython } else { "missing ($venvPython)" })"
+    Write-Host "MCP config: $(if (Test-Path $configPath) { $configPath } else { "missing ($configPath)" })"
+    return
+}
+
+if ($Action -eq "uninstall") {
+    Remove-ManagedMcpConfig -ConfigPath $configPath -ManagedPath $managedPath
+    Remove-Item -LiteralPath $mcpRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed managed extension $mcpRoot"
+    return
+}
 
 Assert-Command git
 Assert-Command python
@@ -152,6 +198,7 @@ $venvPython = Join-Path $venvDir "Scripts\python.exe"
 Invoke-Native "install arxiv-mcp" { & uv pip install --python $venvPython -e $sourceDir }
 Write-ArxivRunner -RunnerFile $runnerFile -SourceDir $sourceDir
 Merge-McpConfig -ConfigPath $configPath -ManagedPath $managedPath -ArxivCommand $venvPython -RunnerFile $runnerFile -SourceDir $sourceDir
+Set-LuminaPrivateAcl -Path @($paths.Config, $paths.State)
 
 Write-Host "arXiv MCP source: $sourceDir"
 Write-Host "arXiv MCP python: $venvPython"

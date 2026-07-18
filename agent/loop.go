@@ -13,6 +13,7 @@ import (
 
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 	"LuminaCode/mcp"
 	"LuminaCode/memory"
@@ -1522,7 +1523,7 @@ func findLuminaRoot(cwd string) string {
 		current = filepath.Dir(current)
 	}
 	for {
-		if _, err := os.Stat(filepath.Join(current, ".Lumina")); err == nil {
+		if _, err := os.Stat(apppaths.ProjectLocalRoot(current)); err == nil {
 			return current
 		}
 		parent := filepath.Dir(current)

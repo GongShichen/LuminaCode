@@ -1557,8 +1557,8 @@ func (t *BashTool) executeBackground(execCtx ExecutionContext, command, descript
 		if cwd == "" {
 			cwd = "."
 		}
-		runtimeDir := projectRuntimeDirFromContext(execCtx, cwd)
-		manager, err := bashpkg.NewBackgroundManager(filepath.Join(runtimeDir, "background"))
+		resultsDir := toolResultsDirFromContext(execCtx, cwd)
+		manager, err := bashpkg.NewBackgroundManagerForResults(resultsDir)
 		if err != nil {
 			return "Could not start background task: " + err.Error(), nil
 		}
@@ -1593,6 +1593,19 @@ func projectRuntimeDirFromContext(execCtx ExecutionContext, cwd string) string {
 		}
 	}
 	return config.ProjectRuntimeDir(cwd)
+}
+
+func toolResultsDirFromContext(execCtx ExecutionContext, cwd string) string {
+	if execCtx != nil {
+		if cfg, ok := execCtx["config"].(config.Config); ok {
+			sessionID, _ := execCtx["_session_id"].(string)
+			sessionID = strings.TrimSpace(sessionID)
+			if resultDir := cfg.ToolResultsDir(sessionID); resultDir != "" {
+				return resultDir
+			}
+		}
+	}
+	return filepath.Join(projectRuntimeDirFromContext(execCtx, cwd), "tool-results", "_legacy")
 }
 
 func bashYoloEnabled(execCtx ExecutionContext) bool {

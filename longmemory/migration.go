@@ -2,6 +2,7 @@ package longmemory
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"LuminaCode/apppaths"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,64 +28,144 @@ func (s *Store) MigrateLegacyMarkdown(ctx context.Context) (MigrationResult, err
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM memory_schema WHERE key='legacy_markdown_import'`).Scan(&status); err == nil && strings.HasPrefix(status, "complete") {
 		return result, nil
 	}
-	home, err := os.UserHomeDir()
+	home, _ := os.UserHomeDir()
+	paths, err := apppaths.ResolveCurrent()
 	if err != nil {
 		return result, err
 	}
-	patterns := []string{
-		filepath.Join(home, ".Lumina", "projects", "*", "memory"),
-		filepath.Join(home, ".Lumina", "agent-memory", "*"),
-		filepath.Join(home, ".lumina", "project", "*", "agent-memory", "*"),
-		filepath.Join(home, ".lumina", "project", "*", "agent-memory-local", "*"),
-	}
+	directories := legacyMemoryDirectories(paths.LegacyDataDir)
 	seen := map[string]struct{}{}
-	for _, pattern := range patterns {
-		directories, _ := filepath.Glob(pattern)
-		for _, directory := range directories {
-			walkErr := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					result.Errors = append(result.Errors, walkErr.Error())
-					return nil
-				}
-				if entry.IsDir() || !strings.EqualFold(filepath.Ext(path), ".md") {
-					return nil
-				}
-				absolute, _ := filepath.Abs(path)
-				if _, ok := seen[absolute]; ok {
-					return nil
-				}
-				seen[absolute] = struct{}{}
-				candidate, parseErr := parseLegacyMemory(path, home)
-				if parseErr != nil {
-					result.Errors = append(result.Errors, path+": "+parseErr.Error())
-					return nil
-				}
-				if strings.TrimSpace(candidate.Content) == "" {
-					result.Skipped++
-					return nil
-				}
-				if _, upsertErr := s.Upsert(ctx, candidate); upsertErr != nil {
-					result.Errors = append(result.Errors, path+": "+upsertErr.Error())
-					return nil
-				}
-				result.Imported++
-				return nil
-			})
+	var importedPaths []string
+	for _, directory := range directories {
+		walkErr := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				result.Errors = append(result.Errors, walkErr.Error())
+				return nil
 			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				result.Errors = append(result.Errors, path+": refusing symlink in legacy memory")
+				return nil
+			}
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(path), ".md") {
+				return nil
+			}
+			absolute, _ := filepath.Abs(path)
+			if _, ok := seen[absolute]; ok {
+				return nil
+			}
+			seen[absolute] = struct{}{}
+			candidate, parseErr := parseLegacyMemory(path, home)
+			if parseErr != nil {
+				result.Errors = append(result.Errors, path+": "+parseErr.Error())
+				return nil
+			}
+			if strings.TrimSpace(candidate.Content) == "" {
+				result.Skipped++
+				importedPaths = append(importedPaths, path)
+				return nil
+			}
+			if _, upsertErr := s.Upsert(ctx, candidate); upsertErr != nil {
+				result.Errors = append(result.Errors, path+": "+upsertErr.Error())
+				return nil
+			}
+			result.Imported++
+			importedPaths = append(importedPaths, path)
+			return nil
+		})
+		if walkErr != nil {
+			result.Errors = append(result.Errors, walkErr.Error())
 		}
+	}
+	if len(result.Errors) == 0 {
+		result.Errors = append(result.Errors, archiveLegacyMarkdown(paths.LegacyDataDir, importedPaths)...)
 	}
 	status = "complete"
 	if len(result.Errors) > 0 {
-		status = "complete_with_errors"
+		status = "failed"
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO memory_schema(key, value, updated_at) VALUES ('legacy_markdown_import', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, status, formatTime(time.Now().UTC()))
-	if logErr := appendMigrationLog(filepath.Join(filepath.Dir(s.Path()), "migration-log.jsonl"), result); err == nil {
+	logPath := filepath.Join(filepath.Dir(s.Path()), "migration-log.jsonl")
+	if filepath.Clean(s.Path()) == filepath.Clean(paths.MemoryDB) {
+		logPath = filepath.Join(paths.MigrationsDir, "memory-legacy-import.jsonl")
+	}
+	if logErr := appendMigrationLog(logPath, result); err == nil {
 		err = logErr
 	}
+	if err == nil && len(result.Errors) > 0 {
+		err = fmt.Errorf("legacy Markdown memory import failed for %d file(s)", len(result.Errors))
+	}
 	return result, err
+}
+
+func legacyMemoryDirectories(legacyRoot string) []string {
+	var directories []string
+	for _, root := range []string{
+		filepath.Join(legacyRoot, "memory"),
+		filepath.Join(legacyRoot, "projects"),
+		filepath.Join(legacyRoot, "project-runtime"),
+	} {
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !entry.IsDir() {
+				return nil
+			}
+			switch strings.ToLower(entry.Name()) {
+			case "agent-memory", "agent-memory-local", "memory":
+				directories = append(directories, path)
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
+	return directories
+}
+
+func archiveLegacyMarkdown(legacyRoot string, sources []string) []string {
+	archiveRoot := filepath.Join(legacyRoot, "memory", "markdown")
+	var failures []string
+	for _, source := range sources {
+		if pathWithin(source, archiveRoot) {
+			continue
+		}
+		relative, err := filepath.Rel(legacyRoot, source)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			failures = append(failures, source+": source is outside the legacy memory root")
+			continue
+		}
+		destination := filepath.Join(archiveRoot, relative)
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			failures = append(failures, source+": "+err.Error())
+			continue
+		}
+		if existing, err := os.ReadFile(destination); err == nil {
+			original, readErr := os.ReadFile(source)
+			if readErr != nil || !bytes.Equal(original, existing) {
+				failures = append(failures, source+": archive destination exists with different content")
+				continue
+			}
+			if err := os.Remove(source); err != nil {
+				failures = append(failures, source+": "+err.Error())
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			failures = append(failures, source+": "+err.Error())
+			continue
+		}
+		if err := os.Rename(source, destination); err != nil {
+			failures = append(failures, source+": "+err.Error())
+			continue
+		}
+		_ = os.Chmod(destination, 0o600)
+	}
+	return failures
+}
+
+func pathWithin(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func parseLegacyMemory(path, home string) (Candidate, error) {
@@ -177,10 +260,10 @@ func inferLegacyMemoryType(path string) MemoryType {
 }
 
 func appendMigrationLog(path string, result MigrationResult) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

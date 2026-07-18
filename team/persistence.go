@@ -24,20 +24,11 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 	if parentSessionID == "" {
 		return nil
 	}
-	baseRoot := filepath.Join(m.Config.SessionDir, parentSessionID, "teams")
-	entries, err := os.ReadDir(baseRoot)
-	if err != nil {
-		return nil
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	roots := persistedTeamRoots(m.Config, parentSessionID)
 	var snapshots []Snapshot
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		root := filepath.Join(baseRoot, entry.Name())
+	for _, root := range roots {
 		var persisted persistedTeamFile
-		if !readJSON(filepath.Join(root, "team.json"), &persisted) || persisted.Team == "" {
+		if !readJSON(filepath.Join(root, "team.json"), &persisted) || persisted.Team == "" || persisted.ParentSessionID != parentSessionID {
 			continue
 		}
 		m.mu.Lock()
@@ -92,6 +83,47 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		snapshots = append(snapshots, session.Snapshot())
 	}
 	return snapshots
+}
+
+func persistedTeamRoots(cfg config.Config, parentSessionID string) []string {
+	seen := map[string]struct{}{}
+	var roots []string
+	add := func(root string) {
+		root = filepath.Clean(root)
+		if _, ok := seen[root]; ok {
+			return
+		}
+		if info, err := os.Stat(filepath.Join(root, "team.json")); err == nil && !info.IsDir() {
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
+		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
+	if useProjectData {
+		teams, _ := os.ReadDir(cfg.ProjectPaths.TeamsDir)
+		for _, teamEntry := range teams {
+			if !teamEntry.IsDir() {
+				continue
+			}
+			teamRoot := filepath.Join(cfg.ProjectPaths.TeamsDir, teamEntry.Name())
+			sessions, _ := os.ReadDir(teamRoot)
+			for _, sessionEntry := range sessions {
+				if sessionEntry.IsDir() {
+					add(filepath.Join(teamRoot, sessionEntry.Name()))
+				}
+			}
+		}
+	}
+	legacyRoot := filepath.Join(cfg.SessionDir, parentSessionID, "teams")
+	legacyEntries, _ := os.ReadDir(legacyRoot)
+	for _, entry := range legacyEntries {
+		if entry.IsDir() {
+			add(filepath.Join(legacyRoot, entry.Name()))
+		}
+	}
+	sort.Strings(roots)
+	return roots
 }
 
 func normalizeRestoredActivity(row ActivityRow) ActivityRow {

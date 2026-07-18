@@ -12,7 +12,7 @@ import (
 func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	userConfigDir := filepath.Join(home, ".lumina", "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "ui_backend": "legacy_terminal",
   "worktree_dir": ".Lumina/worktrees"
 }`
-	if err := os.WriteFile(filepath.Join(userConfigDir, "defaults.json"), []byte(defaults), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(userConfigDir, "settings.json"), []byte(defaults), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -68,10 +68,10 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	t.Setenv("SESSION_MEM_TURN", "11")
 
 	cfg := config.NewConfig()
-	if cfg.APIMaxTokens != 1234 || cfg.MCPEnabled {
+	if cfg.APIMaxTokens != 9999 || cfg.MCPEnabled {
 		t.Fatalf("defaults were not applied: %#v", cfg)
 	}
-	if cfg.APIKey != "file-key" || cfg.APIBaseURL != "https://config.example/v1" || cfg.APIModel != "env-model" || cfg.PromptCacheTTLSeconds != 77 {
+	if cfg.APIKey != "project-key" || cfg.APIBaseURL != "https://project.example/v1" || cfg.APIModel != "env-model" || cfg.PromptCacheTTLSeconds != 77 {
 		t.Fatalf("env overrides were not applied: %#v", cfg)
 	}
 	if cfg.APIType != "openai-compatible" {
@@ -266,11 +266,11 @@ func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
 
 func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(t *testing.T) {
 	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	userConfigDir := filepath.Join(home, ".lumina", "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defaultsPath := filepath.Join(userConfigDir, "defaults.json")
+	defaultsPath := filepath.Join(userConfigDir, "settings.json")
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-one",
   "api_base_url": "https://one.example",
@@ -308,11 +308,11 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 
 func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
 	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "CONFIG")
+	userConfigDir := filepath.Join(home, ".lumina", "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defaultsPath := filepath.Join(userConfigDir, "defaults.json")
+	defaultsPath := filepath.Join(userConfigDir, "settings.json")
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-one",
   "api_base_url": "https://one.example",

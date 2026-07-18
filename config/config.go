@@ -12,11 +12,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"LuminaCode/apppaths"
 )
 
 const CompressionTriggerRatio = 0.80
 
 type Config struct {
+	Paths        apppaths.AppPaths
+	ProjectPaths apppaths.ProjectPaths
+	PathErrors   []string
+
 	APIKey                      string
 	APIBaseURL                  string
 	APIModel                    string
@@ -61,6 +67,7 @@ type Config struct {
 	MaxParentTurns             int
 
 	SessionDir           string
+	SessionArchiveDir    string
 	SessionMemoryDir     string
 	SessionMemoryAgentID string
 	ProjectRuntimeDir    string
@@ -169,6 +176,7 @@ type Config struct {
 	BundledSkillsDir           string
 	IsolatedSkillsOnly         bool
 	TeamDir                    string
+	BundledTeamDir             string
 	SystemPromptPath           string
 	MemoryExtractionPromptPath string
 
@@ -191,17 +199,31 @@ func NewConfig() Config {
 }
 
 func NewConfigForCWD(cwd string) Config {
-	homeDir := userHomeDir()
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	paths, pathsErr := apppaths.ResolveCurrent()
+	if pathsErr != nil {
+		homeDir := userHomeDir()
+		paths, _ = apppaths.Resolve(apppaths.ResolveOptions{GOOS: runtime.GOOS, HomeDir: homeDir, Env: map[string]string{}})
+	}
+	projectRoot, projectRootErr := apppaths.DiscoverProjectRoot(cwd, []string{".git"})
+	if projectRootErr != nil {
+		projectRoot = cwd
+	}
+	projectPaths, projectErr := paths.ForProject(projectRoot)
 	luminaRoot := FindLuminaRoot(cwd)
 	if luminaRoot == "" {
-		luminaRoot = cwd
+		luminaRoot = paths.ResourcesDir
 	}
 	resourceDir := LuminaResourceDir(luminaRoot)
+	bundledSystemDir := resourceSubdir(resourceDir, apppaths.LegacySystemDirName, "system")
+	bundledSkillsDir := resourceSubdir(resourceDir, apppaths.LegacySkillsDirName, "skills")
+	bundledTeamsDir := resourceSubdir(resourceDir, apppaths.LegacyTeamsDirName, "teams")
 
 	cfg := Config{
+		Paths:                       paths,
+		ProjectPaths:                projectPaths,
 		APIKey:                      "",
 		APIBaseURL:                  "",
 		APIModel:                    "",
@@ -243,8 +265,9 @@ func NewConfigForCWD(cwd string) Config {
 		AnthropicCacheEditsEnabled: false,
 		MaxParentTurns:             100,
 
-		SessionDir:        filepath.Join(homeDir, ".lumina", "sessions"),
-		ProjectRuntimeDir: filepath.Join(homeDir, ".lumina", "project", ProjectRuntimeName(cwd)),
+		SessionDir:        paths.ActiveSessionsDir,
+		SessionArchiveDir: paths.ArchivedSessionsDir,
+		ProjectRuntimeDir: projectPaths.StateDir,
 
 		SessionMemoryEnabled:             true,
 		SessionMemoryTurnInterval:        5,
@@ -268,12 +291,12 @@ func NewConfigForCWD(cwd string) Config {
 
 		ExtractionModel:                    nil,
 		LongTermMemoryEnabled:              true,
-		LongTermMemoryStore:                filepath.Join(homeDir, ".lumina", "memory", "lumina-memory.sqlite"),
+		LongTermMemoryStore:                paths.MemoryDB,
 		MemoryContextMaxTokens:             6000,
 		MemoryRecallMaxItems:               8,
 		MemoryEmbeddingEnabled:             true,
 		MemoryEmbeddingModel:               "multilingual-e5-small",
-		MemoryEmbeddingModelDir:            filepath.Join(homeDir, ".lumina", "models", "memory", "multilingual-e5-small"),
+		MemoryEmbeddingModelDir:            paths.MemoryModelDir,
 		MemoryFTSCandidates:                40,
 		MemoryVectorCandidates:             40,
 		MemoryGraphCandidates:              20,
@@ -356,12 +379,13 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryEmbeddingExecutionTimeout:     8,
 
 		SkillsEnabled:              true,
-		SkillsDir:                  ".Lumina/PROJECT_SKILLS",
-		UserSkillsDir:              filepath.Join(homeDir, ".lumina", "skills"),
-		BundledSkillsDir:           filepath.Join(resourceDir, "SKILLS"),
-		TeamDir:                    filepath.Join(homeDir, ".lumina", "TEAM"),
-		SystemPromptPath:           filepath.Join(resourceDir, "SYSTEM", "system-prompt.md"),
-		MemoryExtractionPromptPath: filepath.Join(resourceDir, "SYSTEM", "extraction_system.md"),
+		SkillsDir:                  filepath.Join(apppaths.ProjectLocalDirName, apppaths.ProjectSkillsDirName),
+		UserSkillsDir:              paths.UserSkillsDir,
+		BundledSkillsDir:           bundledSkillsDir,
+		TeamDir:                    paths.UserTeamsDir,
+		BundledTeamDir:             bundledTeamsDir,
+		SystemPromptPath:           filepath.Join(bundledSystemDir, "system-prompt.md"),
+		MemoryExtractionPromptPath: filepath.Join(bundledSystemDir, "extraction_system.md"),
 		ProjectRootMarkers:         []string{".git"},
 		ProjectDocFilenames:        []string{"LUMINA.md", "AGENTS.md"},
 		ProjectDocMaxBytes:         64 * 1024,
@@ -370,11 +394,26 @@ func NewConfigForCWD(cwd string) Config {
 		HarnessMode: "",
 
 		WorktreeBaseRef: "HEAD",
-		WorktreeDir:     ".Lumina/worktrees",
+		WorktreeDir:     filepath.Join(apppaths.ProjectLocalDirName, apppaths.ProjectWorktreesDirName),
 
 		CWD: cwd,
 	}
-	applyLuminaDefaults(&cfg, UserDefaultsPath(homeDir), cwd, resourceDir)
+	if pathsErr != nil {
+		cfg.PathErrors = append(cfg.PathErrors, pathsErr.Error())
+	}
+	if projectErr != nil {
+		cfg.PathErrors = append(cfg.PathErrors, projectErr.Error())
+	}
+	if projectRootErr != nil {
+		cfg.PathErrors = append(cfg.PathErrors, projectRootErr.Error())
+	}
+	applyLuminaDefaults(&cfg, paths.SettingsFile, cwd, resourceDir)
+	if projectDefaults := findProjectDefaults(cwd); projectDefaults != "" && filepath.Clean(projectDefaults) != filepath.Clean(paths.SettingsFile) {
+		applyLuminaDefaults(&cfg, projectDefaults, cwd, resourceDir)
+	}
+	if err := refreshProjectPaths(&cfg, cwd); err != nil {
+		cfg.PathErrors = append(cfg.PathErrors, err.Error())
+	}
 	applyEnvOverrides(&cfg)
 	ApplyHarnessDefaults(&cfg)
 	return cfg
@@ -540,6 +579,7 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.ProjectRootMarkers = fresh.ProjectRootMarkers
 	updated.ProjectDocFilenames = fresh.ProjectDocFilenames
 	updated.ProjectDocMaxBytes = fresh.ProjectDocMaxBytes
+	updated.ProjectPaths = fresh.ProjectPaths
 	if !isPinned(current, "project_runtime_dir") {
 		updated.ProjectRuntimeDir = fresh.ProjectRuntimeDir
 	}
@@ -547,6 +587,7 @@ func ReloadDynamicConfig(current Config) Config {
 		updated.HarnessMode = fresh.HarnessMode
 	}
 	updated.TeamDir = teamDir
+	updated.BundledTeamDir = fresh.BundledTeamDir
 	updated.SystemPromptPath = systemPromptPath
 	updated.SkillsDir = skillsDir
 	updated.UserSkillsDir = userSkillsDir
@@ -557,6 +598,20 @@ func ReloadDynamicConfig(current Config) Config {
 }
 
 func ProjectRuntimeName(projectRoot string) string {
+	paths, err := apppaths.ResolveCurrent()
+	if err == nil {
+		discovered, discoverErr := apppaths.DiscoverProjectRoot(projectRoot, []string{".git"})
+		if discoverErr == nil {
+			projectRoot = discovered
+		}
+		if project, projectErr := paths.ForProject(projectRoot); projectErr == nil {
+			return project.ID
+		}
+	}
+	return LegacyProjectRuntimeName(projectRoot)
+}
+
+func LegacyProjectRuntimeName(projectRoot string) string {
 	name := filepath.Base(filepath.Clean(projectRoot))
 	name = strings.TrimSpace(name)
 	if name == "." || name == string(filepath.Separator) || name == "" {
@@ -578,8 +633,67 @@ func ProjectRuntimeName(projectRoot string) string {
 }
 
 func ProjectRuntimeDir(projectRoot string) string {
-	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".lumina", "project", ProjectRuntimeName(projectRoot))
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return ""
+	}
+	discovered, discoverErr := apppaths.DiscoverProjectRoot(projectRoot, []string{".git"})
+	if discoverErr != nil {
+		return ""
+	}
+	project, err := paths.ForProject(discovered)
+	if err != nil {
+		return ""
+	}
+	return project.StateDir
+}
+
+func SetCWD(cfg *Config, cwd string) error {
+	if cfg == nil {
+		return nil
+	}
+	cfg.CWD = cwd
+	return refreshProjectPaths(cfg, cwd)
+}
+
+func refreshProjectPaths(cfg *Config, cwd string) error {
+	if cfg == nil {
+		return nil
+	}
+	root, err := apppaths.DiscoverProjectRoot(cwd, cfg.ProjectRootMarkersOrDefault())
+	if err != nil {
+		return err
+	}
+	project, err := cfg.Paths.ForProject(root)
+	if err != nil {
+		return err
+	}
+	cfg.ProjectPaths = project
+	cfg.ProjectRuntimeDir = project.StateDir
+	return nil
+}
+
+func (c Config) ToolResultsDir(sessionID string) string {
+	if c.ProjectPaths.ToolResultsDir != "" && c.ProjectPaths.StateDir != "" &&
+		filepath.Clean(c.ProjectRuntimeDir) == filepath.Clean(c.ProjectPaths.StateDir) {
+		return c.ProjectPaths.ToolResultsForSession(sessionID)
+	}
+	root := c.ToolResultsRoot()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, LegacyProjectRuntimeName(sessionID))
+}
+
+func (c Config) ToolResultsRoot() string {
+	if c.ProjectPaths.ToolResultsDir != "" && c.ProjectPaths.StateDir != "" &&
+		filepath.Clean(c.ProjectRuntimeDir) == filepath.Clean(c.ProjectPaths.StateDir) {
+		return c.ProjectPaths.ToolResultsDir
+	}
+	if strings.TrimSpace(c.ProjectRuntimeDir) == "" {
+		return ""
+	}
+	return filepath.Join(c.ProjectRuntimeDir, "tool-results")
 }
 
 func PinFields(cfg *Config, fields ...string) {
@@ -646,6 +760,13 @@ func ApplyHarnessDefaults(cfg *Config) {
 
 func (c Config) ProjectRootMarkersOrDefault() []string {
 	return nonEmptyStringsOrDefault(c.ProjectRootMarkers, []string{".git"})
+}
+
+func (c Config) ProjectRoot() string {
+	if strings.TrimSpace(c.ProjectPaths.CanonicalRoot) != "" {
+		return c.ProjectPaths.CanonicalRoot
+	}
+	return c.CWD
 }
 
 func (c Config) ProjectDocFilenamesOrDefault() []string {
@@ -737,6 +858,7 @@ type luminaDefaults struct {
 	AnthropicCacheEditsEnabled          *bool              `json:"anthropic_cache_edits_enabled"`
 	MaxParentTurns                      *int               `json:"max_parent_turns"`
 	SessionDir                          *string            `json:"session_dir"`
+	SessionArchiveDir                   *string            `json:"session_archive_dir"`
 	SessionMemoryEnabled                *bool              `json:"session_memory_enabled"`
 	SessionMemoryTurnInterval           *int               `json:"session_memory_turn_interval"`
 	SessionMemorySummaryModel           *string            `json:"session_memory_summary_model"`
@@ -971,8 +1093,11 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MaxParentTurns != nil {
 		cfg.MaxParentTurns = *defaults.MaxParentTurns
 	}
-	if defaults.SessionDir != nil {
+	if defaults.SessionDir != nil && !apppaths.IsLegacyDefaultSetting("session_dir", *defaults.SessionDir) {
 		cfg.SessionDir = resolveProjectPath(cwd, *defaults.SessionDir)
+	}
+	if defaults.SessionArchiveDir != nil {
+		cfg.SessionArchiveDir = resolveProjectPath(cwd, *defaults.SessionArchiveDir)
 	}
 	if defaults.SessionMemoryEnabled != nil {
 		cfg.SessionMemoryEnabled = *defaults.SessionMemoryEnabled
@@ -1040,7 +1165,7 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.LongTermMemoryEnabled != nil {
 		cfg.LongTermMemoryEnabled = *defaults.LongTermMemoryEnabled
 	}
-	if defaults.LongTermMemoryStore != nil {
+	if defaults.LongTermMemoryStore != nil && !apppaths.IsLegacyDefaultSetting("long_term_memory_store", *defaults.LongTermMemoryStore) {
 		cfg.LongTermMemoryStore = resolveProjectPath(cwd, expandHome(*defaults.LongTermMemoryStore))
 	}
 	if defaults.MemoryContextMaxTokens != nil && *defaults.MemoryContextMaxTokens > 0 {
@@ -1052,7 +1177,8 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MemoryEmbeddingModel != nil && strings.TrimSpace(*defaults.MemoryEmbeddingModel) != "" {
 		cfg.MemoryEmbeddingModel = strings.TrimSpace(*defaults.MemoryEmbeddingModel)
 	}
-	if defaults.MemoryEmbeddingModelDir != nil && strings.TrimSpace(*defaults.MemoryEmbeddingModelDir) != "" {
+	if defaults.MemoryEmbeddingModelDir != nil && strings.TrimSpace(*defaults.MemoryEmbeddingModelDir) != "" &&
+		!apppaths.IsLegacyDefaultSetting("memory_embedding_model_dir", *defaults.MemoryEmbeddingModelDir) {
 		cfg.MemoryEmbeddingModelDir = expandHome(*defaults.MemoryEmbeddingModelDir)
 	}
 	if defaults.MemoryFTSCandidates != nil && *defaults.MemoryFTSCandidates > 0 {
@@ -1294,22 +1420,22 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.SkillsEnabled != nil {
 		cfg.SkillsEnabled = *defaults.SkillsEnabled
 	}
-	if defaults.SkillsDir != nil {
+	if defaults.SkillsDir != nil && !apppaths.IsLegacyDefaultSetting("skills_dir", *defaults.SkillsDir) {
 		cfg.SkillsDir = *defaults.SkillsDir
 	}
-	if defaults.UserSkillsDir != nil {
+	if defaults.UserSkillsDir != nil && !apppaths.IsLegacyDefaultSetting("user_skills_dir", *defaults.UserSkillsDir) {
 		cfg.UserSkillsDir = expandHome(*defaults.UserSkillsDir)
 	}
-	if defaults.BundledSkillsDir != nil {
+	if defaults.BundledSkillsDir != nil && !apppaths.IsLegacyDefaultSetting("bundled_skills_dir", *defaults.BundledSkillsDir) {
 		cfg.BundledSkillsDir = resolveResourcePath(resourceDir, *defaults.BundledSkillsDir)
 	}
-	if defaults.TeamDir != nil {
+	if defaults.TeamDir != nil && !apppaths.IsLegacyDefaultSetting("team_dir", *defaults.TeamDir) {
 		cfg.TeamDir = expandHome(*defaults.TeamDir)
 	}
-	if defaults.SystemPromptPath != nil {
+	if defaults.SystemPromptPath != nil && !apppaths.IsLegacyDefaultSetting("system_prompt_path", *defaults.SystemPromptPath) {
 		cfg.SystemPromptPath = resolveResourcePath(resourceDir, *defaults.SystemPromptPath)
 	}
-	if defaults.MemoryExtractionPromptPath != nil {
+	if defaults.MemoryExtractionPromptPath != nil && !apppaths.IsLegacyDefaultSetting("memory_extraction_prompt_path", *defaults.MemoryExtractionPromptPath) {
 		cfg.MemoryExtractionPromptPath = resolveResourcePath(resourceDir, *defaults.MemoryExtractionPromptPath)
 	}
 	if len(defaults.ProjectRootMarkers) > 0 {
@@ -1330,7 +1456,7 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.WorktreeBaseRef != nil {
 		cfg.WorktreeBaseRef = *defaults.WorktreeBaseRef
 	}
-	if defaults.WorktreeDir != nil {
+	if defaults.WorktreeDir != nil && !apppaths.IsLegacyDefaultSetting("worktree_dir", *defaults.WorktreeDir) {
 		cfg.WorktreeDir = *defaults.WorktreeDir
 	}
 }
@@ -1374,6 +1500,9 @@ func FindLuminaRoot(start string) string {
 		return root
 	}
 	if root := normalizeLuminaRoot(os.Getenv("LUMINA_HOME")); root != "" {
+		warnLegacyLuminaHome.Do(func() {
+			fmt.Fprintln(os.Stderr, "lumina warning: LUMINA_HOME is deprecated; use LUMINA_RESOURCE_ROOT for bundled resources")
+		})
 		return root
 	}
 	for _, candidate := range luminaRootCandidates(start) {
@@ -1396,7 +1525,10 @@ func luminaRootCandidates(start string) []string {
 		candidates = append(candidates, filepath.Dir(exe))
 	}
 	if home := userHomeDir(); home != "" {
-		candidates = append(candidates, filepath.Join(home, ".lumina"))
+		candidates = append(candidates, apppaths.LegacyDefaultRoot(home))
+	}
+	if paths, err := apppaths.ResolveCurrent(); err == nil {
+		candidates = append(candidates, paths.ResourcesDir)
 	}
 	if _, file, _, ok := runtime.Caller(0); ok {
 		candidates = append(candidates, filepath.Dir(file))
@@ -1467,28 +1599,50 @@ func LuminaResourceDir(root string) string {
 		return root
 	}
 	if hasNestedLuminaResources(root) {
-		return filepath.Join(root, ".Lumina")
+		return apppaths.ProjectLocalRoot(root)
 	}
-	return filepath.Join(root, ".Lumina")
+	return apppaths.ProjectLocalRoot(root)
 }
 
 func LuminaResourcePath(root string, elems ...string) string {
-	parts := append([]string{LuminaResourceDir(root)}, elems...)
+	resourceDir := LuminaResourceDir(root)
+	if strings.EqualFold(filepath.Base(resourceDir), "resources") && len(elems) > 0 {
+		elems = append([]string(nil), elems...)
+		elems[0] = v2ResourceName(elems[0])
+	}
+	parts := append([]string{resourceDir}, elems...)
 	return filepath.Join(parts...)
 }
 
 func UserDefaultsPath(homeDir string) string {
-	if homeDir == "" {
-		homeDir = userHomeDir()
+	if homeDir != "" {
+		paths, err := apppaths.Resolve(apppaths.ResolveOptions{GOOS: runtime.GOOS, HomeDir: homeDir, Env: map[string]string{}})
+		if err == nil {
+			return paths.SettingsFile
+		}
 	}
-	return filepath.Join(homeDir, ".lumina", "CONFIG", "defaults.json")
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return ""
+	}
+	return paths.SettingsFile
+}
+
+func resourceSubdir(root, legacyName, v2Name string) string {
+	if exactPathExists(root, v2Name) || strings.EqualFold(filepath.Base(root), "resources") {
+		return filepath.Join(root, v2Name)
+	}
+	return filepath.Join(root, legacyName)
 }
 
 func hasDirectLuminaResources(root string) bool {
+	if exactPathExists(root, filepath.Join("system", "system-prompt.md")) {
+		return true
+	}
 	for _, rel := range []string{
-		filepath.Join("CONFIG", "defaults.json"),
-		filepath.Join("SYSTEM", "system-prompt.md"),
-		"SKILLS",
+		filepath.Join(apppaths.LegacyConfigDirName, apppaths.ProjectDefaultsFileName),
+		filepath.Join(apppaths.LegacySystemDirName, apppaths.SystemPromptFileName),
+		apppaths.LegacySkillsDirName,
 	} {
 		if exactPathExists(root, rel) {
 			return true
@@ -1499,9 +1653,9 @@ func hasDirectLuminaResources(root string) bool {
 
 func hasNestedLuminaResources(root string) bool {
 	for _, rel := range []string{
-		filepath.Join(".Lumina", "CONFIG", "defaults.json"),
-		filepath.Join(".Lumina", "SYSTEM", "system-prompt.md"),
-		filepath.Join(".Lumina", "SKILLS"),
+		filepath.Join(apppaths.ProjectLocalDirName, apppaths.LegacyConfigDirName, apppaths.ProjectDefaultsFileName),
+		filepath.Join(apppaths.ProjectLocalDirName, apppaths.LegacySystemDirName, apppaths.SystemPromptFileName),
+		filepath.Join(apppaths.ProjectLocalDirName, apppaths.LegacySkillsDirName),
 	} {
 		if exactPathExists(root, rel) {
 			return true
@@ -1596,20 +1750,61 @@ func resolveResourcePath(resourceDir, path string) string {
 		return path
 	}
 	clean := filepath.Clean(path)
-	if clean == ".Lumina" {
+	if clean == apppaths.ProjectLocalDirName {
 		return resourceDir
 	}
-	prefix := ".Lumina" + string(filepath.Separator)
+	prefix := apppaths.ProjectLocalDirName + string(filepath.Separator)
 	if strings.HasPrefix(clean, prefix) {
 		clean = strings.TrimPrefix(clean, prefix)
 	}
 	if filepath.Separator != '/' {
-		slashPrefix := ".Lumina/"
+		slashPrefix := apppaths.ProjectLocalDirName + "/"
 		if strings.HasPrefix(clean, slashPrefix) {
 			clean = strings.TrimPrefix(clean, slashPrefix)
 		}
 	}
+	if strings.EqualFold(filepath.Base(resourceDir), "resources") {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		if len(parts) > 0 {
+			parts[0] = v2ResourceName(parts[0])
+			clean = filepath.FromSlash(strings.Join(parts, "/"))
+		}
+	}
 	return filepath.Join(resourceDir, clean)
+}
+
+func v2ResourceName(name string) string {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case apppaths.LegacyConfigDirName:
+		return "defaults"
+	case apppaths.LegacySystemDirName:
+		return "system"
+	case apppaths.LegacySkillsDirName:
+		return "skills"
+	case apppaths.LegacyTeamsDirName, "TEAMS":
+		return "teams"
+	default:
+		return name
+	}
+}
+
+func findProjectDefaults(cwd string) string {
+	current, err := filepath.Abs(cwd)
+	if err != nil {
+		current = cwd
+	}
+	for current != "" {
+		candidate := apppaths.ProjectDefaultsFile(current)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
 }
 
 func expandHome(path string) string {
@@ -1673,8 +1868,9 @@ func envInt(key string, fallback int) int {
 }
 
 var (
-	configMu sync.RWMutex
-	config   *Config
+	configMu             sync.RWMutex
+	config               *Config
+	warnLegacyLuminaHome sync.Once
 )
 
 func GetConfig() Config {

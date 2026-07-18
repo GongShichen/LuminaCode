@@ -1002,8 +1002,7 @@ done
 		t.Fatal(err)
 	}
 
-	cfg := config.NewConfig()
-	cfg.CWD = root
+	cfg := config.NewConfigForCWD(root)
 	cfg.MCPEnabled = true
 	cfg.SkillsEnabled = false
 	cfg.APIKey = ""
@@ -1035,8 +1034,7 @@ func TestCoreExecutionEnginePromptsAndPersistsMCPTrustLikePython(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"docs":{"command":"fake-mcp","args":["--stdio"]}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = root
+	cfg := config.NewConfigForCWD(root)
 	cfg.MCPEnabled = true
 	cfg.APIKey = ""
 	state := agent.NewAgentState()

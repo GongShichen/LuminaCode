@@ -1,13 +1,15 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_ROOT="${LUMINA_APP_ROOT:-${HOME}/.lumina}"
-MCP_ROOT="${LUMINA_ARXIV_MCP_ROOT:-${APP_ROOT}/mcp/arxiv-mcp}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SCRIPT_DIR/app-paths.sh"
+APP_ROOT="$(lumina_resolve_app_root)"
+MCP_ROOT="${LUMINA_ARXIV_MCP_ROOT:-${APP_ROOT}/app/extensions/arxiv-mcp}"
 SOURCE_DIR="${MCP_ROOT}/source"
 VENV_DIR="${MCP_ROOT}/.venv"
 RUNNER_FILE="${MCP_ROOT}/run-arxiv-mcp.py"
-CONFIG_FILE="${APP_ROOT}/CONFIG/mcp.json"
-MANAGED_FILE="${APP_ROOT}/CONFIG/managed-mcp.json"
+CONFIG_FILE="${APP_ROOT}/config/mcp.json"
+MANAGED_FILE="${APP_ROOT}/state/managed/mcp.json"
 REPO_URL="${LUMINA_ARXIV_MCP_REPO:-https://github.com/kelvingao/arxiv-mcp.git}"
 ACTION="${1:-install}"
 
@@ -80,6 +82,7 @@ venv_arxiv_command() {
 
 clone_or_update() {
   mkdir -p "$MCP_ROOT"
+  chmod 0755 "$MCP_ROOT" 2>/dev/null || true
   if [ -d "${SOURCE_DIR}/.git" ]; then
     if ! git -C "$SOURCE_DIR" pull --ff-only; then
       warn "Could not update existing arxiv-mcp checkout; continuing with local source at $SOURCE_DIR."
@@ -142,6 +145,7 @@ from server import main
 
 asyncio.run(main())
 PY
+  chmod 0644 "$RUNNER_FILE" 2>/dev/null || true
 }
 
 merge_mcp_config() {
@@ -149,7 +153,7 @@ merge_mcp_config() {
   arxiv_cmd="$(venv_arxiv_command)"
   mkdir -p "$(dirname "$CONFIG_FILE")"
   CONFIG_FILE="$CONFIG_FILE" MANAGED_FILE="$MANAGED_FILE" ARXIV_COMMAND="$arxiv_cmd" RUNNER_FILE="$RUNNER_FILE" SOURCE_DIR="$SOURCE_DIR" "$py" - <<'PY'
-import json, os, pathlib
+import json, os, pathlib, tempfile
 config_path = pathlib.Path(os.environ["CONFIG_FILE"])
 managed_path = pathlib.Path(os.environ["MANAGED_FILE"])
 server = {
@@ -169,19 +173,90 @@ except Exception:
 servers = data.setdefault("mcpServers", {})
 existing = servers.get("arxiv")
 managed_existing = (managed.get("mcpServers") or {}).get("arxiv")
-owned = existing is None or existing == managed_existing or ".lumina/mcp/arxiv-mcp" in str((existing or {}).get("command", ""))
+legacy_command = str((existing or {}).get("command", "")).replace("\\", "/")
+owned = existing is None or existing == managed_existing or "/mcp/arxiv-mcp/" in legacy_command
 created = False
+
+def atomic_write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".lumina-", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
 if owned:
     servers["arxiv"] = server
     created = True
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_write(config_path, data)
 else:
     print("arXiv MCP already exists in mcp.json; leaving user config unchanged.")
 if created:
     managed.setdefault("mcpServers", {})["arxiv"] = server
-    managed_path.parent.mkdir(parents=True, exist_ok=True)
-    managed_path.write_text(json.dumps(managed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_write(managed_path, managed)
+PY
+}
+
+remove_managed_mcp_config() {
+  py="$(python_bin)"
+  CONFIG_FILE="$CONFIG_FILE" MANAGED_FILE="$MANAGED_FILE" "$py" - <<'PY'
+import json, os, pathlib, tempfile
+
+config_path = pathlib.Path(os.environ["CONFIG_FILE"])
+managed_path = pathlib.Path(os.environ["MANAGED_FILE"])
+
+def read(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+def atomic_write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".lumina-", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+config = read(config_path)
+managed = read(managed_path)
+config_servers = config.get("mcpServers") or {}
+managed_servers = managed.get("mcpServers") or {}
+current = config_servers.get("arxiv")
+owned = managed_servers.get("arxiv")
+if owned is not None and current == owned:
+    config_servers.pop("arxiv", None)
+    config["mcpServers"] = config_servers
+    atomic_write(config_path, config)
+elif current is not None:
+    print("arXiv MCP config was modified by the user; preserving it.")
+managed_servers.pop("arxiv", None)
+managed["mcpServers"] = managed_servers
+if managed_path.exists() or managed_servers:
+    atomic_write(managed_path, managed)
 PY
 }
 
@@ -225,7 +300,8 @@ case "$ACTION" in
     status
     ;;
   uninstall)
-    warn "Removing $MCP_ROOT. User mcp.json is preserved unless you edit it manually."
+    remove_managed_mcp_config
+    warn "Removing managed extension $MCP_ROOT."
     rm -rf "$MCP_ROOT"
     ;;
   *)

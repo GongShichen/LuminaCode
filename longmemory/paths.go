@@ -8,18 +8,32 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
+
+	"LuminaCode/apppaths"
 )
 
-const DefaultStoreRelativePath = ".lumina/memory/lumina-memory.sqlite"
+const DefaultStoreRelativePath = "data/memory/lumina-memory.sqlite"
 
 func DefaultStorePath() string {
-	home := userHomeDir()
-	if home == "" {
-		return filepath.Join(".lumina", "memory", "lumina-memory.sqlite")
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return filepath.FromSlash(DefaultStoreRelativePath)
 	}
-	return filepath.Join(home, DefaultStoreRelativePath)
+	return paths.MemoryDB
+}
+
+func DefaultModelPath(modelName string) string {
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return filepath.Join("cache", "models", "memory", modelName)
+	}
+	if modelName == "multilingual-e5-small" || strings.TrimSpace(modelName) == "" {
+		return paths.MemoryModelDir
+	}
+	return filepath.Join(paths.ModelsDir, "memory", modelName)
 }
 
 func ExpandPath(path string) string {
@@ -47,6 +61,14 @@ func UserScopeKey() string {
 func ProjectScopeKey(projectRoot string) string {
 	root := ResolveProjectRoot(projectRoot)
 	if root == "" {
+		root = projectRoot
+	}
+	return sanitizeKey(root)
+}
+
+func CanonicalProjectScopeKey(projectRoot string) string {
+	root, err := apppaths.CanonicalProjectRoot(projectRoot, runtime.GOOS)
+	if err != nil || root == "" {
 		root = projectRoot
 	}
 	return sanitizeKey(root)
@@ -151,15 +173,23 @@ func StableID(scopeType ScopeType, scopeKey string, title string, content string
 }
 
 func RuntimeScopes(projectRoot, agentType, teamName, teamAgentID string) []Scope {
+	return runtimeScopes(ProjectScopeKey(projectRoot), agentType, teamName, teamAgentID)
+}
+
+func RuntimeScopesCanonical(projectRoot, agentType, teamName, teamAgentID string) []Scope {
+	return runtimeScopes(CanonicalProjectScopeKey(projectRoot), agentType, teamName, teamAgentID)
+}
+
+func runtimeScopes(projectScopeKey, agentType, teamName, teamAgentID string) []Scope {
 	scopes := []Scope{
 		{Type: ScopeUser, Key: UserScopeKey()},
-		{Type: ScopeProject, Key: ProjectScopeKey(projectRoot)},
+		{Type: ScopeProject, Key: projectScopeKey},
 	}
 	if strings.TrimSpace(teamName) != "" {
 		scopes = append(scopes, Scope{Type: ScopeTeam, Key: TeamScopeKey(teamName)})
 	}
 	if strings.TrimSpace(agentType) != "" {
-		scopes = append(scopes, Scope{Type: ScopeAgentType, Key: AgentTypeScopeKey(projectRoot, agentType)})
+		scopes = append(scopes, Scope{Type: ScopeAgentType, Key: projectScopeKey + "::" + sanitizeKey(agentType)})
 	}
 	if strings.TrimSpace(teamName) != "" && strings.TrimSpace(teamAgentID) != "" {
 		scopes = append(scopes, Scope{Type: ScopeTeamAgent, Key: TeamAgentScopeKey(teamName, teamAgentID)})

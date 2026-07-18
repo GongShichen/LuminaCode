@@ -191,15 +191,15 @@ func TestAgentContextDoesNotReadAboveGitRoot(t *testing.T) {
 	}
 }
 
-func TestAgentContextLoadsHomeLuminaFallbackWhenWorkdirMissing(t *testing.T) {
+func TestAgentContextLoadsV2UserInstructionsWhenWorkdirMissing(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	homeLumina := filepath.Join(home, ".lumina")
-	if err := os.MkdirAll(homeLumina, 0o755); err != nil {
+	instructionsDir := filepath.Join(home, ".lumina", "config", "instructions")
+	if err := os.MkdirAll(instructionsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(homeLumina, "LUMINA.md"), []byte("Home fallback."), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(instructionsDir, "LUMINA.md"), []byte("Home fallback."), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

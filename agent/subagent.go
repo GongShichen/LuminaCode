@@ -296,7 +296,7 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 			tool := activeRegistry.Get(tc.Name)
 			content := result.Content
 			if tool != nil && !result.IsError {
-				if formatted, err := tool.FormatLargeResult(ctx, content, s.Config.MaxToolOutputChars, tc.ID, s.Config.ProjectRuntimeDir); err == nil {
+				if formatted, err := tool.FormatLargeResult(ctx, content, s.Config.MaxToolOutputChars, tc.ID, s.Config.ToolResultsDir(s.sessionIDForMemoryUse())); err == nil {
 					content = formatted
 				}
 			}
@@ -534,7 +534,7 @@ func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string
 	teamID, _ := s.ExtraContext["team_session_id"].(string)
 	teamAgentID, _ := s.ExtraContext["team_agent_id"].(string)
 	teamName, _ := s.ExtraContext["team_name"].(string)
-	scopes := longmemory.RuntimeScopes(s.Config.CWD, agentType, teamName, teamAgentID)
+	scopes := longmemory.RuntimeScopesCanonical(s.Config.ProjectRoot(), agentType, teamName, teamAgentID)
 	limit := s.Config.MemoryAtomMaxSelected
 	if limit <= 0 {
 		limit = 32
@@ -653,7 +653,7 @@ func (s *SubAgent) drainPendingNotifications(sessionState *SubAgentSessionState)
 }
 
 func (s *SubAgent) resolveProjectRoot() string {
-	return longmemory.ResolveProjectRoot(s.Config.CWD)
+	return s.Config.ProjectRoot()
 }
 
 func prepareSubagentAPIMessages(messages []map[string]any) []map[string]any {

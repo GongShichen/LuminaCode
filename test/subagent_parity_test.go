@@ -29,7 +29,12 @@ type searchTool struct {
 
 func subAgentTestConfig(t *testing.T) config.Config {
 	t.Helper()
-	cfg := config.NewConfig()
+	return subAgentTestConfigForCWD(t, t.TempDir())
+}
+
+func subAgentTestConfigForCWD(t *testing.T, cwd string) config.Config {
+	t.Helper()
+	cfg := config.NewConfigForCWD(cwd)
 	cfg.LongTermMemoryEnabled = false
 	cfg.MemoryQueryExpansionEnabled = false
 	cfg.SessionDir = t.TempDir()
@@ -297,13 +302,14 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 
 func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	dir := t.TempDir()
+	cfg := subAgentTestConfigForCWD(t, dir)
 	memoryPath := filepath.Join(dir, "lumina-memory.sqlite")
 	store, err := longmemory.Open(context.Background(), memoryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	projectRoot := longmemory.ResolveProjectRoot(dir)
+	projectRoot := cfg.ProjectRoot()
 	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:  longmemory.ScopeAgentType,
 		ScopeKey:   longmemory.AgentTypeScopeKey(projectRoot, "explore"),
@@ -318,8 +324,6 @@ func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := subAgentTestConfig(t)
-	cfg.CWD = dir
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
 	cfg.LongTermMemoryEnabled = true
@@ -374,8 +378,7 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 	}))
 	defer server.Close()
 
-	cfg := subAgentTestConfig(t)
-	cfg.CWD = dir
+	cfg := subAgentTestConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "claude-test"
@@ -400,6 +403,7 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 
 func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testing.T) {
 	dir := t.TempDir()
+	cfg := subAgentTestConfigForCWD(t, dir)
 	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -407,7 +411,7 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 	defer store.Close()
 	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:     longmemory.ScopeAgentType,
-		ScopeKey:      longmemory.AgentTypeScopeKey(dir, "Explore"),
+		ScopeKey:      longmemory.AgentTypeScopeKey(cfg.ProjectRoot(), "Explore"),
 		MemoryType:    longmemory.TypeReference,
 		Title:         "Repo Note",
 		Content:       "Use this repo note.",
@@ -419,8 +423,6 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 		t.Fatal(err)
 	}
 
-	cfg := subAgentTestConfig(t)
-	cfg.CWD = dir
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
 	cfg.LongTermMemoryEnabled = true
@@ -436,6 +438,7 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 
 func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	dir := t.TempDir()
+	cfg := subAgentTestConfigForCWD(t, dir)
 	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +446,7 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	defer store.Close()
 	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:     longmemory.ScopeProject,
-		ScopeKey:      longmemory.ProjectScopeKey(dir),
+		ScopeKey:      longmemory.CanonicalProjectScopeKey(cfg.ProjectRoot()),
 		MemoryType:    longmemory.TypeReference,
 		Title:         "Workspace Note",
 		Content:       "Use this workspace-level memory.",
@@ -456,7 +459,7 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	}
 	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:     longmemory.ScopeAgentType,
-		ScopeKey:      longmemory.AgentTypeScopeKey(dir, "Explore"),
+		ScopeKey:      longmemory.AgentTypeScopeKey(cfg.ProjectRoot(), "Explore"),
 		MemoryType:    longmemory.TypeReference,
 		Title:         "Search Note",
 		Summary:       "Search followup note",
@@ -503,8 +506,6 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := subAgentTestConfig(t)
-	cfg.CWD = dir
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "gpt-5"

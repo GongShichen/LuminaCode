@@ -1,0 +1,7 @@
+# name|platform|home|local_app_data|override|expected_root
+darwin-default|darwin|/Users/tester|-|-|/Users/tester/.lumina
+linux-default|linux|/home/tester|-|-|/home/tester/.lumina
+windows-local|windows|C:\Users\Tester|C:\Users\Tester\AppData\Local|-|C:\Users\Tester\AppData\Local\LuminaCode
+windows-fallback|windows|C:\Users\Tester|-|-|C:\Users\Tester\.lumina
+posix-override|linux|/home/tester|-|/opt/Lumina Root|/opt/Lumina Root
+windows-override|windows|C:\Users\Tester|-|D:\Lumina Root|D:\Lumina Root

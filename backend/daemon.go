@@ -18,6 +18,7 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/api"
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 	"LuminaCode/llmclient"
 	"LuminaCode/longmemory"
@@ -69,6 +70,12 @@ func RunDaemonCLI(args []string) error {
 		return err
 	}
 	cfg := config.GetConfig()
+	if len(cfg.PathErrors) > 0 {
+		return fmt.Errorf("invalid AppRoot configuration: %s", strings.Join(cfg.PathErrors, "; "))
+	}
+	if err := apppaths.PrepareRuntime(cfg.Paths, "dev"); err != nil {
+		return err
+	}
 	if cfg.LongTermMemoryEnabled {
 		if err := cfg.ValidateMemoryConfig(); err != nil {
 			return err
@@ -375,8 +382,11 @@ func (s *DaemonServer) searxNGScriptPath() string {
 	if root := strings.TrimSpace(os.Getenv("LUMINA_RESOURCE_ROOT")); root != "" {
 		candidates = append(candidates, filepath.Join(root, "setup-searxng.sh"))
 	}
-	if s.opts.Config.TeamDir != "" {
-		candidates = append(candidates, filepath.Join(filepath.Dir(s.opts.Config.TeamDir), "setup-searxng.sh"))
+	if s.opts.Config.Paths.ScriptsDir != "" {
+		candidates = append(candidates, filepath.Join(s.opts.Config.Paths.ScriptsDir, "setup-searxng.sh"))
+	}
+	if s.opts.Config.Paths.ResourcesDir != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(s.opts.Config.Paths.ResourcesDir), "setup-searxng.sh"))
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -390,12 +400,8 @@ func runManagedScript(path, action string, cfg config.Config) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, action)
-	appRoot := filepath.Dir(cfg.TeamDir)
-	if appRoot == "." || appRoot == "" {
-		appRoot = filepath.Join(os.Getenv("HOME"), ".lumina")
-	}
 	cmd.Env = append(os.Environ(),
-		"LUMINA_APP_ROOT="+appRoot,
+		"LUMINA_APP_ROOT="+cfg.Paths.Root,
 		"LUMINA_WEB_SEARCH_BASE_URL="+strings.TrimRight(cfg.WebSearchBaseURL, "/"),
 	)
 	output, err := cmd.CombinedOutput()
@@ -406,19 +412,19 @@ func runManagedScript(path, action string, cfg config.Config) (string, error) {
 }
 
 func DefaultEndpointPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lumina", "run", "backend.json")
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return ""
+	}
+	return paths.EndpointFile
 }
 
 func writeEndpoint(path string, endpoint EndpointInfo) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(endpoint, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
+	return apppaths.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
 func randomToken() (string, error) {
@@ -1357,7 +1363,7 @@ func (s *DaemonServer) defaultMemoryScopes(sessionID string) []longmemory.Scope 
 			cfg = controller.RuntimeConfig()
 		}
 	}
-	return longmemory.RuntimeScopes(cfg.CWD, "main", "", "")
+	return longmemory.RuntimeScopesCanonical(cfg.ProjectRoot(), "main", "", "")
 }
 
 func filterMemoryStatus(entries []longmemory.Entry, status longmemory.Status) []longmemory.Entry {

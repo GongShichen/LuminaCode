@@ -1,0 +1,115 @@
+name: AppRoot v2
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Enable Windows C toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @("C:\msys64\ucrt64\bin", "C:\msys64\mingw64\bin")
+          $toolchain = $candidates | Where-Object { Test-Path (Join-Path $_ "gcc.exe") } | Select-Object -First 1
+          if (-not $toolchain) { throw "A MinGW gcc toolchain is required for CGO tests" }
+          $toolchain | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+      - name: Go tests
+        run: go test ./...
+      - name: Frontend tests
+        run: npm --prefix frontend test
+      - name: AppRoot hardcoding check
+        if: runner.os != 'Windows'
+        run: sh scripts/check-app-path-hardcoding.sh
+      - name: POSIX path contract
+        if: runner.os != 'Windows'
+        run: sh scripts/test-app-paths.sh
+      - name: Windows path contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-app-paths-windows.ps1
+      - name: POSIX installer lifecycle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash_file() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
+          app_root="$RUNNER_TEMP/LuminaCode AppRoot"
+          install_dir="$RUNNER_TEMP/lumina-bin"
+          make install APP_ROOT="$app_root" INSTALL_DIR="$install_dir" SKIP_MANAGED_COMPONENTS=1 NO_PATH_UPDATE=1
+          test -f "$app_root/app/frontend/dist/index.js"
+          test -f "$app_root/app/frontend/node_modules/ws/package.json"
+          test ! -e "$app_root/app/frontend/package-lock.json"
+          test ! -e "$app_root/app/frontend/node_modules/@types"
+          test ! -e "$app_root/app/frontend/node_modules/typescript"
+          test ! -e "$app_root/app/frontend/node_modules/esbuild"
+          mkdir -p "$app_root/config/prompts" "$app_root/data/legacy/v1"
+          printf 'config fixture\n' > "$app_root/config/prompts/user.txt"
+          printf 'data fixture\n' > "$app_root/data/legacy/v1/user.txt"
+          before_config="$(hash_file "$app_root/config/prompts/user.txt")"
+          before_data="$(hash_file "$app_root/data/legacy/v1/user.txt")"
+          make install APP_ROOT="$app_root" INSTALL_DIR="$install_dir" SKIP_MANAGED_COMPONENTS=1 NO_PATH_UPDATE=1
+          test "$before_config" = "$(hash_file "$app_root/config/prompts/user.txt")"
+          test "$before_data" = "$(hash_file "$app_root/data/legacy/v1/user.txt")"
+          unowned_home="$RUNNER_TEMP/unowned-home"
+          mkdir -p "$unowned_home/.local/bin"
+          printf 'not owned by this install\n' > "$unowned_home/.local/bin/lumina"
+          HOME="$unowned_home" make uninstall APP_ROOT="$app_root" INSTALL_DIR="$install_dir"
+          test -f "$unowned_home/.local/bin/lumina"
+          test -f "$app_root/config/prompts/user.txt"
+          test -f "$app_root/data/legacy/v1/user.txt"
+          test ! -e "$app_root/app"
+          make install APP_ROOT="$app_root" INSTALL_DIR="$install_dir" SKIP_MANAGED_COMPONENTS=1 NO_PATH_UPDATE=1
+          test -f "$app_root/config/prompts/user.txt"
+          make purge APP_ROOT="$app_root" INSTALL_DIR="$install_dir"
+          test ! -e "$app_root"
+      - name: Windows installer lifecycle and ACL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $suffix = "LuminaCode 路径 " + ("x" * 72)
+          $appRoot = Join-Path $env:RUNNER_TEMP $suffix
+          $installDir = Join-Path $env:RUNNER_TEMP "lumina bin"
+          ./scripts/install-windows.ps1 -AppRoot $appRoot -InstallDir $installDir -SkipNpmInstall -SkipManagedComponents -NoPathUpdate
+          if (-not (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\dist\index.js"))) { throw "frontend dist is missing" }
+          if (-not (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\node_modules\ws\package.json"))) { throw "production dependency is missing" }
+          if (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\package-lock.json")) { throw "staging lockfile leaked into app payload" }
+          if (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\node_modules\@types")) { throw "dev dependencies leaked into app payload" }
+          if (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\node_modules\typescript")) { throw "TypeScript leaked into app payload" }
+          if (Test-Path -LiteralPath (Join-Path $appRoot "app\frontend\node_modules\esbuild")) { throw "esbuild leaked into app payload" }
+          New-Item -ItemType Directory -Path (Join-Path $appRoot "config\prompts"), (Join-Path $appRoot "data\legacy\v1") -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $appRoot "config\prompts\user.txt") -Value "config fixture"
+          Set-Content -LiteralPath (Join-Path $appRoot "data\legacy\v1\user.txt") -Value "data fixture"
+          $configHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appRoot "config\prompts\user.txt")).Hash
+          $dataHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appRoot "data\legacy\v1\user.txt")).Hash
+          if (-not (Get-Acl -LiteralPath (Join-Path $appRoot "config")).AreAccessRulesProtected) { throw "config ACL inheritance is not disabled" }
+          if (-not (Get-Acl -LiteralPath (Join-Path $appRoot "data")).AreAccessRulesProtected) { throw "data ACL inheritance is not disabled" }
+          if (-not (Get-Acl -LiteralPath (Join-Path $appRoot "state")).AreAccessRulesProtected) { throw "state ACL inheritance is not disabled" }
+          ./scripts/install-windows.ps1 -AppRoot $appRoot -InstallDir $installDir -SkipNpmInstall -SkipManagedComponents -NoPathUpdate
+          if ($configHash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appRoot "config\prompts\user.txt")).Hash) { throw "config changed during upgrade" }
+          if ($dataHash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appRoot "data\legacy\v1\user.txt")).Hash) { throw "data changed during upgrade" }
+          ./scripts/uninstall-windows.ps1 -AppRoot $appRoot -InstallDir $installDir
+          if (-not (Test-Path (Join-Path $appRoot "config\prompts\user.txt"))) { throw "normal uninstall removed config" }
+          if (-not (Test-Path (Join-Path $appRoot "data\legacy\v1\user.txt"))) { throw "normal uninstall removed data" }
+          ./scripts/install-windows.ps1 -AppRoot $appRoot -InstallDir $installDir -SkipNpmInstall -SkipManagedComponents -NoPathUpdate
+          ./scripts/uninstall-windows.ps1 -AppRoot $appRoot -InstallDir $installDir -Purge
+          if (Test-Path $appRoot) { throw "purge did not remove AppRoot" }

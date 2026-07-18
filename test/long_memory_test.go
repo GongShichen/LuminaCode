@@ -22,7 +22,7 @@ func TestLongMemoryStoreSearchScopeAndLifecycle(t *testing.T) {
 	}
 	defer store.Close()
 
-	projectScope := longmemory.ProjectScopeKey(projectRoot)
+	projectScope := longmemory.CanonicalProjectScopeKey(projectRoot)
 	active, err := store.Upsert(ctx, longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
 		ScopeKey:   projectScope,
@@ -108,7 +108,7 @@ func TestLongMemoryGovernanceAndExpiry(t *testing.T) {
 	defer store.Close()
 	expired := longmemory.ApplyRetention(longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(root),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(root),
 		MemoryType: longmemory.TypeEpisodic,
 		Title:      "Expired Incident",
 		Content:    "An old incident that should not be recalled.",
@@ -165,7 +165,7 @@ func TestLongMemoryGovernanceAndExpiry(t *testing.T) {
 	}
 	replacement, err := store.Upsert(ctx, longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(root),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(root),
 		MemoryType: longmemory.TypeEpisodic,
 		Title:      "Replacement Incident",
 		Content:    "Replacement memory.",
@@ -203,7 +203,7 @@ func TestLongMemoryRecallDoesNotUseCompletionRerank(t *testing.T) {
 	} {
 		_, err := store.Upsert(ctx, longmemory.Candidate{
 			ScopeType:  longmemory.ScopeProject,
-			ScopeKey:   longmemory.ProjectScopeKey(root),
+			ScopeKey:   longmemory.CanonicalProjectScopeKey(root),
 			MemoryType: longmemory.TypeProject,
 			Title:      item.title,
 			Content:    item.content,
@@ -237,7 +237,7 @@ func TestLongMemoryMissingEmbeddingKeepsOtherChannelCandidates(t *testing.T) {
 	}
 	for index := 0; index < 3; index++ {
 		if _, err := store.Upsert(ctx, longmemory.Candidate{ScopeType: longmemory.ScopeProject,
-			ScopeKey: longmemory.ProjectScopeKey(root), MemoryType: longmemory.TypeProject,
+			ScopeKey: longmemory.CanonicalProjectScopeKey(root), MemoryType: longmemory.TypeProject,
 			Title: "Release rule", Content: "release rule candidate " + string(rune('a'+index)), Confidence: 0.9}); err != nil {
 			t.Fatal(err)
 		}
@@ -268,7 +268,7 @@ func TestLongMemoryExportImportRoundTrip(t *testing.T) {
 	defer store.Close()
 	if _, err := store.Upsert(ctx, longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(root),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(root),
 		MemoryType: longmemory.TypeReference,
 		Title:      "Reference Link",
 		Content:    "Use the internal release checklist for deployment.",

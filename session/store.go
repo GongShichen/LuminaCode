@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/apppaths"
 	"LuminaCode/security"
 	"LuminaCode/tools/file"
 
@@ -35,7 +36,8 @@ type Store struct {
 }
 
 func NewStore(sessionDir string) *Store {
-	_ = os.MkdirAll(sessionDir, 0o755)
+	_ = os.MkdirAll(sessionDir, 0o700)
+	_ = os.Chmod(sessionDir, 0o700)
 	store := &Store{dir: sessionDir}
 	store.migrateAllLegacySessions()
 	return store
@@ -501,7 +503,7 @@ func (s *Store) migrateLegacySession(sessionID string) {
 		if _, err := os.Stat(mapping.old); err != nil {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(mapping.new), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(mapping.new), 0o700); err != nil {
 			continue
 		}
 		if _, err := os.Stat(mapping.new); err == nil {
@@ -513,6 +515,7 @@ func (s *Store) migrateLegacySession(sessionID string) {
 				_ = os.Remove(mapping.old)
 			}
 		}
+		_ = os.Chmod(mapping.new, 0o600)
 	}
 }
 
@@ -521,10 +524,10 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	return os.WriteFile(dst, data, 0o600)
 }
 
 func (s *Store) legacySessionPaths(sessionID string) []string {
@@ -616,19 +619,7 @@ func atomicWriteJSONL(path string, records []map[string]any) error {
 }
 
 func atomicReplace(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := filepath.Join(filepath.Dir(path), filepath.Base(path)+"."+newGenerationID()+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return apppaths.WriteFileAtomic(path, data, 0o600)
 }
 
 func newGenerationID() string {

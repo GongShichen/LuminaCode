@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"LuminaCode/config"
 	"LuminaCode/mcp"
 )
 
 func TestMainSingleShotResolvesMCPTrustLikePythonRuntime(t *testing.T) {
 	project := t.TempDir()
 	home := t.TempDir()
+	paths := initializeTestAppRoot(t, home)
 	if err := os.WriteFile(filepath.Join(project, ".mcp.json"), []byte(`{"mcpServers":{"docs":{"command":"fake-mcp","args":["--stdio"]}}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,11 @@ func TestMainSingleShotResolvesMCPTrustLikePythonRuntime(t *testing.T) {
 		}
 	}
 
-	trustedPath := filepath.Join(home, ".lumina", "project", config.ProjectRuntimeName(project), "CONFIG", "trusted_mcp.json")
+	projectPaths, err := paths.ForProject(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedPath := projectPaths.MCPTrustFile
 	data, err := os.ReadFile(trustedPath)
 	if err != nil {
 		t.Fatalf("expected trusted MCP file after CLI approval: %v\noutput:\n%s", err, output)
@@ -115,8 +119,10 @@ func mustGetwd(t *testing.T) string {
 
 func mainCLITestEnv(t *testing.T, home string) []string {
 	t.Helper()
+	paths := initializeTestAppRoot(t, home)
 	return append(os.Environ(),
 		"HOME="+home,
+		"LUMINA_APP_ROOT="+paths.Root,
 		"GOMODCACHE="+goEnv(t, "GOMODCACHE"),
 		"GOCACHE="+goEnv(t, "GOCACHE"),
 	)

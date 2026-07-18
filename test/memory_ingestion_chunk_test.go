@@ -53,7 +53,7 @@ func TestRawMemoryIngestionSurvivesSemanticExtractionFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.ProjectScopeKey(root)}
+	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.CanonicalProjectScopeKey(root)}
 	hits, err := store.SearchChunkBM25(ctx, []string{"zircon needle 8472"}, []longmemory.Scope{scope}, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestSemanticExtractionJobResumesFromPersistedVisibleMessages(t *testing.T) 
 	}
 	defer store.Close()
 	hits, err := store.Search(ctx, longmemory.SearchOptions{Query: "restart safety WAL",
-		Scopes: []longmemory.Scope{{Type: longmemory.ScopeProject, Key: longmemory.ProjectScopeKey(root)}}, Limit: 10})
+		Scopes: []longmemory.Scope{{Type: longmemory.ScopeProject, Key: longmemory.CanonicalProjectScopeKey(root)}}, Limit: 10})
 	if err != nil || len(hits) == 0 {
 		t.Fatalf("persisted extraction job did not enrich memory: hits=%#v err=%v", hits, err)
 	}

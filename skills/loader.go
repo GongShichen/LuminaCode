@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 )
 
@@ -23,13 +24,13 @@ func NewSkillLoader(cfg config.Config) *SkillLoader {
 func (l *SkillLoader) LoadFrontmatterOnly() []SkillSpec {
 	l.seenPaths = map[string]struct{}{}
 	var skills []SkillSpec
-	skills = append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
 	if l.Config.IsolatedSkillsOnly {
-		return skills
+		return append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
 	}
 	for _, root := range l.ProjectSkillsDirs() {
 		skills = append(skills, l.loadDirectory(root, SkillSourceProject)...)
 	}
+	skills = append(skills, l.loadDirectory(l.UserSkillsDir(), SkillSourceUser)...)
 	skills = append(skills, l.loadDirectory(l.BundledSkillsDir(), SkillSourceBundled)...)
 	return skills
 }
@@ -49,15 +50,23 @@ func (l *SkillLoader) LoadFullContent(skill SkillSpec) SkillSpec {
 }
 
 func (l *SkillLoader) ProjectSkillsDir() string {
-	return filepath.Join(l.Config.CWD, l.Config.SkillsDir)
+	return filepath.Join(l.projectRoot(), l.Config.SkillsDir)
 }
 
 func (l *SkillLoader) ProjectSkillsDirs() []string {
-	roots := []string{filepath.Join(l.Config.CWD, "skills")}
+	root := l.projectRoot()
+	roots := []string{filepath.Join(root, "skills")}
 	if l.Config.SkillsDir != "" {
 		roots = append(roots, l.ProjectSkillsDir())
 	}
 	return uniqueExistingOrder(roots)
+}
+
+func (l *SkillLoader) projectRoot() string {
+	if strings.TrimSpace(l.Config.ProjectPaths.CanonicalRoot) != "" {
+		return l.Config.ProjectPaths.CanonicalRoot
+	}
+	return l.Config.CWD
 }
 
 func (l *SkillLoader) UserSkillsDir() string {
@@ -68,7 +77,7 @@ func (l *SkillLoader) BundledSkillsDir() string {
 	if l.Config.BundledSkillsDir != "" {
 		return l.Config.BundledSkillsDir
 	}
-	return filepath.Join(l.Config.CWD, ".Lumina", "SKILLS")
+	return apppaths.ProjectBundledSkillsDir(l.Config.CWD)
 }
 
 func (l *SkillLoader) loadDirectory(root string, source SkillSource) []SkillSpec {

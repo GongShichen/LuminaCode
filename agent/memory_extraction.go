@@ -152,7 +152,7 @@ func (c *ExtractionController) Schedule(_ context.Context, state *AgentState, me
 func (c *ExtractionController) incrementalMessages(state *AgentState, storePath string) ([]map[string]any, []string, int, int, string, string) {
 	sessionID := firstNonEmptyString(c.SourceSessionID, state.MemorySessionID)
 	if sessionID == "" {
-		sessionID = "runtime-" + longmemory.ProjectScopeKey(c.Config.CWD) + "-" + firstNonEmptyString(c.SourceAgentID, "main")
+		sessionID = "runtime-" + longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()) + "-" + firstNonEmptyString(c.SourceAgentID, "main")
 	}
 	consumerID := "long-term-extraction:" + firstNonEmptyString(c.SourceAgentID, "main")
 	start := state.MemoryExtractionCursor
@@ -264,7 +264,7 @@ func (c *ExtractionController) IngestMessages(ctx context.Context, state *AgentS
 	storePath := c.Config.LongTermMemoryStore
 	sessionID := firstNonEmptyString(c.SourceSessionID, state.MemorySessionID)
 	if sessionID == "" {
-		sessionID = "runtime-" + longmemory.ProjectScopeKey(c.Config.CWD) + "-" + firstNonEmptyString(c.SourceAgentID, "main")
+		sessionID = "runtime-" + longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()) + "-" + firstNonEmptyString(c.SourceAgentID, "main")
 	}
 	consumerID := "long-term-extraction:" + firstNonEmptyString(c.SourceAgentID, "main")
 	start := 0
@@ -329,7 +329,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		"source_team_agent_id": c.SourceTeamAgentID, "source_team_session_id": c.SourceTeamSessionID,
 	})
 	job := longmemory.Job{Kind: "extraction", ScopeType: longmemory.ScopeProject,
-		ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD), Payload: string(jobPayload)}
+		ScopeKey: longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()), Payload: string(jobPayload)}
 	if err := store.EnqueueJob(ctx, job); err != nil {
 		return "", fmt.Errorf("enqueue memory extraction: %w", err)
 	}
@@ -346,7 +346,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		_ = store.CompleteJob(jobCtx, job.JobID)
 	}()
 	agentID := firstNonEmptyString(c.SourceAgentID, "main")
-	scopes := longmemory.RuntimeScopes(c.Config.CWD, agentID, c.SourceTeamName, c.SourceTeamAgentID)
+	scopes := longmemory.RuntimeScopesCanonical(c.Config.ProjectRoot(), agentID, c.SourceTeamName, c.SourceTeamAgentID)
 	rawBatch := c.buildRawIngestionBatch(ctx, payload, agentID)
 	if err := store.CommitExtraction(ctx, rawBatch); err != nil {
 		return "", fmt.Errorf("commit raw memory ingestion: %w", err)
@@ -389,7 +389,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		}
 		if candidate.ScopeType == "" {
 			candidate.ScopeType = longmemory.ScopeProject
-			candidate.ScopeKey = longmemory.ProjectScopeKey(c.Config.CWD)
+			candidate.ScopeKey = longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot())
 		}
 		if candidate.ScopeKey == "" {
 			switch candidate.ScopeType {
@@ -402,7 +402,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 			case longmemory.ScopeTeamAgent:
 				candidate.ScopeKey = longmemory.TeamAgentScopeKey(c.SourceTeamName, firstNonEmptyString(c.SourceTeamAgentID, candidate.SourceAgentID))
 			default:
-				candidate.ScopeKey = longmemory.ProjectScopeKey(c.Config.CWD)
+				candidate.ScopeKey = longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot())
 			}
 		}
 		candidate = longmemory.ApplyRetention(candidate, retentionPolicyFromConfig(c.Config), time.Now().UTC())
@@ -434,7 +434,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	batch.Facts, batch.Spans, batch.Edges = remapAcceptedExtractionReferences(batch.Facts, batch.Spans, batch.Edges, acceptedMemoryIndexes)
 	now := time.Now().UTC()
 	batch.Episode = &longmemory.Episode{
-		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()),
 		SessionID: payload.SessionID, TeamSessionID: c.SourceTeamSessionID, AgentID: agentID,
 		MessageIDs: append([]string(nil), payload.MessageIDs...), Kind: "conversation",
 		Content: extractionSearchText(payload.Messages), OccurredAt: extractionOccurredAt(payload.Messages, now), ObservedAt: now,
@@ -484,7 +484,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 	for index := range batch.CoreBlocks {
 		if batch.CoreBlocks[index].ScopeType == "" {
 			batch.CoreBlocks[index].ScopeType = longmemory.ScopeProject
-			batch.CoreBlocks[index].ScopeKey = longmemory.ProjectScopeKey(c.Config.CWD)
+			batch.CoreBlocks[index].ScopeKey = longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot())
 		}
 		if _, ok := allowedCoreScopes[string(batch.CoreBlocks[index].ScopeType)+"\x00"+batch.CoreBlocks[index].ScopeKey]; ok {
 			filteredCoreBlocks = append(filteredCoreBlocks, batch.CoreBlocks[index])
@@ -515,7 +515,7 @@ func (c *ExtractionController) runLongTermExtraction(ctx context.Context, payloa
 		}
 		if !embeddingPrepared {
 			batch.Jobs = append(batch.Jobs, longmemory.Job{Kind: "embedding_backfill", ScopeType: longmemory.ScopeProject,
-				ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD), Payload: fmt.Sprintf(`{"session_id":%q}`, payload.SessionID)})
+				ScopeKey: longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()), Payload: fmt.Sprintf(`{"session_id":%q}`, payload.SessionID)})
 		}
 	}
 	if c.Config.MemoryEmbeddingEnabled && len(batch.Chunks) > 0 {
@@ -790,7 +790,7 @@ func structuredMemoryExtractionInput(response api.Response, requiredTool string)
 func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, payload *extractionContext, agentID string) longmemory.ExtractionBatch {
 	now := time.Now().UTC()
 	episode := &longmemory.Episode{
-		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+		ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()),
 		SessionID: payload.SessionID, TeamSessionID: c.SourceTeamSessionID, AgentID: agentID,
 		MessageIDs: append([]string(nil), payload.MessageIDs...), Kind: "conversation",
 		Content: extractionSearchText(payload.Messages), OccurredAt: extractionOccurredAt(payload.Messages, now), ObservedAt: now,
@@ -826,7 +826,7 @@ func (c *ExtractionController) buildRawIngestionBatch(ctx context.Context, paylo
 	}
 	if c.Config.MemoryEmbeddingEnabled && len(batch.Chunks) > 0 {
 		batch.Jobs = append(batch.Jobs, longmemory.Job{Kind: "embedding_backfill",
-			ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.ProjectScopeKey(c.Config.CWD),
+			ScopeType: longmemory.ScopeProject, ScopeKey: longmemory.CanonicalProjectScopeKey(c.Config.ProjectRoot()),
 			Payload: fmt.Sprintf(`{"session_id":%q,"source":"raw_ingestion"}`, payload.SessionID)})
 	}
 	return batch

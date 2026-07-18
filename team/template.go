@@ -33,7 +33,7 @@ func (l Loader) CreateTemplate(displayName string) (TeamTemplateResult, error) {
 		filepath.Join("team-leader", "skills"),
 	}
 	for _, dir := range []string{root, filepath.Join(root, "team-leader", "skills")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return TeamTemplateResult{}, err
 		}
 	}
@@ -73,7 +73,7 @@ You coordinate this custom team.
 `,
 	}
 	for rel, content := range files {
-		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o600); err != nil {
 			return TeamTemplateResult{}, err
 		}
 	}

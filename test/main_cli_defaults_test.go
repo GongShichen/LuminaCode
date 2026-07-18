@@ -144,7 +144,9 @@ func TestMainCLIRunsFromArbitraryDirectoryWithBundledDefaults(t *testing.T) {
 
 func isolatedLuminaHomeEnv(t *testing.T) []string {
 	t.Helper()
-	env := append(os.Environ(), "HOME="+t.TempDir(), "LUMINA_RESOURCE_ROOT=", "LUMINA_HOME=")
+	home := t.TempDir()
+	paths := initializeTestAppRoot(t, home)
+	env := append(os.Environ(), "HOME="+home, "LUMINA_APP_ROOT="+paths.Root, "LUMINA_RESOURCE_ROOT=", "LUMINA_HOME=")
 	for _, key := range []string{"GOMODCACHE", "GOCACHE"} {
 		out, err := exec.Command("go", "env", key).Output()
 		if err != nil {

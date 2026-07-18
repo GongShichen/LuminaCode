@@ -45,8 +45,7 @@ Dir ${LUMINA_SKILL_DIR}
 		t.Fatalf("unexpected frontmatter: %#v", fm)
 	}
 	spec := skills.SkillSpec{Frontmatter: fm, Source: skills.SkillSourceUser, Directory: skillDir, SkillFile: skillFile, CanonicalName: "my-skill", Content: &content}
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	rendered, err := processor.Process(spec, "alpha beta", "session-1", nil)
 	if err != nil {
@@ -109,8 +108,7 @@ func TestSkillParseReplacesInvalidUTF8LikePython(t *testing.T) {
 
 func TestSkillNamedArgumentReplacementTreatsDollarLiterallyLikePython(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	content := "Path: $file end"
 	spec := skills.SkillSpec{
@@ -150,8 +148,7 @@ Read carefully: $ARGUMENTS
 	if err := os.WriteFile(skillFile, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	loader := skills.NewSkillLoader(cfg)
 	registry := skills.NewSkillRegistry(dir)
@@ -330,8 +327,7 @@ Review it.
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.BundledSkillsDir = filepath.Join(dir, ".Lumina", "SKILLS")
 	loader := skills.NewSkillLoader(cfg)
@@ -363,8 +359,7 @@ func TestProjectRootSkillsDirectoryLoadsAlongsideLegacyProjectSkills(t *testing.
 			t.Fatal(err)
 		}
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.UserSkillsDir = filepath.Join(dir, "missing-user")
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.BundledSkillsDir = filepath.Join(dir, "missing-bundled")
@@ -382,7 +377,8 @@ func TestProjectRootSkillsDirectoryLoadsAlongsideLegacyProjectSkills(t *testing.
 		t.Fatalf("expected legacy project skill second, got %#v", loaded)
 	}
 	dirs := loader.ProjectSkillsDirs()
-	if len(dirs) != 2 || dirs[0] != filepath.Join(dir, "skills") || dirs[1] != filepath.Join(dir, ".Lumina", "PROJECT_SKILLS") {
+	projectRoot := cfg.ProjectRoot()
+	if len(dirs) != 2 || dirs[0] != filepath.Join(projectRoot, "skills") || dirs[1] != filepath.Join(projectRoot, ".Lumina", "PROJECT_SKILLS") {
 		t.Fatalf("unexpected project skill dirs: %#v", dirs)
 	}
 }
@@ -402,8 +398,7 @@ func TestSkillLoaderOrderingAndHomeExpansionMatchPython(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = filepath.Join(dir, "project")
+	cfg := config.NewConfigForCWD(filepath.Join(dir, "project"))
 	cfg.UserSkillsDir = "~/.Lumina/skills"
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.BundledSkillsDir = filepath.Join(dir, "missing-bundled")
@@ -640,8 +635,7 @@ func TestSkillFrontmatterEffortCoercionMatchesPython(t *testing.T) {
 	if fm.Effort != true {
 		t.Fatalf("YAML bool effort should pass through like Python bool-is-int behavior, got %#v", fm.Effort)
 	}
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	executor := skills.NewSkillExecutor(skills.NewSkillLoader(cfg), skills.NewPromptProcessor(cfg))
 	var capturedPrompt string
 	var capturedBudget *int
@@ -671,8 +665,7 @@ func TestSkillFrontmatterEffortCoercionMatchesPython(t *testing.T) {
 
 func TestSkillInlineShellSecurityAndApproval(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	content := "Before !`printf hello` after"
 	shellContent := content
@@ -709,8 +702,7 @@ func TestSkillInlineShellSecurityAndApproval(t *testing.T) {
 
 func TestSkillArgumentSubstitutionLongestNamesFirst(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	content := "$foobar|$foo|${foobar}|${foo}|$ARGUMENTS_EXTRA"
 	spec := skills.SkillSpec{
@@ -731,8 +723,7 @@ func TestSkillArgumentSubstitutionLongestNamesFirst(t *testing.T) {
 
 func TestSkillArgumentSubstitutionOnlyCountsActualPythonReplacements(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	content := "$fooBar|$ARGUMENTS[bad]"
 	spec := skills.SkillSpec{
@@ -753,8 +744,7 @@ func TestSkillArgumentSubstitutionOnlyCountsActualPythonReplacements(t *testing.
 
 func TestSkillInlineShellApprovalPreflightAndFailureFormatMatchPython(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	marker := filepath.Join(dir, "marker.txt")
 	content := "!`touch marker.txt` then !`printf denied`"
@@ -806,8 +796,7 @@ func TestSkillInlineShellApprovalPreflightAndFailureFormatMatchPython(t *testing
 
 func TestSkillInlineShellOutputLimitUsesPythonDecodedStrippedBytes(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.ShellMaxOutputBytes = 2
 	processor := skills.NewPromptProcessor(cfg)
 	content := "!`printf ' ok '`"
@@ -836,8 +825,7 @@ func TestSkillInlineShellOutputLimitUsesPythonDecodedStrippedBytes(t *testing.T)
 
 func TestSkillInlineShellSafetyBlocksDangerousCommands(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	processor := skills.NewPromptProcessor(cfg)
 	dangerousContent := "!`rm -rf /tmp/not-actually-run`"
 	spec := skills.SkillSpec{

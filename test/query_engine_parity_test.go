@@ -34,8 +34,7 @@ Read carefully: $ARGUMENTS
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.SkillsEnabled = true
 	engine := agent.NewQueryEngine(&cfg)
 	state := agent.NewAgentState()
@@ -97,8 +96,7 @@ func TestCoreQueryLoopInlineSkillIntegerLikeEffortSetsThinkingBudgetLikePython(t
 	}))
 	defer server.Close()
 
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "claude-test"
@@ -154,8 +152,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.SkillsEnabled = true
 	engine := agent.NewQueryEngine(&cfg)
@@ -232,8 +229,7 @@ Lumina identity.
 	if err := os.WriteFile(filepath.Join(systemDir, "system-prompt.md"), []byte(template), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.LongTermMemoryEnabled = true
 	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
 	cfg.SkillsEnabled = false
@@ -261,7 +257,7 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	defer store.Close()
 	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
 		MemoryType: longmemory.TypeProject,
 		Title:      "Repo Note",
 		Summary:    "Important repo note",
@@ -295,8 +291,7 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	}))
 	defer server.Close()
 
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "claude-test"
@@ -339,7 +334,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	defer store.Close()
 	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
 		MemoryType: longmemory.TypeFeedback,
 		Title:      "initial",
 		Summary:    "Initial preference memory.",
@@ -351,7 +346,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	}
 	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
 		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.ProjectScopeKey(dir),
+		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
 		MemoryType: longmemory.TypeReference,
 		Title:      "followup",
 		Summary:    "Follow-up memory after reading source.txt.",
@@ -392,8 +387,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	}))
 	defer server.Close()
 
-	cfg := isolatedConfig(t)
-	cfg.CWD = dir
+	cfg := isolatedConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "custom-router-model"

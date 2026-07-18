@@ -587,7 +587,7 @@ func jsonUnmarshal(data []byte, target any) error {
 }
 
 func appendLifecycleMigrationLog(path string, updated int, now time.Time) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

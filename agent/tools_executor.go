@@ -450,7 +450,8 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 
 	truncated := result.Content
 	if tool := e.Registry.Get(tc.Name); tool != nil && !result.IsError {
-		if formatted, err := tool.FormatLargeResult(ctx, result.Content, tool.MaxOutputChars(), tcID, e.Config.ProjectRuntimeDir); err == nil {
+		sessionID := fmt.Sprint(e.Context["_session_id"])
+		if formatted, err := tool.FormatLargeResult(ctx, result.Content, tool.MaxOutputChars(), tcID, e.Config.ToolResultsDir(sessionID)); err == nil {
 			truncated = formatted
 		}
 	}

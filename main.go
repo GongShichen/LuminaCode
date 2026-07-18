@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/apppaths"
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
@@ -43,6 +44,15 @@ func runMemoryCLI(args []string) error {
 		return fmt.Errorf("usage: lumina-backend memory <list|search|get|delete|archive|approve|restore|prioritize|deprioritize|supersede|export|import|used|doctor>")
 	}
 	cfg := config.NewConfig()
+	if len(cfg.PathErrors) > 0 {
+		return fmt.Errorf("invalid AppRoot configuration: %s", strings.Join(cfg.PathErrors, "; "))
+	}
+	if err := apppaths.PrepareRuntime(cfg.Paths, "dev"); err != nil {
+		return err
+	}
+	if err := apppaths.EnsureProjectManifest(cfg.ProjectPaths, time.Now()); err != nil {
+		return err
+	}
 	if !cfg.LongTermMemoryEnabled {
 		return fmt.Errorf("long-term memory is disabled")
 	}
@@ -91,7 +101,7 @@ func runMemoryCLI(args []string) error {
 		opts := memoryCLIOptions(*limit, *includeInactive, *includeExpired, *scopeType, *scopeKey, *memoryType, *tag, *createdAfter, *createdBefore)
 		opts.Query = query
 		if len(opts.Scopes) == 0 {
-			opts.Scopes = longmemory.RuntimeScopes(cfg.CWD, "main", "", "")
+			opts.Scopes = longmemory.RuntimeScopesCanonical(cfg.ProjectRoot(), "main", "", "")
 		}
 		opts.MaxCandidates = cfg.MemoryFTSCandidates
 		opts.ContextMaxRunes = cfg.MemoryContextMaxTokens * 4
@@ -315,6 +325,9 @@ func writeJSON(w io.Writer, value any) error {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "layout" {
+		return runLayoutCLI(args[1:])
+	}
 	if len(args) > 0 && args[0] == "daemon" {
 		return backend.RunDaemonCLI(args[1:])
 	}
@@ -354,7 +367,24 @@ func run(args []string) error {
 	}
 	verboseEnabled := *verbose || *verboseShort
 
-	cfg := config.NewConfig()
+	effectiveCWD := ""
+	if *cwd != "" {
+		abs, err := filepath.Abs(*cwd)
+		if err != nil {
+			return err
+		}
+		effectiveCWD = abs
+	}
+	cfg := config.NewConfigForCWD(effectiveCWD)
+	if len(cfg.PathErrors) > 0 {
+		return fmt.Errorf("invalid AppRoot configuration: %s", strings.Join(cfg.PathErrors, "; "))
+	}
+	if err := apppaths.PrepareRuntime(cfg.Paths, "dev"); err != nil {
+		if errors.Is(err, apppaths.ErrMigrationRequired) {
+			return fmt.Errorf("%w; run 'lumina-backend layout migrate --dry-run' then '--apply'", err)
+		}
+		return err
+	}
 	if *model != "" {
 		cfg.APIModel = *model
 		config.PinFields(&cfg, "api_model")
@@ -378,12 +408,8 @@ func run(args []string) error {
 	if *yolo {
 		cfg.Yolo = true
 	}
-	if *cwd != "" {
-		abs, err := filepath.Abs(*cwd)
-		if err != nil {
-			return err
-		}
-		cfg.CWD = abs
+	if err := apppaths.EnsureProjectManifest(cfg.ProjectPaths, time.Now()); err != nil {
+		return err
 	}
 	if *bare {
 		cfg.LongTermMemoryEnabled = false

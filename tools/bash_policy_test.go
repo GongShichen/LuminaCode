@@ -33,6 +33,18 @@ func TestBashToolFailsClosedWithoutSandboxAndAllowsUserYolo(t *testing.T) {
 	}
 }
 
+func TestToolResultsDirUsesInjectedRuntimeForZeroConfig(t *testing.T) {
+	runtimeDir := t.TempDir()
+	got := toolResultsDirFromContext(ExecutionContext{
+		"config":      config.Config{},
+		"runtime_dir": runtimeDir,
+	}, t.TempDir())
+	want := filepath.Join(runtimeDir, "tool-results", "_legacy")
+	if got != want {
+		t.Fatalf("tool results dir=%q want %q", got, want)
+	}
+}
+
 func TestBashBackgroundUsesSandboxArgv(t *testing.T) {
 	tool := NewBashTool()
 	available, _, _ := tool.SandboxStatus()
@@ -60,7 +72,7 @@ func TestBashBackgroundUsesSandboxArgv(t *testing.T) {
 			outputPath = strings.TrimSpace(strings.TrimPrefix(line, "Output file: "))
 		}
 	}
-	if outputPath == "" || !strings.HasPrefix(outputPath, filepath.Join(runtimeDir, "background")) {
+	if outputPath == "" || !strings.HasPrefix(outputPath, filepath.Join(runtimeDir, "tool-results", "_legacy")) {
 		t.Fatalf("unexpected background output path: %q", outputPath)
 	}
 	deadline := time.Now().Add(3 * time.Second)

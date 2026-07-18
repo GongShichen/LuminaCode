@@ -1,118 +1,90 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = $(if ($env:LUMINA_INSTALL_DIR) { $env:LUMINA_INSTALL_DIR } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "LuminaCode\bin" } else { Join-Path $HOME ".local\bin" }),
-    [string]$AppRoot = $(if ($env:LUMINA_APP_ROOT) { $env:LUMINA_APP_ROOT } else { Join-Path $HOME ".lumina" }),
-    [switch]$KeepResources,
+    [string]$AppRoot = "",
+    [switch]$Purge,
     [switch]$RemovePath
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app-paths.ps1")
+$paths = Get-LuminaPaths -AppRoot $AppRoot
+$AppRoot = $paths.Root
 
 function Normalize-PathSegment {
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return ""
-    }
-    try {
-        return [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/')).ToLowerInvariant()
-    } catch {
-        return $Path.TrimEnd([char[]]@('\', '/')).ToLowerInvariant()
-    }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+    try { return [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/')).ToLowerInvariant() }
+    catch { return $Path.TrimEnd([char[]]@('\', '/')).ToLowerInvariant() }
 }
 
 function Remove-UserPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     $target = Normalize-PathSegment $Path
     $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ([string]::IsNullOrWhiteSpace($current)) {
-        return $false
-    }
+    if ([string]::IsNullOrWhiteSpace($current)) { return $false }
     $kept = @()
     $removed = $false
     foreach ($segment in ($current -split ';')) {
-        if ([string]::IsNullOrWhiteSpace($segment)) {
-            continue
-        }
-        if ((Normalize-PathSegment $segment) -eq $target) {
-            $removed = $true
-            continue
-        }
+        if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+        if ((Normalize-PathSegment $segment) -eq $target) { $removed = $true; continue }
         $kept += $segment
     }
-    if ($removed) {
-        [Environment]::SetEnvironmentVariable("Path", ($kept -join ';'), "User")
-    }
+    if ($removed) { [Environment]::SetEnvironmentVariable("Path", ($kept -join ';'), "User") }
     return $removed
 }
 
 function Stop-LuminaBackend {
-    param(
-        [Parameter(Mandatory = $true)][string]$BackendPath,
-        [Parameter(Mandatory = $true)][string]$EndpointPath
-    )
-
+    param([Parameter(Mandatory = $true)][string]$BackendPath, [Parameter(Mandatory = $true)][string[]]$EndpointPath)
     $pids = @()
-    if (Test-Path $EndpointPath) {
+    foreach ($endpointFile in $EndpointPath) {
+        if (-not (Test-Path $endpointFile)) { continue }
         try {
-            $endpoint = Get-Content -Raw -LiteralPath $EndpointPath | ConvertFrom-Json
-            if ($endpoint.pid) {
-                $pids += [int]$endpoint.pid
-            }
-        } catch {
-        }
+            $endpoint = Get-Content -Raw -LiteralPath $endpointFile | ConvertFrom-Json
+            if ($endpoint.pid) { $pids += [int]$endpoint.pid }
+        } catch {}
     }
-
     $target = Normalize-PathSegment $BackendPath
     Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and (Normalize-PathSegment $_.Path) -eq $target
-    } | ForEach-Object {
-        $pids += $_.Id
-    }
-
+        try { $_.Path -and (Normalize-PathSegment $_.Path) -eq $target } catch { $false }
+    } | ForEach-Object { $pids += $_.Id }
     foreach ($pidValue in ($pids | Sort-Object -Unique)) {
-        $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
-        if (-not $process) {
-            continue
-        }
-        try {
-            Stop-Process -Id $pidValue -Force -ErrorAction Stop
+        if (Get-Process -Id $pidValue -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
             Write-Host "Stopped lumina-backend process $pidValue"
-        } catch {
-            Write-Host "Could not stop lumina-backend process ${pidValue}: $($_.Exception.Message)"
         }
     }
 }
 
 $launcher = Join-Path $InstallDir "lumina.cmd"
 $backend = Join-Path $InstallDir "lumina-backend.exe"
-$endpoint = Join-Path $HOME ".lumina\run\backend.json"
+$legacyEndpoint = Join-Path $(if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }) ".lumina\run\backend.json"
+Stop-LuminaBackend -BackendPath $backend -EndpointPath @($paths.Endpoint, $legacyEndpoint)
 
-Stop-LuminaBackend -BackendPath $backend -EndpointPath $endpoint
+$arxivSetup = Join-Path $paths.App "scripts\setup-arxiv-mcp-windows.ps1"
+if (-not (Test-Path $arxivSetup)) { $arxivSetup = Join-Path $PSScriptRoot "setup-arxiv-mcp-windows.ps1" }
+if (Test-Path $arxivSetup) {
+    try { & $arxivSetup -Action uninstall -AppRoot $AppRoot }
+    catch { Write-Warning "Could not remove installer-owned arXiv MCP config: $($_.Exception.Message)" }
+}
 
-foreach ($path in @($launcher, $backend, $endpoint)) {
-    if (Test-Path $path) {
-        Remove-Item -LiteralPath $path -Force
-        Write-Host "Removed $path"
+foreach ($path in @($launcher, $backend)) {
+    if (Test-Path $path) { Remove-Item -LiteralPath $path -Force; Write-Host "Removed $path" }
+}
+
+if ($Purge) {
+    Remove-Item -LiteralPath $AppRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Purged $AppRoot"
+} else {
+    foreach ($layer in @($paths.App, $paths.Cache, $paths.State)) {
+        Remove-Item -LiteralPath $layer -Recurse -Force -ErrorAction SilentlyContinue
     }
-}
-
-$embeddingRoot = Join-Path $AppRoot "models\memory"
-if (Test-Path $embeddingRoot) {
-    Remove-Item -LiteralPath $embeddingRoot -Recurse -Force
-    Write-Host "Removed $embeddingRoot"
-}
-
-if (-not $KeepResources -and (Test-Path $AppRoot)) {
-    Remove-Item -LiteralPath $AppRoot -Recurse -Force
-    Write-Host "Removed $AppRoot"
+    Write-Host "Preserved $($paths.Config), $($paths.Data), and $($paths.Layout)"
 }
 
 if ($RemovePath) {
-    if (Remove-UserPath -Path $InstallDir) {
-        Write-Host "Removed install dir from the user PATH."
-    } else {
-        Write-Host "Install dir was not present in the user PATH."
-    }
+    if (Remove-UserPath -Path $InstallDir) { Write-Host "Removed install dir from the user PATH." }
+    else { Write-Host "Install dir was not present in the user PATH." }
 }
 
 Write-Host "Uninstall complete."

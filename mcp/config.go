@@ -9,9 +9,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 
-	"LuminaCode/config"
+	"LuminaCode/apppaths"
 
 	orderedmap "github.com/pb33f/ordered-map/v2"
 )
@@ -51,19 +52,20 @@ func (c McpServerConfig) Fingerprint() string {
 }
 
 func LoadMCPConfig(projectRoot string) []McpServerConfig {
+	projectRoot = discoverMCPProjectRoot(projectRoot)
 	merged := map[string]map[string]any{}
 	var order []string
 	loadMCPFile(filepath.Join(projectRoot, ".mcp.json"), merged, &order)
-	loadMCPFile(filepath.Join(projectRoot, ".Lumina", "CONFIG", "mcp.json"), merged, &order)
+	loadMCPFile(apppaths.ProjectMCPFile(projectRoot), merged, &order)
 	return buildConfigs(merged, order)
 }
 
 func LoadUserMCPConfig() []McpServerConfig {
-	home, _ := os.UserHomeDir()
 	merged := map[string]map[string]any{}
 	var order []string
-	loadMCPFile(filepath.Join(home, ".lumina", "CONFIG", "mcp.json"), merged, &order)
-	loadMCPFile(filepath.Join(home, ".Lumina", "CONFIG", "mcp.json"), merged, &order)
+	if paths, err := apppaths.ResolveCurrent(); err == nil {
+		loadMCPFile(paths.MCPConfigFile, merged, &order)
+	}
 	return buildConfigs(merged, order)
 }
 
@@ -72,7 +74,16 @@ func LoadProjectMCPConfig(projectRoot string) []McpServerConfig {
 }
 
 func TrustedMCPPath(projectRoot string) string {
-	return filepath.Join(config.ProjectRuntimeDir(projectRoot), "CONFIG", "trusted_mcp.json")
+	projectRoot = discoverMCPProjectRoot(projectRoot)
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return ""
+	}
+	project, err := paths.ForProject(projectRoot)
+	if err != nil {
+		return ""
+	}
+	return project.MCPTrustFile
 }
 
 func LoadTrustedMCP(projectRoot string) map[string]string {
@@ -98,8 +109,20 @@ func LoadTrustedMCP(projectRoot string) map[string]string {
 }
 
 func SaveTrustedMCP(projectRoot string, trusted map[string]string) error {
+	projectRoot = discoverMCPProjectRoot(projectRoot)
 	path := TrustedMCPPath(projectRoot)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if path == "" {
+		return fmt.Errorf("resolve MCP trust path for %s", projectRoot)
+	}
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return err
+	}
+	project, err := paths.ForProject(projectRoot)
+	if err != nil {
+		return err
+	}
+	if err := apppaths.EnsureProjectManifest(project, time.Now()); err != nil {
 		return err
 	}
 	payload := map[string]any{"version": 1, "servers": trusted}
@@ -108,7 +131,15 @@ func SaveTrustedMCP(projectRoot string, trusted map[string]string) error {
 		return err
 	}
 	b = append(b, '\n')
-	return os.WriteFile(path, b, 0o644)
+	return apppaths.WriteFileAtomic(path, b, 0o600)
+}
+
+func discoverMCPProjectRoot(root string) string {
+	discovered, err := apppaths.DiscoverProjectRoot(root, []string{".git", ".mcp.json"})
+	if err != nil {
+		return root
+	}
+	return discovered
 }
 
 func loadMCPFile(path string, merged map[string]map[string]any, order *[]string) {

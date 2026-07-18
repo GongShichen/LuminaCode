@@ -23,7 +23,7 @@ import (
 
 func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	endpointPath := filepath.Join(root, "run", "backend.json")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,7 +79,7 @@ func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 
 func TestBackendShutdownCLIStopsDaemon(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	endpointPath := filepath.Join(root, "run", "backend.json")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,7 +98,7 @@ func TestBackendShutdownCLIStopsDaemon(t *testing.T) {
 
 func TestBackendDaemonSessionsDoNotMixEventsOrTranscript(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,9 +134,10 @@ func TestBackendDaemonSessionsDoNotMixEventsOrTranscript(t *testing.T) {
 
 func TestBackendDaemonCreatesTeamTemplate(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	cfg.TeamDir = filepath.Join(root, "TEAM")
+	cfg.BundledTeamDir = filepath.Join(root, "missing-bundled-teams")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	endpointPath := filepath.Join(root, "run", "backend.json")
@@ -181,7 +182,7 @@ func TestBackendDaemonSameSessionSubmitReturnsBusy(t *testing.T) {
 	}))
 	defer apiServer.Close()
 
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = apiServer.URL
@@ -231,7 +232,7 @@ Read carefully: $ARGUMENTS
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(rawSkill), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(home, ".Lumina", "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -304,7 +305,7 @@ Read carefully: $ARGUMENTS
 
 func TestBackendDaemonSessionExitStopsWhenNoOtherWebSocketClients(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -328,7 +329,7 @@ func TestBackendDaemonSessionExitStopsWhenNoOtherWebSocketClients(t *testing.T) 
 
 func TestBackendDaemonSessionExitKeepsBackendWhenOtherWebSocketClientsRemain(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -357,7 +358,7 @@ func TestBackendDaemonSessionExitKeepsBackendWhenOtherWebSocketClientsRemain(t *
 
 func TestBackendDaemonIdleHeartbeatStopsAfterConsecutiveEmptyChecks(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -379,7 +380,7 @@ func TestBackendDaemonIdleHeartbeatStopsAfterConsecutiveEmptyChecks(t *testing.T
 
 func TestBackendDaemonIdleHeartbeatKeepsAliveWhileClientConnected(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -410,7 +411,7 @@ func TestBackendDaemonIdleHeartbeatKeepsAliveWhileClientConnected(t *testing.T) 
 
 func TestBackendDaemonSessionYoloTogglesCurrentSessionState(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -438,7 +439,7 @@ func TestBackendDaemonSessionYoloTogglesCurrentSessionState(t *testing.T) {
 
 func TestBackendDaemonSessionCreateCanStartInYoloMode(t *testing.T) {
 	root := t.TempDir()
-	cfg := config.NewConfigForCWD(root)
+	cfg := isolatedConfigForCWD(t, root)
 	cfg.SessionDir = filepath.Join(root, "sessions")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

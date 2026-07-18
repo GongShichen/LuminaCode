@@ -1,14 +1,20 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_ROOT="${LUMINA_APP_ROOT:-${HOME}/.lumina}"
-SEARXNG_ROOT="${LUMINA_SEARXNG_ROOT:-${APP_ROOT}/searxng}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/app-paths.sh" ]; then
+  . "$SCRIPT_DIR/app-paths.sh"
+else
+  . "$SCRIPT_DIR/scripts/app-paths.sh"
+fi
+APP_ROOT="$(lumina_resolve_app_root)"
+SEARXNG_ROOT="${LUMINA_SEARXNG_ROOT:-${APP_ROOT}/state/services/searxng}"
 SEARXNG_PORT="${LUMINA_SEARXNG_PORT:-8888}"
 SEARXNG_BASE_URL="${LUMINA_WEB_SEARCH_BASE_URL:-http://127.0.0.1:${SEARXNG_PORT}}"
 SEARXNG_IMAGE="${LUMINA_SEARXNG_IMAGE:-}"
 COMPOSE_FILE="${SEARXNG_ROOT}/compose.yaml"
 SETTINGS_FILE="${SEARXNG_ROOT}/settings.yml"
-DEFAULTS_FILE="${APP_ROOT}/CONFIG/defaults.json"
+DEFAULTS_FILE="${APP_ROOT}/config/settings.json"
 ACTION="${1:-install}"
 
 log() {
@@ -57,6 +63,7 @@ PY
 
 write_settings() {
   mkdir -p "$SEARXNG_ROOT"
+  chmod 0700 "$APP_ROOT/state" "$APP_ROOT/state/services" "$SEARXNG_ROOT" 2>/dev/null || true
   secret="$(random_secret)"
   cat > "$SETTINGS_FILE" <<EOF
 use_default_settings: true
@@ -73,6 +80,7 @@ server:
   limiter: false
   image_proxy: false
 EOF
+  chmod 0600 "$SETTINGS_FILE" 2>/dev/null || true
 }
 
 write_compose() {
@@ -91,6 +99,7 @@ services:
     environment:
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL}/
 EOF
+  chmod 0600 "$COMPOSE_FILE" 2>/dev/null || true
 }
 
 select_image() {
@@ -154,6 +163,7 @@ for key, value in defaults.items():
 with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
+os.chmod(path, 0o600)
 PY
   else
     if [ ! -f "$DEFAULTS_FILE" ]; then
@@ -171,6 +181,7 @@ PY
   "web_fetch_user_agent": "LuminaCode/1.0"
 }
 EOF
+      chmod 0600 "$DEFAULTS_FILE" 2>/dev/null || true
     fi
   fi
 }

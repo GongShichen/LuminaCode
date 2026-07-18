@@ -50,14 +50,17 @@ type BackgroundManager struct {
 }
 
 func NewBackgroundManager(sessionDir string) (*BackgroundManager, error) {
-	resultDir := filepath.Join(sessionDir, "tool-results")
-	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+	return NewBackgroundManagerForResults(filepath.Join(sessionDir, "tool-results"))
+}
+
+func NewBackgroundManagerForResults(resultDir string) (*BackgroundManager, error) {
+	if err := os.MkdirAll(resultDir, 0o700); err != nil {
 		return nil, err
 	}
 	return &BackgroundManager{
 		tasks:      make(map[string]*BackgroundTask),
 		running:    make(map[string]*RunningTask),
-		sessionDir: sessionDir,
+		sessionDir: filepath.Dir(resultDir),
 		resultDir:  resultDir,
 	}, nil
 }
@@ -297,8 +300,8 @@ func (m *BackgroundManager) runTask(
 	if hasTimeout && timeout <= 0 {
 		timeoutSeconds := formatDurationSeconds(timeout)
 		output := fmt.Sprintf("[Command timed out after %ss]\nCommand: %s\n", timeoutSeconds, task.Command)
-		_ = os.WriteFile(task.OutputPath, []byte(output), 0o644)
-		_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o644)
+		_ = os.WriteFile(task.OutputPath, []byte(output), 0o600)
+		_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o600)
 		m.finishTask(task.TaskID, "failed", nil)
 		return
 	}
@@ -307,12 +310,12 @@ func (m *BackgroundManager) runTask(
 		if hasTimeout && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			timeoutSeconds := formatDurationSeconds(timeout)
 			output := fmt.Sprintf("[Command timed out after %ss]\nCommand: %s\n", timeoutSeconds, task.Command)
-			_ = os.WriteFile(task.OutputPath, []byte(output), 0o644)
-			_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o644)
+			_ = os.WriteFile(task.OutputPath, []byte(output), 0o600)
+			_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o600)
 			m.finishTask(task.TaskID, "failed", nil)
 			return
 		}
-		_ = os.WriteFile(task.ErrorPath, []byte("Background task crashed: "+err.Error()), 0o644)
+		_ = os.WriteFile(task.ErrorPath, []byte("Background task crashed: "+err.Error()), 0o600)
 		m.finishTask(task.TaskID, "failed", nil)
 		return
 	}
@@ -321,8 +324,8 @@ func (m *BackgroundManager) runTask(
 		terminateProcessTree(cmd)
 		timeoutSeconds := formatDurationSeconds(timeout)
 		output := fmt.Sprintf("[Command timed out after %ss]\nCommand: %s\n", timeoutSeconds, task.Command)
-		_ = os.WriteFile(task.OutputPath, []byte(output), 0o644)
-		_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o644)
+		_ = os.WriteFile(task.OutputPath, []byte(output), 0o600)
+		_ = os.WriteFile(task.ErrorPath, []byte("Timeout after "+timeoutSeconds+"s"), 0o600)
 		m.finishTask(task.TaskID, "failed", nil)
 		return
 	}
@@ -341,7 +344,7 @@ func (m *BackgroundManager) runTask(
 		output += "\n[stderr]\n" + stderr.String()
 	}
 	output = FormatExitCode(task.Command, exitCode) + "\n\n" + output
-	_ = os.WriteFile(task.OutputPath, []byte(output), 0o644)
+	_ = os.WriteFile(task.OutputPath, []byte(output), 0o600)
 
 	m.finishTask(task.TaskID, "completed", &exitCode)
 }

@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = $(if ($env:LUMINA_INSTALL_DIR) { $env:LUMINA_INSTALL_DIR } elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "LuminaCode\bin" } else { Join-Path $HOME ".local\bin" }),
-    [string]$AppRoot = $(if ($env:LUMINA_APP_ROOT) { $env:LUMINA_APP_ROOT } else { Join-Path $HOME ".lumina" })
+    [string]$AppRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app-paths.ps1")
+$paths = Get-LuminaPaths -AppRoot $AppRoot
+$AppRoot = $paths.Root
 
 function Command-Version {
     param([Parameter(Mandatory = $true)][string]$Command)
@@ -58,16 +61,16 @@ function Status-Line {
 
 $launcher = Join-Path $InstallDir "lumina.cmd"
 $backend = Join-Path $InstallDir "lumina-backend.exe"
-$frontend = Join-Path $AppRoot "frontend\dist\index.js"
-$systemPrompt = Join-Path $AppRoot "SYSTEM\system-prompt.md"
-$skills = Join-Path $AppRoot "SKILLS"
-$defaults = Join-Path $AppRoot "CONFIG\defaults.json"
-$mcpConfig = Join-Path $AppRoot "CONFIG\mcp.json"
-$arxivPython = Join-Path $AppRoot "mcp\arxiv-mcp\.venv\Scripts\python.exe"
-$embeddingModel = Join-Path $AppRoot "models\memory\multilingual-e5-small\model.onnx"
-$embeddingTokenizer = Join-Path $AppRoot "models\memory\multilingual-e5-small\tokenizer.json"
-$embeddingRuntime = Join-Path $AppRoot "models\memory\multilingual-e5-small\runtime\onnxruntime.dll"
-$endpoint = Join-Path $HOME ".lumina\run\backend.json"
+$frontend = Join-Path $paths.Frontend "dist\index.js"
+$systemPrompt = Join-Path $paths.Resources "system\system-prompt.md"
+$skills = Join-Path $paths.Resources "skills"
+$defaults = $paths.Settings
+$mcpConfig = $paths.McpConfig
+$arxivPython = Join-Path $paths.Extensions "arxiv-mcp\.venv\Scripts\python.exe"
+$embeddingModel = Join-Path $paths.MemoryModel "model.onnx"
+$embeddingTokenizer = Join-Path $paths.MemoryModel "tokenizer.json"
+$embeddingRuntime = Join-Path $paths.MemoryModel "runtime\onnxruntime.dll"
+$endpoint = $paths.Endpoint
 $command = Get-Command lumina -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
@@ -116,3 +119,11 @@ if (Test-Path $backend) {
     }
 }
 Status-Line "Endpoint" ($(if (Test-Path $endpoint) { $endpoint } else { "not running" }))
+if (Test-Path $backend) {
+    try {
+        $env:LUMINA_APP_ROOT = $AppRoot
+        & $backend layout doctor --json
+    } catch {
+        Status-Line "Layout doctor" "failed: $($_.Exception.Message)"
+    }
+}

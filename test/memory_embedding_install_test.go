@@ -33,19 +33,19 @@ func TestMemoryEmbeddingInstallUsesModelScope(t *testing.T) {
 func TestMakeInstallAndUninstallManageMemoryEmbedding(t *testing.T) {
 	repoRoot := repositoryRoot(t)
 	makefile := readRepositoryFile(t, repoRoot, "Makefile")
-	installCall := `./scripts/setup-memory-embedding.sh install`
-	uninstallCall := `./scripts/setup-memory-embedding.sh uninstall`
+	installCall := `setup-memory-embedding.sh" install`
 	if !strings.Contains(makefile, installCall) {
 		t.Fatalf("make install does not invoke %q", installCall)
 	}
-	if !strings.Contains(makefile, uninstallCall) {
-		t.Fatalf("make uninstall does not invoke %q", uninstallCall)
+	if !strings.Contains(makefile, `"$(APP_ROOT)/cache"`) {
+		t.Fatal("make uninstall does not remove the rebuildable v2 cache layer")
 	}
 	if !strings.Contains(makefile, "CGO_ENABLED=$(CGO_ENABLED) $(GO) build") {
 		t.Fatal("make build can silently compile a backend without local embedding support")
 	}
 	windowsInstaller := readRepositoryFile(t, repoRoot, "scripts/install-windows.ps1")
-	if !strings.Contains(windowsInstaller, `$env:CGO_ENABLED = "1"`) || !strings.Contains(windowsInstaller, "A C compiler is required") {
+	if !strings.Contains(windowsInstaller, `$env:CGO_ENABLED = "1"`) ||
+		!strings.Contains(windowsInstaller, "Assert-Command $cCompilerName") {
 		t.Fatal("Windows installer does not enforce a local-embedding-capable backend build")
 	}
 
@@ -53,7 +53,7 @@ func TestMakeInstallAndUninstallManageMemoryEmbedding(t *testing.T) {
 		t.Skip("the Unix uninstall action is covered on Unix platforms")
 	}
 	appRoot := t.TempDir()
-	modelDir := filepath.Join(appRoot, "models", "memory", "multilingual-e5-small")
+	modelDir := filepath.Join(appRoot, "cache", "models", "memory", "multilingual-e5-small")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

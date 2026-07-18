@@ -103,7 +103,7 @@ func TestSessionPinUpdatesMetaAndList(t *testing.T) {
 func TestMaintenanceConfigDefaultsRejectInvalidValues(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cfgDir := filepath.Join(home, ".lumina", "CONFIG")
+	cfgDir := filepath.Join(home, ".lumina", "config")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestMaintenanceConfigDefaultsRejectInvalidValues(t *testing.T) {
 		"session_archive_before_delete": false,
 	}
 	data, _ := json.Marshal(raw)
-	if err := os.WriteFile(filepath.Join(cfgDir, "defaults.json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.NewConfigForCWD(t.TempDir())

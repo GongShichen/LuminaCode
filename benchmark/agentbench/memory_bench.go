@@ -489,8 +489,8 @@ func runLongMemEvalCase(ctx context.Context, c longMemEvalCase, options RunnerOp
 	if result.ErrorType != "" {
 		return result
 	}
-	storePath := filepath.Join(caseDir, ".lumina", "memory", "lumina-memory.sqlite")
-	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.ProjectScopeKey(caseDir)}
+	storePath := filepath.Join(caseDir, "data", "memory", "lumina-memory.sqlite")
+	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.CanonicalProjectScopeKey(caseDir)}
 	cfg := memoryCaseConfig(options.Config, caseDir, storePath)
 	err := ingestLongMemEvalHistory(caseCtx, storePath, c, cfg)
 	if err != nil {
@@ -520,7 +520,7 @@ func runMemoryArenaCase(ctx context.Context, domain string, c memoryArenaCase, o
 	if result.ErrorType != "" {
 		return result
 	}
-	storePath := filepath.Join(caseDir, ".lumina", "memory", "lumina-memory.sqlite")
+	storePath := filepath.Join(caseDir, "data", "memory", "lumina-memory.sqlite")
 	cfg := memoryCaseConfig(options.Config, caseDir, storePath)
 	if err := ingestMemoryArenaBackground(caseCtx, cfg, domain, c); err != nil {
 		return failMemoryCase(result, artifactDir, start, timeline, "memory_seed_failed: "+err.Error())
@@ -700,7 +700,7 @@ func prepareMemoryCase(ctx context.Context, spec CaseSpec, options RunnerOptions
 }
 
 func resetMemoryCaseDirectory(caseDir string, preserveMemory bool) error {
-	memoryDir := filepath.Join(caseDir, ".lumina", "memory")
+	memoryDir := filepath.Join(caseDir, "data", "memory")
 	storePath := filepath.Join(memoryDir, "lumina-memory.sqlite")
 	if !preserveMemory {
 		return os.RemoveAll(caseDir)
@@ -1245,7 +1245,7 @@ func memoryCaseConfig(base config.Config, cwd, storePath string) config.Config {
 	cfg.LongTermMemoryStore = storePath
 	cfg.SessionMemoryEnabled = false
 	cfg.MemoryBackgroundExtractionEnabled = false
-	cfg.ProjectRuntimeDir = filepath.Join(cwd, ".lumina", "project-runtime")
+	cfg.ProjectRuntimeDir = filepath.Join(cwd, "state", "projects", "benchmark")
 	config.PinFields(&cfg, "harness_mode", "long_term_memory_enabled", "long_term_memory_store", "memory_background_extraction_enabled", "session_memory_enabled", "memory_embedding_enabled", "memory_graph_max_hops", "project_runtime_dir")
 	return cfg
 }
@@ -1573,7 +1573,7 @@ func extractMemoryArenaSubtask(ctx context.Context, cfg config.Config, sessionID
 		return err
 	}
 	defer store.Close()
-	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.ProjectScopeKey(cfg.CWD)}
+	scope := longmemory.Scope{Type: longmemory.ScopeProject, Key: longmemory.CanonicalProjectScopeKey(cfg.ProjectRoot())}
 	memoryID := longmemory.StableID(scope.Type, scope.Key, "session-index", sessionID)
 	if _, err := store.Get(ctx, memoryID); err != nil {
 		return fmt.Errorf("verify persisted subtask Session %s: %w", sessionID, err)

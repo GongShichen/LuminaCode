@@ -103,7 +103,10 @@ func Cleanup(cfg config.Config, opts Options) (Report, error) {
 	if strings.TrimSpace(sessionDir) == "" {
 		sessionDir = config.NewConfigForCWD(cfg.CWD).SessionDir
 	}
-	archiveDir := ArchiveDir(sessionDir)
+	archiveDir := strings.TrimSpace(cfg.SessionArchiveDir)
+	if archiveDir == "" {
+		archiveDir = ArchiveDir(sessionDir)
+	}
 	report := Report{
 		SessionDir:  sessionDir,
 		ArchiveDir:  archiveDir,
@@ -121,6 +124,31 @@ func Cleanup(cfg config.Config, opts Options) (Report, error) {
 		report.TotalBytes += session.SizeBytes
 	}
 	report.ArchiveSessions = scanArchives(archiveDir)
+	knownSessions := make(map[string]struct{}, len(report.Sessions)+len(report.ArchiveSessions))
+	for _, session := range report.Sessions {
+		knownSessions[session.SessionID] = struct{}{}
+	}
+	for _, session := range report.ArchiveSessions {
+		knownSessions[session.SessionID] = struct{}{}
+	}
+	toolResultsRoot := cfg.ToolResultsRoot()
+	if entries, readErr := os.ReadDir(toolResultsRoot); readErr == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(toolResultsRoot, entry.Name())
+			size, _, _ := scanDirStats(path)
+			if entry.Name() == "_legacy" {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("unowned legacy tool results require explicit review: %s (%d bytes)", path, size))
+				continue
+			}
+			if _, ok := knownSessions[entry.Name()]; !ok {
+				report.Actions = append(report.Actions, Action{Type: "tool-results", SessionID: entry.Name(), Path: path,
+					Reason: "owning session no longer exists", Bytes: size, WouldDelete: true})
+			}
+		}
+	}
 	for _, action := range orphanActions {
 		report.Actions = append(report.Actions, action)
 	}
@@ -129,13 +157,34 @@ func Cleanup(cfg config.Config, opts Options) (Report, error) {
 		report.Warnings = append(report.Warnings, "session maintenance is disabled")
 		return report, nil
 	}
-	report.Actions = append(report.Actions, planSessionActions(cfg, sessions, now)...)
+	sessionActions := planSessionActions(cfg, sessions, archiveDir, now)
+	report.Actions = append(report.Actions, sessionActions...)
+	for _, action := range sessionActions {
+		toolResultsDir := cfg.ToolResultsDir(action.SessionID)
+		if info, err := os.Stat(toolResultsDir); err == nil && info.IsDir() {
+			size, _, _ := scanDirStats(toolResultsDir)
+			report.Actions = append(report.Actions, Action{
+				Type: "tool-results", SessionID: action.SessionID, Path: toolResultsDir,
+				Reason: "owning session is scheduled for deletion", Bytes: size, WouldDelete: true,
+			})
+		}
+	}
 	if !opts.Enforce {
 		return report, nil
 	}
 	for i := range report.Actions {
 		action := &report.Actions[i]
 		if action.Type == "orphan" {
+			if err := os.RemoveAll(action.Path); err != nil {
+				action.Error = err.Error()
+				report.Warnings = append(report.Warnings, fmt.Sprintf("remove %s: %v", action.Path, err))
+				continue
+			}
+			action.Deleted = true
+			report.FreedBytes += action.Bytes
+			continue
+		}
+		if action.Type == "tool-results" {
 			if err := os.RemoveAll(action.Path); err != nil {
 				action.Error = err.Error()
 				report.Warnings = append(report.Warnings, fmt.Sprintf("remove %s: %v", action.Path, err))
@@ -175,6 +224,9 @@ func ArchiveDir(sessionDir string) string {
 	parent := filepath.Dir(filepath.Clean(sessionDir))
 	if parent == "." || parent == "" {
 		parent = filepath.Dir(sessionDir)
+	}
+	if filepath.Base(filepath.Clean(sessionDir)) == "active" {
+		return filepath.Join(parent, "archive")
 	}
 	return filepath.Join(parent, "session-archive")
 }
@@ -240,7 +292,7 @@ func scanSessionDir(sessionDir string, active map[string]struct{}, now time.Time
 	return sessions, orphans, nil
 }
 
-func planSessionActions(cfg config.Config, sessions []SessionInfo, now time.Time) []Action {
+func planSessionActions(cfg config.Config, sessions []SessionInfo, archiveDir string, now time.Time) []Action {
 	var actions []Action
 	total := int64(0)
 	for _, session := range sessions {
@@ -265,7 +317,7 @@ func planSessionActions(cfg config.Config, sessions []SessionInfo, now time.Time
 			Type:         "session",
 			SessionID:    session.SessionID,
 			Path:         session.Path,
-			ArchivePath:  filepath.Join(ArchiveDir(cfg.SessionDir), session.SessionID),
+			ArchivePath:  filepath.Join(archiveDir, session.SessionID),
 			Reason:       reason,
 			Bytes:        session.SizeBytes,
 			WouldArchive: cfg.SessionArchiveBeforeDelete,
@@ -431,7 +483,7 @@ func archiveSession(sessionDir, archiveDir, sessionID string) error {
 		return err
 	}
 	target := filepath.Join(archiveDir, sessionID)
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	if err := os.MkdirAll(target, 0o700); err != nil {
 		return err
 	}
 	meta := readSessionMeta(filepath.Join(source, "meta.json"))
@@ -441,7 +493,7 @@ func archiveSession(sessionDir, archiveDir, sessionID string) error {
 	commits := collectCommitList(source)
 	_ = writeJSON(filepath.Join(target, "session-memory-commits.json"), commits)
 	summary := renderArchiveSummary(sessionID, meta, artifacts, commits)
-	return os.WriteFile(filepath.Join(target, "summary.md"), []byte(summary), 0o644)
+	return os.WriteFile(filepath.Join(target, "summary.md"), []byte(summary), 0o600)
 }
 
 func collectArtifactIndexes(sessionRoot string) []map[string]any {
@@ -512,14 +564,14 @@ func renderArchiveSummary(sessionID string, meta sessionMeta, artifacts []map[st
 }
 
 func writeJSON(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func clamp(text string, limit int) string {

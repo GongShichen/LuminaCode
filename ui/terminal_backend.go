@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"LuminaCode/agent"
+	"LuminaCode/apppaths"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
 	"LuminaCode/skills"
@@ -151,11 +152,18 @@ func (b *TerminalRendererBackend) RenderWelcome(sessionID string, skillRegistry 
 }
 
 func luminaHistoryFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(".Lumina", "history")
+	paths, err := apppaths.ResolveCurrent()
+	if err != nil {
+		return filepath.Join("state", "ui", "history")
 	}
-	return filepath.Join(home, ".Lumina", "history")
+	dir := filepath.Join(paths.StateDir, "ui")
+	_ = os.MkdirAll(dir, 0o700)
+	history := filepath.Join(dir, "history")
+	if file, openErr := os.OpenFile(history, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); openErr == nil {
+		_ = file.Close()
+		_ = os.Chmod(history, 0o600)
+	}
+	return history
 }
 
 func (b *TerminalRendererBackend) GetInput(state any) (string, bool) {

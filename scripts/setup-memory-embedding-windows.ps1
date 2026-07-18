@@ -2,12 +2,15 @@
 param(
     [ValidateSet("install", "status", "uninstall")]
     [string]$Action = "install",
-    [string]$AppRoot = $(if ($env:LUMINA_APP_ROOT) { $env:LUMINA_APP_ROOT } else { Join-Path $HOME ".lumina" })
+    [string]$AppRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "app-paths.ps1")
+$paths = Get-LuminaPaths -AppRoot $AppRoot
+$AppRoot = $paths.Root
 $modelName = "multilingual-e5-small"
-$modelDir = Join-Path $AppRoot "models\memory\$modelName"
+$modelDir = $paths.MemoryModel
 $modelUrl = "https://modelscope.cn/models/AI-ModelScope/multilingual-e5-small/resolve/master/onnx/model.onnx"
 $tokenizerUrl = "https://modelscope.cn/models/AI-ModelScope/multilingual-e5-small/resolve/master/onnx/tokenizer.json"
 $modelHash = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"

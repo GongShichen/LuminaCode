@@ -2,6 +2,7 @@ package team
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/apppaths"
 	"LuminaCode/config"
 	"LuminaCode/security"
 	coretools "LuminaCode/tools"
@@ -222,7 +224,14 @@ type TeamTask struct {
 
 func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit PushFunc, ask PermissionFunc) *Session {
 	id := "team-" + uuid.NewString()
-	root := filepath.Join(cfg.SessionDir, parentSessionID, "teams", id)
+	root := ""
+	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
+		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
+	if useProjectData {
+		root = filepath.Join(cfg.ProjectPaths.TeamsDir, spec.Name, id)
+	} else {
+		root = filepath.Join(cfg.SessionDir, parentSessionID, "teams", id)
+	}
 	session := &Session{
 		ID:              id,
 		ParentSessionID: parentSessionID,
@@ -260,7 +269,7 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	cfg.WebSearchCacheScope = s.ID
 	cfg.SystemPromptPath = s.materializeAgentSystemPrompt(spec)
 	cfg.UserSkillsDir = spec.SkillsDir
-	cfg.SkillsDir = ".Lumina/__team_no_project_skills__"
+	cfg.SkillsDir = filepath.Join(apppaths.ProjectLocalDirName, "__team_no_project_skills__")
 	cfg.BundledSkillsDir = filepath.Join(spec.RootDir, "__no_bundled_skills__")
 	cfg.IsolatedSkillsOnly = true
 	if spec.Model != "" && spec.Model != "inherit" {
@@ -328,10 +337,10 @@ func (s *Session) materializeAgentSystemPrompt(spec TeamAgentSpec) string {
 	}
 	text := strings.TrimRight(body.String(), "\n") + "\n"
 	path := filepath.Join(s.rootDir, "prompts", spec.Name+".system.md")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return spec.SystemPromptPath
 	}
-	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+	if err := apppaths.WriteFileAtomic(path, []byte(text), 0o600); err != nil {
 		return spec.SystemPromptPath
 	}
 	return path
@@ -1221,7 +1230,11 @@ func (s *Session) teamRuntimeDir() string {
 	if s == nil {
 		return ""
 	}
-	return filepath.Join(s.Config.ProjectRuntimeDir, "teams", s.Spec.Name, s.ID)
+	root := s.Config.ProjectPaths.TeamsDir
+	if root == "" {
+		root = filepath.Join(s.Config.ProjectRuntimeDir, "teams")
+	}
+	return filepath.Join(root, s.Spec.Name, s.ID)
 }
 
 func (s *Session) matchTaskPolicies(targets []string, taskType string, beforeContract bool) []TeamTaskPolicySpec {
@@ -1376,7 +1389,7 @@ func snapshotWorkspaceFiles(root string) map[string]workspaceFileStamp {
 		name := d.Name()
 		if d.IsDir() {
 			switch name {
-			case ".git", ".lumina", ".Lumina", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build":
+			case ".git", apppaths.ProjectLocalDirNameLower, apppaths.ProjectLocalDirName, "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build":
 				if path != root {
 					return filepath.SkipDir
 				}
@@ -3377,8 +3390,8 @@ func (s *Session) extractArtifacts(owner, taskType, result string, expected []st
 	name := firstNonEmpty(firstString(expected), taskType, "artifact") + "-" + owner
 	id := "art-" + uuid.NewString()[:8]
 	path := filepath.Join(s.rootDir, "artifacts", id+".md")
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	_ = os.WriteFile(path, []byte(result), 0o644)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = apppaths.WriteFileAtomic(path, []byte(result), 0o600)
 	artifact := s.recordArtifact(owner, name, firstLine(result), path)
 	refs = append(refs, artifact.Name)
 	s.persist()
@@ -3545,7 +3558,7 @@ func (s *Session) persist() {
 	if strings.TrimSpace(s.rootDir) == "" {
 		return
 	}
-	_ = os.MkdirAll(s.rootDir, 0o755)
+	_ = os.MkdirAll(s.rootDir, 0o700)
 	s.trimRuntimeLogs()
 	snapshot := s.Snapshot()
 	s.mu.Lock()
@@ -3569,7 +3582,7 @@ func (s *Session) persist() {
 	writeJSON(filepath.Join(s.rootDir, "artifacts", "index.json"), artifacts)
 	for id, runtime := range agents {
 		dir := filepath.Join(s.rootDir, "agents", id)
-		_ = os.MkdirAll(dir, 0o755)
+		_ = os.MkdirAll(dir, 0o700)
 		state := persistableAgentState(runtime.State)
 		writeJSON(filepath.Join(dir, "state.json"), state)
 		writeJSONL(filepath.Join(dir, "transcript.jsonl"), state.Messages)
@@ -3646,10 +3659,10 @@ func appendTextFile(path, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
@@ -3853,13 +3866,14 @@ func writeJSON(path string, value any) {
 			fmt.Fprintf(os.Stderr, "lumina team persist: failed to write %s: %v\n", path, recovered)
 		}
 	}()
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lumina team persist: failed to marshal %s: %v\n", path, err)
 		return
 	}
-	_ = os.WriteFile(path, append(data, '\n'), 0o644)
+	if err := apppaths.WriteFileAtomic(path, append(data, '\n'), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "lumina team persist: failed to write %s: %v\n", path, err)
+	}
 }
 
 func writeJSONL[T any](path string, values []T) {
@@ -3868,21 +3882,17 @@ func writeJSONL[T any](path string, values []T) {
 			fmt.Fprintf(os.Stderr, "lumina team persist: failed to write %s: %v\n", path, recovered)
 		}
 	}()
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	f, err := os.Create(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	enc := json.NewEncoder(w)
+	var data bytes.Buffer
+	enc := json.NewEncoder(&data)
 	for _, value := range values {
 		if err := enc.Encode(value); err != nil {
 			fmt.Fprintf(os.Stderr, "lumina team persist: failed to encode %s: %v\n", path, err)
 			return
 		}
 	}
-	_ = w.Flush()
+	if err := apppaths.WriteFileAtomic(path, data.Bytes(), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "lumina team persist: failed to write %s: %v\n", path, err)
+	}
 }
 
 func readText(path string) string {

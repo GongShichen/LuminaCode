@@ -165,37 +165,46 @@ func TestStructuredFallbackAcceptsStrictJSONWhenFallbackCannotCallTools(t *testi
 	}
 }
 
-func TestDefaultsFilesCoverAllSupportedConfigKeys(t *testing.T) {
-	want := config.DefaultJSONKeys()
-	for _, name := range []string{"defaults.json", "defaults.json.example"} {
-		path := filepath.Join("..", ".Lumina", "CONFIG", name)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+func TestDefaultsTemplateCoversSupportedNonPathConfigKeys(t *testing.T) {
+	derivedPaths := map[string]bool{
+		"session_dir": true, "session_archive_dir": true, "long_term_memory_store": true,
+		"memory_embedding_model_dir": true, "skills_dir": true, "user_skills_dir": true,
+		"bundled_skills_dir": true, "team_dir": true, "system_prompt_path": true,
+		"memory_extraction_prompt_path": true, "worktree_dir": true,
+	}
+	var want []string
+	for _, key := range config.DefaultJSONKeys() {
+		if !derivedPaths[key] {
+			want = append(want, key)
 		}
-		var values map[string]any
-		if err := json.Unmarshal(data, &values); err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		got := make([]string, 0, len(values))
-		for key := range values {
-			got = append(got, key)
-		}
-		sort.Strings(got)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s is out of sync with config fields\nwant: %v\n got: %v", path, want, got)
-		}
+	}
+	path := filepath.Join("..", ".Lumina", "CONFIG", "defaults.json.example")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	got := make([]string, 0, len(values))
+	for key := range values {
+		got = append(got, key)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s is out of sync with non-path config fields\nwant: %v\n got: %v", path, want, got)
 	}
 }
 
 func TestFallbackConfigLoadsAndReloadsFromUserDefaults(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	configDir := filepath.Join(home, ".lumina", "CONFIG")
+	configDir := filepath.Join(home, ".lumina", "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(configDir, "defaults.json")
+	path := filepath.Join(configDir, "settings.json")
 	write := func(model string, enabled bool) {
 		t.Helper()
 		payload := map[string]any{

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"LuminaCode/config"
 	"LuminaCode/mcp"
 
 	jsonschemavalidator "github.com/santhosh-tekuri/jsonschema/v6"
@@ -269,6 +270,9 @@ func sanitizeMCPPart(value string) string {
 }
 
 func trustedMCPConfigs(projectRoot string, execCtx ExecutionContext) []mcp.McpServerConfig {
+	if cfg, ok := execCtx["config"].(config.Config); ok && strings.TrimSpace(cfg.ProjectPaths.CanonicalRoot) != "" {
+		projectRoot = cfg.ProjectPaths.CanonicalRoot
+	}
 	configs := append([]mcp.McpServerConfig{}, mcp.LoadUserMCPConfig()...)
 	projectConfigs := mcp.LoadProjectMCPConfig(projectRoot)
 	if len(projectConfigs) == 0 {

@@ -301,8 +301,7 @@ func TestCoreQueryLoopTruncatedToolUseExecutesBeforeNextModelTurnLikePython(t *t
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "claude-sonnet-4"
@@ -592,8 +591,7 @@ func TestCheckPermissionChainValidatesBeforeCommandRule(t *testing.T) {
 func TestPermissionResolverUsesBashClassifierForSensitiveReads(t *testing.T) {
 	dir := t.TempDir()
 	registry := coretools.NewToolRegistry(coretools.NewBashTool())
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	state := agent.NewAgentState()
 	executor := agent.NewStreamingToolExecutor(registry, cfg, &state, coretools.ExecutionContext{"cwd": dir})
 	call := coretools.ToolCall{
@@ -1185,8 +1183,7 @@ func TestVisibleToolResultIDsMatchesPython(t *testing.T) {
 
 func TestQueryLoopStripsLegacyMemoryIndexContextBeforeRequest(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.LongTermMemoryEnabled = true
 	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
 	cfg.APIKey = ""
@@ -1244,8 +1241,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	}))
 	defer server.Close()
 
-	cfg := config.NewConfig()
-	cfg.CWD = dir
+	cfg := config.NewConfigForCWD(dir)
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.SkillsEnabled = true
 	cfg.APIType = "openai_compatible"

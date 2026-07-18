@@ -2,9 +2,11 @@
 set -eu
 
 ACTION="${1:-install}"
-APP_ROOT="${LUMINA_APP_ROOT:-${APP_ROOT:-$HOME/.lumina}}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+. "$SCRIPT_DIR/app-paths.sh"
+APP_ROOT="$(lumina_resolve_app_root "${LUMINA_APP_ROOT:-${APP_ROOT:-}}")"
 MODEL_NAME="multilingual-e5-small"
-MODEL_DIR="$APP_ROOT/models/memory/$MODEL_NAME"
+MODEL_DIR="$APP_ROOT/cache/models/memory/$MODEL_NAME"
 MODELSCOPE_BASE="https://modelscope.cn/models/AI-ModelScope/multilingual-e5-small/resolve/master"
 MODEL_URL="$MODELSCOPE_BASE/onnx/model.onnx"
 TOKENIZER_URL="$MODELSCOPE_BASE/onnx/tokenizer.json"
@@ -115,6 +117,7 @@ install_embedding() {
         exit 1
     }
     mkdir -p "$MODEL_DIR"
+    chmod 0700 "$APP_ROOT/cache" "$APP_ROOT/cache/models" "$APP_ROOT/cache/models/memory" "$MODEL_DIR" 2>/dev/null || true
     download_verified "$MODEL_URL" "$MODEL_DIR/model.onnx" "$MODEL_SHA256"
     download_verified "$TOKENIZER_URL" "$MODEL_DIR/tokenizer.json" "$TOKENIZER_SHA256"
     install_runtime
