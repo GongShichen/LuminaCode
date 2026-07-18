@@ -101,7 +101,7 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	if cfg.BundledSkillsDir != filepath.Join(dir, ".Lumina", "SKILLS") {
 		t.Fatalf("bundled skill path was not resolved: %s", cfg.BundledSkillsDir)
 	}
-	if cfg.WorktreeDir != ".Lumina/worktrees" {
+	if cfg.WorktreeDir != filepath.Join(".Lumina", "worktrees") {
 		t.Fatalf("worktree dir should stay relative like Python config, got %s", cfg.WorktreeDir)
 	}
 	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
