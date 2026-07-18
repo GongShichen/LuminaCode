@@ -1039,7 +1039,7 @@ func acquireMigrationLock(paths AppPaths) (func(), error) {
 	if err := os.MkdirAll(paths.Root, 0o700); err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(paths.Root, 0o700)
+	_ = chmodPath(paths.Root, 0o700)
 	lockPath := filepath.Join(paths.Root, ".layout-migration.lock")
 	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {

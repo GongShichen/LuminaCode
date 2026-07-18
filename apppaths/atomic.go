@@ -16,7 +16,7 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(mode); err != nil {
+	if err := chmodOpenFile(tmp, mode); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -34,5 +34,5 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := replaceFile(tmpPath, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
-	return os.Chmod(path, mode)
+	return chmodPath(path, mode)
 }

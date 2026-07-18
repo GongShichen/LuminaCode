@@ -115,14 +115,14 @@ func EnsureBaseDirs(paths AppPaths) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
-		_ = os.Chmod(dir, 0o700)
+		_ = chmodPath(dir, 0o700)
 	}
 	return nil
 }
 
 func EnsurePrivatePermissions(paths AppPaths) error {
 	if privatePathInsideRoot(paths.Root, paths.Root) {
-		if err := os.Chmod(paths.Root, 0o700); err != nil && !os.IsNotExist(err) {
+		if err := chmodPath(paths.Root, 0o700); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -169,7 +169,7 @@ func chmodExistingDirectories(root string, mode os.FileMode) error {
 			return nil
 		}
 		if entry.IsDir() {
-			return os.Chmod(path, mode)
+			return chmodPath(path, mode)
 		}
 		return nil
 	})
@@ -197,7 +197,7 @@ func chmodExistingFiles(root string, mode os.FileMode) error {
 			return nil
 		}
 		if entry.Type().IsRegular() {
-			return os.Chmod(path, mode)
+			return chmodPath(path, mode)
 		}
 		return nil
 	})
@@ -212,7 +212,7 @@ func chmodExistingFile(path string, mode os.FileMode) error {
 		return err
 	}
 	if info.Mode().IsRegular() {
-		return os.Chmod(path, mode)
+		return chmodPath(path, mode)
 	}
 	return nil
 }
