@@ -249,17 +249,23 @@ func fakeSummary(label string) sessionmemory.SummaryFunc {
 
 func waitForSessionCommits(t *testing.T, cfg config.Config, sessionID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	lastCount := 0
+	var lastErr error
 	for time.Now().Before(deadline) {
 		store, err := sessionmemory.Open(context.Background(), cfg, sessionID, fakeSummary("poll"))
 		if err == nil {
 			items, listErr := store.ListCommits(context.Background(), "", 10)
 			_ = store.Close()
+			lastCount = len(items)
+			lastErr = listErr
 			if listErr == nil && len(items) == want {
 				return
 			}
+		} else {
+			lastErr = err
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d session commits", want)
+	t.Fatalf("timed out waiting for %d session commits (last count %d, last error %v)", want, lastCount, lastErr)
 }

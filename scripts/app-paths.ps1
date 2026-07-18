@@ -92,7 +92,7 @@ function Set-LuminaPrivateAcl {
         if (-not (Test-Path -LiteralPath $item)) {
             continue
         }
-        & icacls.exe $item /inheritance:r /grant:r "${identity}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T /C | Out-Null
+        & icacls.exe $item /inheritance:r /grant:r "${identity}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to restrict ACL for $item"
         }
