@@ -198,6 +198,7 @@ type Session struct {
 	runCtx context.Context
 
 	workspaceMu  sync.Mutex
+	persistMu    sync.Mutex
 	permissionMu sync.Mutex
 	permissions  map[string]chan string
 }
@@ -912,12 +913,6 @@ func (s *Session) finishA2ATask(taskID, target, status, result, errText string) 
 		delete(s.agentActiveA2A, target)
 	}
 	s.mu.Unlock()
-	if notify != nil {
-		select {
-		case notify <- task:
-		default:
-		}
-	}
 	s.persist()
 	if previousStatus == "pending" {
 		content := fmt.Sprintf("A2A task %s for %s is now %s.", taskID, target, status)
@@ -935,6 +930,12 @@ func (s *Session) finishA2ATask(taskID, target, status, result, errText string) 
 			Content:   content,
 			TaskID:    taskID,
 		})
+	}
+	if notify != nil {
+		select {
+		case notify <- task:
+		default:
+		}
 	}
 }
 
@@ -3558,6 +3559,8 @@ func (s *Session) persist() {
 	if strings.TrimSpace(s.rootDir) == "" {
 		return
 	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	_ = os.MkdirAll(s.rootDir, 0o700)
 	s.trimRuntimeLogs()
 	snapshot := s.Snapshot()

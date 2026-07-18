@@ -101,9 +101,8 @@ func TestSessionPinUpdatesMetaAndList(t *testing.T) {
 }
 
 func TestMaintenanceConfigDefaultsRejectInvalidValues(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	cfgDir := filepath.Join(home, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	cfgDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

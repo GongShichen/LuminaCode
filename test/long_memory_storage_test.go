@@ -341,9 +341,8 @@ func TestMemoryMaintenanceJobsPersistRetryState(t *testing.T) {
 }
 
 func TestLegacyMarkdownMemoryMigratesFromV2QuarantineAndArchivesSource(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	legacyRoot := filepath.Join(home, ".lumina", "data", "legacy", "v1")
+	appRoot := setTestAppRoot(t)
+	legacyRoot := filepath.Join(appRoot, "data", "legacy", "v1")
 	legacyPath := filepath.Join(legacyRoot, "projects", "sample-project", "memory", "feedback", "rule.md")
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
 		t.Fatal(err)
@@ -368,7 +367,7 @@ func TestLegacyMarkdownMemoryMigratesFromV2QuarantineAndArchivesSource(t *testin
 	if _, err := os.Stat(archived); err != nil {
 		t.Fatalf("legacy source archive is missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".lumina", "state", "migrations", "memory-legacy-import.jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(appRoot, "state", "migrations", "memory-legacy-import.jsonl")); err != nil {
 		t.Fatalf("migration log was not written: %v", err)
 	}
 }

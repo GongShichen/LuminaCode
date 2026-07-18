@@ -11,8 +11,8 @@ import (
 
 func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
-	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	userConfigDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,6 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_RESOURCE_ROOT", "")
 	t.Setenv("LUMINA_HOME", "")
 	t.Setenv("LUMINA_API_MODEL", "env-model")
@@ -265,8 +264,8 @@ func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
 }
 
 func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(t *testing.T) {
-	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	userConfigDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +280,6 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
-	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_API_MODEL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
 	current := config.NewConfigForCWD(workDir)
@@ -307,8 +305,8 @@ func TestConfigReloadDynamicConfigUpdatesDefaultsWithoutClobberingRuntimeFields(
 }
 
 func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
-	home := t.TempDir()
-	userConfigDir := filepath.Join(home, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	userConfigDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(userConfigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +320,6 @@ func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
-	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_API_MODEL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
 	previous := config.GetConfig()

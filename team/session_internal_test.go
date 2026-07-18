@@ -53,6 +53,10 @@ func TestSendA2AWaitTimeoutDoesNotMarkTargetInterruptedByUser(t *testing.T) {
 	if len(results) != 1 || results[0]["status"] != "task_pending" {
 		t.Fatalf("expected task_pending result, got %#v", result)
 	}
+	taskID, _ := results[0]["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("pending result should include task id: %#v", result)
+	}
 
 	session.mu.Lock()
 	row := session.activity["backend"]
@@ -79,9 +83,9 @@ func TestSendA2AWaitTimeoutDoesNotMarkTargetInterruptedByUser(t *testing.T) {
 	target.mu.Lock()
 	target.busy = false
 	target.mu.Unlock()
+	waitA2ATaskDone(t, session, taskID, "backend")
 	waitNoActiveA2A(t, session, "backend")
 	waitAgentIdle(t, session, "backend")
-	waitTeamPersistenceSettled()
 }
 
 func TestFinishA2ATaskNotifiesWaitersAndPreservesCompletedStatus(t *testing.T) {
@@ -1010,9 +1014,9 @@ func TestSendA2ADoesNotQueueDuplicateWorkForActiveTarget(t *testing.T) {
 	target.mu.Lock()
 	target.busy = false
 	target.mu.Unlock()
+	waitA2ATaskDone(t, session, firstID, "ux-design")
 	waitNoActiveA2A(t, session, "ux-design")
 	waitAgentIdle(t, session, "ux-design")
-	waitTeamPersistenceSettled()
 }
 
 func TestMemberMessageToEntryAgentIsDeliveredWithoutStartingLeaderTask(t *testing.T) {
@@ -1084,8 +1088,19 @@ func waitAgentIdle(t *testing.T, session *Session, agentID string) {
 	t.Fatalf("agent %s did not become idle", agentID)
 }
 
-func waitTeamPersistenceSettled() {
-	time.Sleep(250 * time.Millisecond)
+func waitA2ATaskDone(t *testing.T, session *Session, taskID, target string) {
+	t.Helper()
+	session.mu.Lock()
+	task, ok := session.a2aTasks[a2aTaskKey(taskID, target)]
+	session.mu.Unlock()
+	if !ok || task.done == nil {
+		t.Fatalf("A2A task %s for %s is missing", taskID, target)
+	}
+	select {
+	case <-task.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("A2A task %s for %s did not finish", taskID, target)
+	}
 }
 
 func stringSliceContains(values []string, want string) bool {

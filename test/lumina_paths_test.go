@@ -193,9 +193,8 @@ func TestAgentContextDoesNotReadAboveGitRoot(t *testing.T) {
 
 func TestAgentContextLoadsV2UserInstructionsWhenWorkdirMissing(t *testing.T) {
 	dir := t.TempDir()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	instructionsDir := filepath.Join(home, ".lumina", "config", "instructions")
+	appRoot := setTestAppRoot(t)
+	instructionsDir := filepath.Join(appRoot, "config", "instructions")
 	if err := os.MkdirAll(instructionsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

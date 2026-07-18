@@ -126,6 +126,7 @@ func retryableTransportError(ctx context.Context, err error) error {
 	lower := strings.ToLower(err.Error())
 	for _, fragment := range []string{
 		"connection reset by peer",
+		"forcibly closed by the remote host",
 		"connection refused",
 		"broken pipe",
 		"server closed idle connection",

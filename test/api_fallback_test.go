@@ -198,9 +198,9 @@ func TestDefaultsTemplateCoversSupportedNonPathConfigKeys(t *testing.T) {
 }
 
 func TestFallbackConfigLoadsAndReloadsFromUserDefaults(t *testing.T) {
-	home := t.TempDir()
+	appRoot := setTestAppRoot(t)
 	cwd := t.TempDir()
-	configDir := filepath.Join(home, ".lumina", "config")
+	configDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,6 @@ func TestFallbackConfigLoadsAndReloadsFromUserDefaults(t *testing.T) {
 		}
 	}
 	write("fallback-one", true)
-	t.Setenv("HOME", home)
 	t.Setenv("LUMINA_RESOURCE_ROOT", "")
 	t.Setenv("LUMINA_HOME", "")
 	cfg := config.NewConfigForCWD(cwd)

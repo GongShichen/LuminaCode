@@ -132,8 +132,8 @@ func TestRetrievalCacheInvalidatesAfterMemoryWrite(t *testing.T) {
 }
 
 func TestInvalidMemoryWeightsAreReported(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	configDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -141,16 +141,15 @@ func TestInvalidMemoryWeightsAreReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", root)
-	cfg := config.NewConfigForCWD(root)
+	cfg := config.NewConfigForCWD(t.TempDir())
 	if err := cfg.ValidateMemoryConfig(); err == nil || !strings.Contains(err.Error(), "must sum to 1") {
 		t.Fatalf("invalid weights were silently accepted: errors=%#v err=%v", cfg.MemoryConfigErrors, err)
 	}
 }
 
 func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	configDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +164,7 @@ func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", root)
-	cfg := config.NewConfigForCWD(root)
+	cfg := config.NewConfigForCWD(t.TempDir())
 	err := cfg.ValidateMemoryConfig()
 	if err == nil || !strings.Contains(err.Error(), "residual_trigger") ||
 		!strings.Contains(err.Error(), "structural_context") || !strings.Contains(err.Error(), "additional_wait") {
@@ -175,8 +173,8 @@ func TestInvalidEvidenceLedgerConfigurationIsReported(t *testing.T) {
 }
 
 func TestInvalidMemoryLifecycleConfigurationIsReported(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, ".lumina", "config")
+	appRoot := setTestAppRoot(t)
+	configDir := filepath.Join(appRoot, "config")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -197,8 +195,7 @@ func TestInvalidMemoryLifecycleConfigurationIsReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", root)
-	cfg := config.NewConfigForCWD(root)
+	cfg := config.NewConfigForCWD(t.TempDir())
 	err := cfg.ValidateMemoryConfig()
 	if err == nil || !strings.Contains(err.Error(), "must not exceed") ||
 		!strings.Contains(err.Error(), "must be false") || !strings.Contains(err.Error(), "must sum to 1") {

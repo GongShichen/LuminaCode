@@ -3,6 +3,7 @@ package test
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,4 +39,11 @@ func goEnvironmentValue(name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func setTestAppRoot(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "app-root")
+	t.Setenv("LUMINA_APP_ROOT", root)
+	return root
 }

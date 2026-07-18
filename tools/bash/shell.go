@@ -21,7 +21,7 @@ func ShellArgv(command, executable string) []string {
 	}
 	if runtime.GOOS == "windows" {
 		if shell := findWindowsPOSIXShell(); shell != "" {
-			return []string{shell, "-c", command}
+			return []string{shell, "-o", "pipefail", "-c", command}
 		}
 		comspec := os.Getenv("COMSPEC")
 		if comspec == "" {
