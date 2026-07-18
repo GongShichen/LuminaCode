@@ -259,6 +259,25 @@ func TestMigrationDoesNotCommitLayoutWithInvalidProjectManifest(t *testing.T) {
 	}
 }
 
+func TestCanonicalNamePlanningSkipsDirectoryConsumedByMigration(t *testing.T) {
+	root := t.TempDir()
+	legacyConfig := filepath.Join(root, "CONFIG")
+	writeFixtureFile(t, filepath.Join(legacyConfig, "defaults.json"), `{}`)
+	paths := fixturePaths(t, root)
+	report := MigrationReport{
+		SourceRoot: root,
+		Operations: []MigrationOperation{{
+			Kind: "move", Source: legacyConfig,
+			Destination: filepath.Join(paths.LegacyDataDir, "config-residual"),
+		}},
+	}
+
+	planCanonicalTopLevelNames(paths, &report)
+	if len(report.Operations) != 1 {
+		t.Fatalf("consumed CONFIG directory also received a case rename: %#v", report.Operations)
+	}
+}
+
 func TestCrossRootMigrationCopiesVerifiesAndBacksUpSource(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()

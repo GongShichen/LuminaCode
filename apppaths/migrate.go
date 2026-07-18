@@ -428,17 +428,17 @@ func buildMigrationOperations(paths AppPaths, opts MigrationOptions, report *Mig
 	}
 
 	legacyConfigDir := filepath.Join(source, "CONFIG")
-	if sameExistingObject(legacyConfigDir, paths.ConfigDir) {
-		known := map[string]struct{}{"defaults.json": {}, "mcp.json": {}, "managed-mcp.json": {}, "defaults.json.example": {}}
-		entries, _ := os.ReadDir(legacyConfigDir)
-		for _, entry := range entries {
-			if _, ok := known[entry.Name()]; ok {
-				continue
-			}
-			add("move", filepath.ToSlash(filepath.Join("CONFIG", entry.Name())), filepath.Join(paths.LegacyDataDir, "config", entry.Name()), "preserve unclassified v1 configuration")
+	configAliasesTarget := sameExistingObject(legacyConfigDir, paths.ConfigDir)
+	known := map[string]struct{}{"defaults.json": {}, "mcp.json": {}, "managed-mcp.json": {}, "defaults.json.example": {}}
+	entries, _ = os.ReadDir(legacyConfigDir)
+	for _, entry := range entries {
+		if _, ok := known[entry.Name()]; ok {
+			continue
 		}
-	} else {
-		add("move", "CONFIG", filepath.Join(paths.LegacyDataDir, "config"), "preserve unclassified v1 configuration")
+		add("move", filepath.ToSlash(filepath.Join("CONFIG", entry.Name())), filepath.Join(paths.LegacyDataDir, "config", entry.Name()), "preserve unclassified v1 configuration")
+	}
+	if !configAliasesTarget {
+		add("move", "CONFIG", filepath.Join(paths.LegacyDataDir, "config-residual"), "preserve emptied legacy configuration directory")
 	}
 	add("move", "mcp", filepath.Join(paths.LegacyDataDir, "mcp"), "preserve unclassified managed MCP files")
 	add("move", "memory", filepath.Join(paths.LegacyDataDir, "memory"), "preserve unclassified legacy memory files")
@@ -464,12 +464,25 @@ func planCanonicalTopLevelNames(paths AppPaths, report *MigrationReport) {
 			if entry.Name() == canonical || !strings.EqualFold(entry.Name(), canonical) {
 				continue
 			}
+			source := filepath.Join(paths.Root, entry.Name())
+			if migrationConsumesSource(report.Operations, source) {
+				continue
+			}
 			report.Operations = append(report.Operations, MigrationOperation{
-				Kind: "rename-case", Source: filepath.Join(paths.Root, entry.Name()), Destination: filepath.Join(paths.Root, canonical),
+				Kind: "rename-case", Source: source, Destination: filepath.Join(paths.Root, canonical),
 				Reason: "normalize AppRoot top-level directory casing", Status: "planned",
 			})
 		}
 	}
+}
+
+func migrationConsumesSource(operations []MigrationOperation, source string) bool {
+	for _, operation := range operations {
+		if operation.Kind == "move" && samePath(operation.Source, source) {
+			return true
+		}
+	}
+	return false
 }
 
 func planUserResourceImports(paths AppPaths, opts MigrationOptions, report *MigrationReport, add func(string, string, string, string)) {

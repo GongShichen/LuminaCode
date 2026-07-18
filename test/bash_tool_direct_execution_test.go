@@ -5,13 +5,17 @@ import (
 	"strings"
 	"testing"
 
+	"LuminaCode/config"
 	coretools "LuminaCode/tools"
 )
 
 func TestBashToolDirectExecutionDoesNotCancelSimpleCommands(t *testing.T) {
 	dir := t.TempDir()
 	tool := coretools.NewBashTool()
-	execCtx := coretools.ExecutionContext{"cwd": dir}
+	execCtx := coretools.ExecutionContext{
+		"cwd":    dir,
+		"config": config.Config{Yolo: true},
+	}
 
 	echoInput, err := tool.DecodeInput(map[string]any{
 		"command":     "echo hello",
@@ -47,7 +51,10 @@ func TestBashToolDirectExecutionDoesNotCancelSimpleCommands(t *testing.T) {
 func TestBashToolDirectExecutionUsesPipefail(t *testing.T) {
 	dir := t.TempDir()
 	tool := coretools.NewBashTool()
-	execCtx := coretools.ExecutionContext{"cwd": dir}
+	execCtx := coretools.ExecutionContext{
+		"cwd":    dir,
+		"config": config.Config{Yolo: true},
+	}
 
 	input, err := tool.DecodeInput(map[string]any{
 		"command":     "false | cat",

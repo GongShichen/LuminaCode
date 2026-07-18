@@ -653,7 +653,10 @@ func TestPermissionResolverAlwaysGrantSkipsEmptyShellPrefixLikePython(t *testing
 	registry := coretools.NewToolRegistry(coretools.NewBashTool())
 	cfg := config.NewConfig()
 	state := agent.NewAgentState()
-	executor := agent.NewStreamingToolExecutor(registry, cfg, &state, coretools.ExecutionContext{})
+	state.PermissionState.YoloMode = true
+	executor := agent.NewStreamingToolExecutor(registry, cfg, &state, coretools.ExecutionContext{
+		"parent_state": &state,
+	})
 	call := coretools.ToolCall{ID: "bash-empty-prefix", Name: "run_shell", Input: map[string]any{"command": "rm"}}
 	executor.AddTool(call)
 
