@@ -235,4 +235,5 @@ type RunnerOptions struct {
 	SWEBenchHarnessCmd      string
 	PreparedEnv             bool
 	Now                     func() time.Time
+	longMemEvalFabricOpener longMemEvalFabricOpener
 }

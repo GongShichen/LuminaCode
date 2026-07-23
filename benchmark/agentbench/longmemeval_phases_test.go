@@ -14,6 +14,21 @@ import (
 	"LuminaCode/memory"
 )
 
+type longMemEvalFixtureVectorizer struct{}
+
+func (longMemEvalFixtureVectorizer) Model() string { return "bge-m3" }
+
+func (longMemEvalFixtureVectorizer) Dimensions() int { return 3 }
+
+func (longMemEvalFixtureVectorizer) Embed(_ context.Context, texts []string,
+	_ memory.VectorPurpose) ([][]float32, error) {
+	result := make([][]float32, len(texts))
+	for index := range result {
+		result[index] = []float32{1, 0, 0}
+	}
+	return result, nil
+}
+
 func TestLongMemEvalHistoryFingerprintExcludesQuestionAndGold(t *testing.T) {
 	base := longMemEvalCase{QuestionID: "q1", Question: "first question", Answer: "secret",
 		HaystackSessionIDs: []string{"s1"}, HaystackDates: []string{"2026-07-20"},
@@ -266,8 +281,18 @@ func TestLongMemEvalFabricPrepareBuildsRawSnapshotWithoutSemanticAPI(t *testing.
 	cfg := config.NewConfig()
 	cfg.MemoryBackend = "fabric"
 	cfg.MemoryRemoteProcessing = "off"
+	fixtureOpener := func(ctx context.Context, cfg config.Config, startWorkers bool,
+		observer memory.APIUsageObserver) (*memory.Fabric, error) {
+		fabricOptions := memory.DefaultFabricOptions(cfg.MemoryPath)
+		fabricOptions.StartWorkers = startWorkers
+		fabricOptions.UsageObserver = observer
+		fabricOptions.RemoteProcessing = memory.RemoteProcessingOff
+		fabricOptions.Vectorizer = longMemEvalFixtureVectorizer{}
+		return memory.OpenFabric(ctx, fabricOptions)
+	}
 	options := normalizeLongMemEvalOptions(RunnerOptions{WorkDir: filepath.Join(root, "work"),
-		OutputDir: filepath.Join(root, "reports"), LongMemEvalIndexDir: filepath.Join(root, "index"), Config: cfg})
+		OutputDir: filepath.Join(root, "reports"), LongMemEvalIndexDir: filepath.Join(root, "index"), Config: cfg,
+		longMemEvalFabricOpener: fixtureOpener})
 	caseData := longMemEvalCase{QuestionID: "q1", Question: "gold question must not be indexed", Answer: "gold answer",
 		HaystackSessionIDs: []string{"s1"}, HaystackDates: []string{"2026/07/20 09:00"},
 		HaystackSessions: [][]map[string]any{{
