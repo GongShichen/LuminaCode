@@ -1129,15 +1129,7 @@ func fileSHA256(path string) (string, error) {
 }
 
 func openLongMemEvalSQLite(path string, readOnly bool) (*sql.DB, error) {
-	dsn := path
-	if readOnly {
-		location := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
-		query := url.Values{}
-		query.Set("mode", "ro")
-		query.Set("_pragma", "query_only=1")
-		location.RawQuery = query.Encode()
-		dsn = location.String()
-	}
+	dsn := longMemEvalSQLiteDSN(path, readOnly)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -1147,6 +1139,35 @@ func openLongMemEvalSQLite(path string, readOnly bool) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func longMemEvalSQLiteDSN(path string, readOnly bool) string {
+	if !readOnly {
+		return path
+	}
+	slashPath := filepath.ToSlash(path)
+	location := &url.URL{Scheme: "file"}
+	switch {
+	case strings.HasPrefix(slashPath, "//"):
+		hostAndPath := strings.TrimPrefix(slashPath, "//")
+		if separator := strings.IndexByte(hostAndPath, '/'); separator >= 0 {
+			location.Host = hostAndPath[:separator]
+			location.Path = hostAndPath[separator:]
+		} else {
+			location.Host = hostAndPath
+			location.Path = "/"
+		}
+	case len(slashPath) >= 2 && slashPath[1] == ':' &&
+		((slashPath[0] >= 'A' && slashPath[0] <= 'Z') || (slashPath[0] >= 'a' && slashPath[0] <= 'z')):
+		location.Path = "/" + slashPath
+	default:
+		location.Path = slashPath
+	}
+	query := url.Values{}
+	query.Set("mode", "ro")
+	query.Set("_pragma", "query_only=1")
+	location.RawQuery = query.Encode()
+	return location.String()
 }
 
 func storePathCheckpoint(ctx context.Context, path string) (string, error) {

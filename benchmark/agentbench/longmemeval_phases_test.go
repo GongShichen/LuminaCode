@@ -157,6 +157,30 @@ func TestRecoverRepairableLongMemEvalCompilerJobsIsNarrowAndOneShot(t *testing.T
 	}
 }
 
+func TestLongMemEvalSQLiteReadOnlyDSNUsesPortableFileURI(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "posix", path: "/tmp/Lumina Code/ledger.sqlite",
+			want: "file:///tmp/Lumina%20Code/ledger.sqlite?_pragma=query_only%3D1&mode=ro"},
+		{name: "windows drive", path: "C:/Users/runner/Lumina Code/ledger.sqlite",
+			want: "file:///C:/Users/runner/Lumina%20Code/ledger.sqlite?_pragma=query_only%3D1&mode=ro"},
+		{name: "windows unc", path: "//server/share/Lumina Code/ledger.sqlite",
+			want: "file://server/share/Lumina%20Code/ledger.sqlite?_pragma=query_only%3D1&mode=ro"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := longMemEvalSQLiteDSN(test.path, true); got != test.want {
+				t.Fatalf("read-only DSN=%q, want %q", got, test.want)
+			}
+			if got := longMemEvalSQLiteDSN(test.path, false); got != test.path {
+				t.Fatalf("read-write DSN=%q, want unchanged path %q", got, test.path)
+			}
+		})
+	}
+}
+
 func TestStratifiedLongMemEvalSmokeIsBalancedAndStable(t *testing.T) {
 	counts := map[string]int{
 		"knowledge-update": 78, "multi-session": 133, "single-session-assistant": 56,
