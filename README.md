@@ -41,7 +41,7 @@ by `lumina-backend`.
 ## Long-Term Memory
 
 Memory Fabric keeps durable cross-session state in two local SQLite databases
-and builds a third, replaceable BGE-M3 retrieval sidecar:
+and builds a third, replaceable BGE-M3 retrieval index:
 
 ```text
 <AppRoot>/data/memory/fabric/ledger.sqlite
@@ -74,8 +74,8 @@ and builds a third, replaceable BGE-M3 retrieval sidecar:
 Retrieval is fully local and runs the same pipeline for every ordinary
 natural-language query:
 
-1. **Alignment** verifies the sidecar model, tokenizer, schema, and ledger
-   checksum, then incrementally catches up missing events when needed.
+1. **Alignment** verifies the retrieval index model, tokenizer, schema, and
+   ledger checksum, then incrementally catches up missing events when needed.
 2. **Query encoding** produces BGE-M3 dense, learned-sparse, and full-token
    representations.
 3. **Candidate recall** runs span FTS5, event dense, and learned-sparse
@@ -112,8 +112,8 @@ evaluator.
 | Single-session assistant | 40/56 | 71.43% |
 | Single-session preference | 19/30 | 63.33% |
 
-End-to-end retrieval with a prepared sidecar averaged **8.25 seconds**
-(P50 **7.17 seconds**, P95 **17.20 seconds**).
+End-to-end retrieval averaged **8.25 seconds** (P50 **7.17 seconds**,
+P95 **17.20 seconds**).
 
 Published LongMemEval accuracy, sorted for orientation:
 
