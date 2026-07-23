@@ -112,16 +112,8 @@ evaluator.
 | Single-session assistant | 40/56 | 71.43% |
 | Single-session preference | 19/30 | 63.33% |
 
-Retrieval measurements below come from the 500 diagnostics emitted by that
-run. Prepared-sidecar latency excludes one-time sidecar synchronization.
-
-| Retrieval metric | Average | P50 | P95 |
-|---|---:|---:|---:|
-| Prepared-sidecar search | 8.25 s | 7.17 s | 17.20 s |
-| Query encoding | 2.56 s | 1.72 s | 8.44 s |
-| Personalized PageRank | 0.91 s | 0.84 s | 1.53 s |
-| Evidence selection | 1.80 s | 1.69 s | 2.89 s |
-| Missing-sidecar synchronization | 343.09 s | 394.79 s | 458.27 s |
+End-to-end retrieval with a prepared sidecar averaged **8.25 seconds**
+(P50 **7.17 seconds**, P95 **17.20 seconds**).
 
 Published LongMemEval accuracy, sorted for orientation:
 

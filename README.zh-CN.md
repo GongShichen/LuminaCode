@@ -92,16 +92,8 @@ evaluator，取得 **83.00%（415/500）**。
 | Single-session assistant | 40/56 | 71.43% |
 | Single-session preference | 19/30 | 63.33% |
 
-下表来自本轮 500 份 diagnostics；prepared-sidecar latency 不包含一次性
-sidecar 同步：
-
-| 检索指标 | 平均 | P50 | P95 |
-|---|---:|---:|---:|
-| Sidecar 已准备时的检索 | 8.25 秒 | 7.17 秒 | 17.20 秒 |
-| Query encoding | 2.56 秒 | 1.72 秒 | 8.44 秒 |
-| Personalized PageRank | 0.91 秒 | 0.84 秒 | 1.53 秒 |
-| Evidence selection | 1.80 秒 | 1.69 秒 | 2.89 秒 |
-| Sidecar 缺失时的同步 | 343.09 秒 | 394.79 秒 | 458.27 秒 |
+Sidecar 已准备时，端到端检索平均耗时 **8.25 秒**（P50 **7.17 秒**，
+P95 **17.20 秒**）。
 
 公开 LongMemEval 成绩按分数排序如下，仅用于定位：
 
