@@ -112,8 +112,8 @@ evaluator.
 | Single-session assistant | 40/56 | 71.43% |
 | Single-session preference | 19/30 | 63.33% |
 
-End-to-end retrieval averaged **8.25 seconds** (P50 **7.17 seconds**,
-P95 **17.20 seconds**).
+End-to-end retrieval averaged **1.02 seconds** (P50 **0.99 seconds**,
+P95 **1.29 seconds**).
 
 Published LongMemEval accuracy, sorted for orientation:
 
