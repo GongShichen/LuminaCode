@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestMigrateV1LayoutInPlace(t *testing.T) {
+func TestMigrateLegacyLayoutInPlace(t *testing.T) {
 	root := t.TempDir()
 	projectRoot := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
@@ -23,7 +23,6 @@ func TestMigrateV1LayoutInPlace(t *testing.T) {
 	writeFixtureFile(t, filepath.Join(root, "SYSTEM", "system-prompt.md"), "system")
 	writeFixtureFile(t, filepath.Join(root, "SKILLS", "demo", "SKILL.md"), "skill")
 	writeFixtureFile(t, filepath.Join(root, "TEAM", "demo", "team.yaml"), "name: demo")
-	writeFixtureFile(t, filepath.Join(root, "memory", "lumina-memory.sqlite"), "sqlite")
 	writeFixtureFile(t, filepath.Join(root, "sessions", "s1", "session.sqlite"), "session")
 	writeFixtureFile(t, filepath.Join(root, "project", "repo", "CONFIG", "trusted_mcp.json"), `{"servers":{"demo":"fingerprint"}}`)
 	writeFixtureFile(t, filepath.Join(root, "project", "repo", "background", "tool-results", "old.txt"), "output")
@@ -49,7 +48,7 @@ func TestMigrateV1LayoutInPlace(t *testing.T) {
 	}
 	project, _ := paths.ForProject(projectRoot)
 	for _, path := range []string{
-		paths.SettingsFile, paths.MemoryDB, filepath.Join(paths.ActiveSessionsDir, "s1", "session.sqlite"),
+		paths.SettingsFile, filepath.Join(paths.ActiveSessionsDir, "s1", "session.sqlite"),
 		project.MCPTrustFile, filepath.Join(project.ToolResultsForSession("_legacy"), "old.txt"),
 		filepath.Join(paths.SystemResourceDir, "system-prompt.md"),
 	} {
@@ -114,21 +113,6 @@ func TestMigrateQuarantinesAmbiguousProjectTrust(t *testing.T) {
 	}
 }
 
-func TestMigrationRefusesConflictingDestination(t *testing.T) {
-	root := t.TempDir()
-	writeFixtureFile(t, filepath.Join(root, "memory", "lumina-memory.sqlite"), "old")
-	paths := fixturePaths(t, root)
-	writeFixtureFile(t, paths.MemoryDB, "new")
-	report, err := Migrate(paths, MigrationOptions{SourceRoot: root})
-	if err == nil || len(report.Conflicts) == 0 {
-		t.Fatalf("expected migration conflict, report=%#v err=%v", report, err)
-	}
-	data, readErr := os.ReadFile(paths.MemoryDB)
-	if readErr != nil || string(data) != "new" {
-		t.Fatalf("destination was modified: %q %v", data, readErr)
-	}
-}
-
 func TestMigrationImportsOnlyUserAddedResources(t *testing.T) {
 	root := t.TempDir()
 	packaged := filepath.Join(t.TempDir(), "resources")
@@ -157,13 +141,13 @@ func TestMigrationImportsOnlyUserAddedResources(t *testing.T) {
 	}
 }
 
-func TestMigrationDoesNotRescanReadyV2Layout(t *testing.T) {
+func TestMigrationDoesNotRescanInitializedLayout(t *testing.T) {
 	root := t.TempDir()
 	paths := fixturePaths(t, root)
 	if err := WriteLayout(paths, "old"); err != nil {
 		t.Fatal(err)
 	}
-	reportPath := filepath.Join(paths.MigrationsDir, "v2-report.json")
+	reportPath := filepath.Join(paths.MigrationsDir, "migration-report.json")
 	writeFixtureFile(t, reportPath, `{"operations":[{"status":"applied"}]}`)
 	userFile := filepath.Join(paths.PromptsDir, "user.txt")
 	writeFixtureFile(t, userFile, "keep")
@@ -172,11 +156,11 @@ func TestMigrationDoesNotRescanReadyV2Layout(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(report.Operations) != 0 {
-		t.Fatalf("v2 upgrade planned legacy operations: %#v", report.Operations)
+		t.Fatalf("initialized layout planned legacy operations: %#v", report.Operations)
 	}
 	data, err := os.ReadFile(userFile)
 	if err != nil || string(data) != "keep" {
-		t.Fatalf("v2 user config was moved or modified: %q %v", data, err)
+		t.Fatalf("initialized user config was moved or modified: %q %v", data, err)
 	}
 	layout, err := ReadLayout(paths)
 	if err != nil || layout.InstalledVersion != "new" {
@@ -187,7 +171,7 @@ func TestMigrationDoesNotRescanReadyV2Layout(t *testing.T) {
 	}
 }
 
-func TestReadyV2TargetIgnoresSeparateLegacySource(t *testing.T) {
+func TestInitializedTargetIgnoresSeparateLegacySource(t *testing.T) {
 	target := t.TempDir()
 	source := t.TempDir()
 	paths := fixturePaths(t, target)
@@ -202,13 +186,13 @@ func TestReadyV2TargetIgnoresSeparateLegacySource(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(report.Operations) != 0 {
-		t.Fatalf("ready v2 target rescanned legacy source: %#v", report.Operations)
+		t.Fatalf("initialized target rescanned legacy source: %#v", report.Operations)
 	}
 	if _, err := os.Stat(legacySettings); err != nil {
 		t.Fatalf("legacy source was modified: %v", err)
 	}
 	if _, err := os.Stat(paths.SettingsFile); !os.IsNotExist(err) {
-		t.Fatalf("legacy settings were imported into ready v2 target: %v", err)
+		t.Fatalf("legacy settings were imported into initialized target: %v", err)
 	}
 }
 
@@ -289,7 +273,7 @@ func TestCrossRootMigrationCopiesVerifiesAndBacksUpSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cross-root migration failed: %v report=%#v", err, report)
 	}
-	wantBackup := source + ".legacy-v1-20260718-123000"
+	wantBackup := source + ".legacy-20260718-123000"
 	if report.LegacyBackup != wantBackup {
 		t.Fatalf("backup=%q want %q", report.LegacyBackup, wantBackup)
 	}
@@ -358,7 +342,7 @@ func TestBindLegacyProjectHonorsMigrationLock(t *testing.T) {
 	}
 }
 
-func TestMigrationPreservesLegacySymlinkWithoutFollowingIt(t *testing.T) {
+func TestMigrationDeletesRetiredMemoryWithoutFollowingSymlink(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.md")
 	writeFixtureFile(t, outside, "outside")
@@ -372,7 +356,7 @@ func TestMigrationPreservesLegacySymlinkWithoutFollowingIt(t *testing.T) {
 	paths := fixturePaths(t, root)
 	report, err := Migrate(paths, MigrationOptions{SourceRoot: root})
 	if err != nil || len(report.Conflicts) != 0 {
-		t.Fatalf("legacy symlink object should be safe to archive: err=%v report=%#v", err, report)
+		t.Fatalf("retired memory symlink should not affect migration: err=%v report=%#v", err, report)
 	}
 	if _, statErr := os.Lstat(link); statErr != nil {
 		t.Fatalf("dry-run modified source link: %v", statErr)
@@ -380,9 +364,8 @@ func TestMigrationPreservesLegacySymlinkWithoutFollowingIt(t *testing.T) {
 	if _, err := Migrate(paths, MigrationOptions{Apply: true, SourceRoot: root}); err != nil {
 		t.Fatal(err)
 	}
-	archivedLink := filepath.Join(paths.LegacyDataDir, "memory", "nested", "escape.md")
-	if target, err := os.Readlink(archivedLink); err != nil || target != outside {
-		t.Fatalf("legacy link was followed instead of preserved: target=%q err=%v", target, err)
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("retired memory data was not deleted: %v", err)
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "outside" {
 		t.Fatalf("external link target was modified: %q %v", data, err)

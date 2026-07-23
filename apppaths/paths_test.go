@@ -268,13 +268,13 @@ func TestLegacyLayoutRequiresMigration(t *testing.T) {
 	}
 }
 
-func TestLowercaseV2ConfigIsNotLegacyOnCaseInsensitiveFilesystems(t *testing.T) {
+func TestLowercaseConfigIsNotLegacyOnCaseInsensitiveFilesystems(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if HasLegacyLayout(root) {
-		t.Fatal("lowercase v2 config directory was classified as legacy CONFIG")
+		t.Fatal("lowercase config directory was classified as legacy CONFIG")
 	}
 }
 

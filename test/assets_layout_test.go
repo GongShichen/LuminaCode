@@ -21,7 +21,6 @@ func TestLuminaAssetsLayoutMatchesRenamedPythonBundle(t *testing.T) {
 		".Lumina/SKILLS/review/SKILL.md",
 		".Lumina/SKILLS/security-best-practices/SKILL.md",
 		".Lumina/SKILLS/security-threat-model/SKILL.md",
-		".Lumina/SYSTEM/extraction_system.md",
 		".Lumina/SYSTEM/system-prompt.md",
 		".Lumina/TEAM/deep-research/completion-policy.md",
 		".Lumina/TEAM/deep-research/evidence-analyst/agent.yaml",
@@ -157,7 +156,6 @@ func TestLuminaBundledPromptsUseRenamedInstructionFile(t *testing.T) {
 	root := repoRoot(t)
 	for _, rel := range []string{
 		".Lumina/SYSTEM/system-prompt.md",
-		".Lumina/SYSTEM/extraction_system.md",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {

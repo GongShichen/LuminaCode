@@ -4,6 +4,8 @@
 tmp/
 frontend/dist/
 frontend/node_modules/
+memory/localmodel/metalrunner/.build/
+memory/localmodel/metalrunner/.swiftpm/
 __pycache__/
 *.pyc
 .ua/.trash-*

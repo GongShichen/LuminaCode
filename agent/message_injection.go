@@ -10,6 +10,7 @@ func InjectRecalledMemories(state *AgentState, recalled []MemoryRecall) {
 	if state == nil {
 		return
 	}
+	state.Messages = memory.StripMemoryContextMessages(state.Messages, memory.MemoryRecallSource)
 	message := memory.BuildRecalledMemoriesMessage(recalled)
 	if message != nil {
 		InsertBeforeCurrentUserMessage(state, message)

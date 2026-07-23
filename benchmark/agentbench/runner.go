@@ -221,6 +221,9 @@ func writeCaseArtifacts(dir string, c CaseSpec, agentResult AgentRunResult, resu
 	_ = os.WriteFile(result.PromptPath, []byte(c.Prompt), 0o644)
 	writeTranscript(result.TranscriptPath, agentResult.Events)
 	writeJSON(result.TimelinePath, result.Timeline)
+	if agentResult.Diagnostics != nil {
+		writeJSON(filepath.Join(dir, "diagnostics.json"), agentResult.Diagnostics)
+	}
 	writeTestOutput(result.TestOutputPath, result)
 	writeJSON(result.ResultPath, result)
 }
@@ -289,9 +292,6 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		BenchmarkSuiteBreakdown: map[string]float64{},
 	}
 	var durations, ttft, firstTool, firstTest, inputTokens, outputTokens, patchRates, testRates []float64
-	var retrievedCounts, evidenceRecalls, evidenceMRRs, sourceRecalls, messageRecalls, chunkRecalls, textCoverages, memoryTokenEstimates, memoryTokenRatios []float64
-	var subtaskAnswerRates, memoryUpdateRates, previousSubtaskHitRates, retrievalDurations, staleUseRates []float64
-	var evidenceMetricCases, evidenceHitCases int
 	var failing []TopFailingCase
 	byBenchmarkTotal := map[string]int{}
 	byBenchmarkResolved := map[string]int{}
@@ -311,51 +311,6 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 		patchRates = append(patchRates, result.PatchApplyRate)
 		testRates = append(testRates, result.TestPassRate)
 		summary.TotalToolCalls += result.ToolCalls
-		if result.MemoryMetrics != nil {
-			m := result.MemoryMetrics
-			retrievedCounts = append(retrievedCounts, float64(m.RetrievedCount))
-			if m.EvidenceTotal > 0 {
-				evidenceMetricCases++
-				if m.EvidenceHit {
-					evidenceHitCases++
-				}
-				evidenceRecalls = append(evidenceRecalls, m.EvidenceRecallAtK)
-				evidenceMRRs = append(evidenceMRRs, m.EvidenceMRR)
-			}
-			if m.GoldSourceSessionCount > 0 {
-				sourceRecalls = append(sourceRecalls, m.SourceSessionRecall)
-			}
-			if m.GoldMessageCount > 0 {
-				messageRecalls = append(messageRecalls, m.GoldMessageRecall)
-				textCoverages = append(textCoverages, m.InjectedTextCoverage)
-			}
-			if m.GoldChunkCount > 0 {
-				chunkRecalls = append(chunkRecalls, m.InjectedChunkRecall)
-			}
-			if m.MemoryTokenEstimate > 0 {
-				memoryTokenEstimates = append(memoryTokenEstimates, float64(m.MemoryTokenEstimate))
-			}
-			if m.MemoryTokenRatio > 0 {
-				memoryTokenRatios = append(memoryTokenRatios, m.MemoryTokenRatio)
-			}
-			if m.RetrievalRuns > 0 {
-				retrievalDurations = append(retrievalDurations, float64(m.RetrievalDurationMS)/float64(m.RetrievalRuns))
-			}
-			staleUseRates = append(staleUseRates, m.StaleUseRate)
-			if m.SubtaskTotal > 0 {
-				subtaskAnswerRates = append(subtaskAnswerRates, m.SubtaskAnswerRate)
-				memoryUpdateRates = append(memoryUpdateRates, m.MemoryUpdateSuccessRate)
-			}
-			if m.SubtaskTotal > 1 {
-				previousSubtaskHitRates = append(previousSubtaskHitRates, m.PreviousSubtaskHitRate)
-			}
-			if m.RetrievalErrorType != "" {
-				if summary.Memory.RetrievalErrorCategories == nil {
-					summary.Memory.RetrievalErrorCategories = map[string]int{}
-				}
-				summary.Memory.RetrievalErrorCategories[m.RetrievalErrorType]++
-			}
-		}
 		byBenchmarkTotal[result.Case.Benchmark]++
 		if result.Resolved {
 			summary.ResolvedCases++
@@ -383,25 +338,6 @@ func BuildSummary(results []CaseResult) SuiteSummary {
 	summary.OutputTokens = latencySummary(outputTokens)
 	summary.AveragePatchApplyRate = Average(patchRates)
 	summary.AverageTestPassRate = Average(testRates)
-	summary.Memory.AverageRetrievedCount = Average(retrievedCounts)
-	if evidenceMetricCases > 0 {
-		summary.Memory.EvidenceCaseCount = evidenceMetricCases
-		summary.Memory.EvidenceHitCases = evidenceHitCases
-		summary.Memory.EvidenceHitRate = float64(evidenceHitCases) / float64(evidenceMetricCases)
-	}
-	summary.Memory.AverageEvidenceRecallAtK = Average(evidenceRecalls)
-	summary.Memory.AverageEvidenceMRR = Average(evidenceMRRs)
-	summary.Memory.AverageSourceSessionRecall = Average(sourceRecalls)
-	summary.Memory.AverageGoldMessageRecall = Average(messageRecalls)
-	summary.Memory.AverageInjectedChunkRecall = Average(chunkRecalls)
-	summary.Memory.AverageInjectedTextCoverage = Average(textCoverages)
-	summary.Memory.AverageMemoryTokenEstimate = Average(memoryTokenEstimates)
-	summary.Memory.AverageMemoryTokenRatio = Average(memoryTokenRatios)
-	summary.Memory.AverageRetrievalDurationMS = Average(retrievalDurations)
-	summary.Memory.AverageStaleUseRate = Average(staleUseRates)
-	summary.Memory.AverageSubtaskAnswerRate = Average(subtaskAnswerRates)
-	summary.Memory.AverageMemoryUpdateSuccessRate = Average(memoryUpdateRates)
-	summary.Memory.AveragePreviousSubtaskHitRate = Average(previousSubtaskHitRates)
 	for benchmark, total := range byBenchmarkTotal {
 		if total > 0 {
 			summary.BenchmarkSuiteBreakdown[benchmark] = float64(byBenchmarkResolved[benchmark]) / float64(total)

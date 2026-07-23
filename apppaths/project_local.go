@@ -18,7 +18,6 @@ const (
 	ProjectDefaultsFileName  = "defaults.json"
 	ProjectMCPFileName       = "mcp.json"
 	SystemPromptFileName     = "system-prompt.md"
-	ExtractionPromptFileName = "extraction_system.md"
 )
 
 func ProjectLocalRoot(projectRoot string) string {

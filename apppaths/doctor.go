@@ -60,7 +60,8 @@ func Doctor(paths AppPaths) DoctorReport {
 		"system_prompt":  filepath.Join(paths.SystemResourceDir, "system-prompt.md"),
 		"settings":       paths.SettingsFile,
 		"mcp_config":     paths.MCPConfigFile,
-		"memory_db":      paths.MemoryDB,
+		"memory_ledger":  filepath.Join(paths.MemoryDir, "fabric", "ledger.sqlite"),
+		"memory_index":   filepath.Join(paths.MemoryDir, "fabric", "index.sqlite"),
 		"memory_model":   paths.MemoryModelDir,
 		"endpoint":       paths.EndpointFile,
 		"arxiv_mcp":      paths.ArxivMCPDir,
@@ -88,7 +89,8 @@ func Doctor(paths AppPaths) DoctorReport {
 		}
 		for name, path := range map[string]string{
 			"layout": paths.LayoutFile, "settings": paths.SettingsFile, "MCP config": paths.MCPConfigFile,
-			"memory database": paths.MemoryDB, "endpoint": paths.EndpointFile,
+			"memory ledger": filepath.Join(paths.MemoryDir, "fabric", "ledger.sqlite"),
+			"memory index":  filepath.Join(paths.MemoryDir, "fabric", "index.sqlite"), "endpoint": paths.EndpointFile,
 		} {
 			if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o077 != 0 {
 				report.Warnings = append(report.Warnings, fmt.Sprintf("%s file is accessible to other local users", name))

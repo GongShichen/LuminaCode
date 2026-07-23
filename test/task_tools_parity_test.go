@@ -21,7 +21,6 @@ func taskToolsTestConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg := config.NewConfig()
 	cfg.LongTermMemoryEnabled = false
-	cfg.MemoryQueryExpansionEnabled = false
 	cfg.SessionDir = t.TempDir()
 	return cfg
 }

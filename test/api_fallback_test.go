@@ -116,6 +116,28 @@ func TestFallbackClientDoesNotSwitchOnPermanentClientError(t *testing.T) {
 	}
 }
 
+func TestFallbackClientDoesNotSwitchOnQuotaExhausted(t *testing.T) {
+	primary := &fallbackClientStub{stream: []api.EventResult{{Event: map[string]any{
+		"type": "error", "message": "quota exhausted", "status_code": 429, "raw_error": `{"message":"quota exhausted"}`,
+	}}}}
+	secondary := &fallbackClientStub{stream: []api.EventResult{{Event: map[string]any{"type": "text_delta", "text": "should not run"}}}}
+	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
+
+	var events []map[string]any
+	for item := range client.StreamChat(context.Background(), "", nil, nil, nil) {
+		if item.Err != nil {
+			t.Fatal(item.Err)
+		}
+		events = append(events, item.Event)
+	}
+	if secondary.streamCalls != 0 {
+		t.Fatal("fallback must not run after provider quota is exhausted")
+	}
+	if len(events) != 1 || events[0]["type"] != "error" {
+		t.Fatalf("primary quota error should be preserved: %#v", events)
+	}
+}
+
 func TestFallbackClientCompleteAndCombinedFailure(t *testing.T) {
 	primaryErr := api.NewAPIStatusError("primary", 503, "503 Service Unavailable", []byte(`{"error":"down"}`))
 	primary := &fallbackClientStub{completeErr: primaryErr}
@@ -151,13 +173,13 @@ func TestStructuredFallbackDoesNotSpeculativelyCallFallback(t *testing.T) {
 }
 
 func TestStructuredFallbackAcceptsStrictJSONWhenFallbackCannotCallTools(t *testing.T) {
-	primary := &structuredClientStub{err: api.NewAPIStatusError("primary", 429, "quota exhausted", nil)}
-	secondary := &structuredClientStub{response: api.Response{Text: `{"memories":[]}`}}
+	primary := &structuredClientStub{err: api.NewAPIStatusError("primary", 503, "Service Unavailable", nil)}
+	secondary := &structuredClientStub{response: api.Response{Text: `{"proposals":[]}`}}
 	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
 	response, err := client.CompleteStructured(context.Background(), "system", nil, api.StructuredCompletionOptions{
-		Tools: []map[string]any{{"name": "ExtractMemoryBatch"}}, RequiredTool: "ExtractMemoryBatch",
+		Tools: []map[string]any{{"name": "CompileSemanticMemory"}}, RequiredTool: "CompileSemanticMemory",
 	})
-	if err != nil || response.Text != `{"memories":[]}` {
+	if err != nil || response.Text != `{"proposals":[]}` {
 		t.Fatalf("strict JSON fallback failed: response=%#v error=%v", response, err)
 	}
 	if secondary.lastOpts.RequiredTool != "" || len(secondary.lastOpts.Tools) != 0 {
@@ -165,12 +187,27 @@ func TestStructuredFallbackAcceptsStrictJSONWhenFallbackCannotCallTools(t *testi
 	}
 }
 
+func TestStructuredFallbackDoesNotRunOnQuotaExhausted(t *testing.T) {
+	primary := &structuredClientStub{err: api.NewAPIStatusError("primary", 429, "quota exhausted", []byte(`{"message":"quota exhausted"}`))}
+	secondary := &structuredClientStub{response: api.Response{Text: `{"proposals":[]}`}}
+	client := api.NewFallbackLLMClient(primary, secondary, "primary", "secondary")
+	_, err := client.CompleteStructured(context.Background(), "system", nil, api.StructuredCompletionOptions{
+		Tools: []map[string]any{{"name": "CompileSemanticMemory"}}, RequiredTool: "CompileSemanticMemory",
+	})
+	if err == nil || !strings.Contains(err.Error(), "quota exhausted") {
+		t.Fatalf("quota exhaustion should surface from primary, got %v", err)
+	}
+	if secondary.calls != 0 {
+		t.Fatal("structured fallback must not run after provider quota is exhausted")
+	}
+}
+
 func TestDefaultsTemplateCoversSupportedNonPathConfigKeys(t *testing.T) {
 	derivedPaths := map[string]bool{
-		"session_dir": true, "session_archive_dir": true, "long_term_memory_store": true,
+		"session_dir": true, "session_archive_dir": true, "memory_path": true,
 		"memory_embedding_model_dir": true, "skills_dir": true, "user_skills_dir": true,
 		"bundled_skills_dir": true, "team_dir": true, "system_prompt_path": true,
-		"memory_extraction_prompt_path": true, "worktree_dir": true,
+		"worktree_dir": true,
 	}
 	var want []string
 	for _, key := range config.DefaultJSONKeys() {

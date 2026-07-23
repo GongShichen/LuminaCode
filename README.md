@@ -40,126 +40,88 @@ by `lumina-backend`.
 
 ## Long-Term Memory
 
-Cross-session memory lives in one local SQLite store:
+Memory Fabric keeps durable cross-session state in two local SQLite databases
+and builds a third, replaceable BGE-M3 retrieval sidecar:
 
 ```text
-<AppRoot>/data/memory/lumina-memory.sqlite
+<AppRoot>/data/memory/fabric/ledger.sqlite
+<AppRoot>/data/memory/fabric/index.sqlite
+<AppRoot>/data/memory/fabric/retrieval-bge-m3.sqlite
 ```
 
-### 1. What It Remembers And How
+### Memory Write Flow
 
-- Lumina stores the visible conversation, useful tool observations, user
-  preferences, project decisions, reusable procedures, facts, entities, events,
-  and their relationships. Hidden reasoning, credentials, permission payloads,
-  and duplicated tool dumps are excluded.
-- Original messages are committed first as immutable evidence. They are split
-  into larger chunks and small sentence/list/code-aware evidence atoms, while
-  retaining the Session, role, timestamp, source offsets, provenance, and access
-  scope needed to reconstruct the original context.
-- Recoverable background jobs enrich that evidence into structured facts,
-  entities, relations, events, preferences, and local E5 embeddings. Updates do
-  not erase history: factual validity, observation time, conflicts, and
-  superseded versions remain traceable.
-- User, project, Team, agent-type, and Team-agent memories remain isolated by
-  scope. Frequently used or reinforced memories stay hot; low-value expired
-  records may be archived, but background maintenance never physically deletes
-  them.
+1. **Durable evidence ingest** commits visible user, assistant, and tool events
+   as immutable, source-addressable ledger rows before any semantic work.
+2. **Context and provenance binding** records the project space, context,
+   session, actor, timestamp, turn order, checksum, and source offsets needed
+   to reconstruct each event.
+3. **Semantic compilation** optionally uses the configured API model to select
+   durable memories and produce grounded nodes, identities, slots, temporal
+   scope, retrieval cues, and conflict candidates. Every node must cite source
+   events and pass local grounding validation.
+4. **Conflict resolution** applies local authority and time rules to clear
+   updates. Ambiguous cases remain pending or use the configured adjudicator;
+   raw evidence is never overwritten.
+5. **Local BGE-M3 indexing** creates dense vectors and the event/span dense,
+   learned-sparse, FTS, and graph representations used by retrieval.
+6. **Recoverable publication** checkpoints background jobs and atomically
+   publishes derived indexes. Model, tokenizer, or schema changes rebuild
+   derived data from the ledger without re-ingesting the conversation.
 
-`make install` downloads `multilingual-e5-small` from ModelScope into
-`<AppRoot>/cache/models/memory/`; normal uninstall removes this rebuildable
-cache. `/Memory`,
-`/MemorySearch`, `/MemoryForget`, `/MemoryExport`, and `/MemoryImport` provide
-local inspection and control.
+### Memory Retrieval Flow
 
-### 2. What It Finds, How It Finds It, And Benchmark Results
+Retrieval is fully local and runs the same pipeline for every ordinary
+natural-language query:
 
-- For every query, Lumina searches exact wording, semantic similarity, entities,
-  time, Sessions, and relations through fixed BM25, vector, entity, temporal,
-  Session, and graph channels. Generic model-generated query expansion may add
-  synonyms or structured hints, but cannot disable a channel, change scope, or
-  exclude a memory type.
-- Independent signals are fused once, then the Evidence Ledger selects small,
-  source-linked atoms that cover the query's distinct information needs. If
-  support is incomplete, one residual all-channel search is performed. The main
-  model receives the selected evidence, local structural context, provenance,
-  and timeline as one transient hidden packet rather than a repeated Session
-  summary or full transcript.
+1. **Alignment** verifies the sidecar model, tokenizer, schema, and ledger
+   checksum, then incrementally catches up missing events when needed.
+2. **Query encoding** produces BGE-M3 dense, learned-sparse, and full-token
+   representations.
+3. **Candidate recall** runs span FTS5, event dense, and learned-sparse
+   channels, each with up to 128 candidates.
+4. **Fusion and graph expansion** use reciprocal-rank fusion for the recall
+   pool and Personalized PageRank over event, context, semantic, and
+   sparse-concept links.
+5. **Exact span scoring** applies BGE-M3 dense, learned-sparse, and full-token
+   ColBERT MaxSim with the fixed `1.0 : 0.3 : 1.0` fusion.
+6. **Evidence selection** deduplicates source events and uses a submodular
+   objective to maximize relevance and coverage under the configured item and
+   token budgets.
+7. **Context assembly** applies reference-time and conflict-state filters,
+   groups evidence coherently, and preserves timestamps, actors, contexts,
+   source IDs, and span positions for the answer model.
 
-On the 500-question LongMemEval oracle set, Lumina scored **86.0% (430/500)**
-using the official LongMemEval judge prompt with `deepseek-v4-pro` through
-`https://api.deepseek.com`. This is a black-box test of the production memory
-path, not an official GPT-4o leaderboard score.
+Identifiers, paths, and quoted text are lexical candidate features only; query
+content never routes around BGE-M3. Search has no remote query expansion,
+question-type routing, benchmark-specific entities, or local answer bypass.
 
-| Question type | Accuracy |
-|---|---:|
-| Single-session user | 97.14% |
-| Knowledge update | 91.03% |
-| Temporal reasoning | 88.72% |
-| Single-session preference | 80.00% |
-| Multi-session | 79.70% |
-| Single-session assistant | 76.79% |
+### LongMemEval-S
 
-The run also records retrieval quality separately from answer accuracy:
+On the complete 500-question LongMemEval-S full-haystack evaluation,
+LuminaCode's Memory Fabric, using local BGE-M3 retrieval, scored
+**83.00% (415/500)** with `mimo-v2.5-pro` as both answer model and official
+evaluator.
 
-| Retrieval metric | Result |
-|---|---:|
-| Evidence hit rate | 99.79% |
-| Evidence Recall@K | 95.75% |
-| Evidence MRR | 0.701 |
-| Source Session recall | 100.00% |
-| Gold message recall | 98.05% |
-| Injected chunk recall | 95.75% |
-| Injected text coverage | 88.13% |
-| Average memory context | 1,717 tokens (22.59% memory token ratio) |
-| Average retrieval duration | 8.34 seconds |
-
-Retrieval metrics are computed from the evidence atom IDs and source spans
-actually injected into the answering model.
-
-#### Full-haystack LongMemEval-S
-
-The oracle result above is an upper-bound retrieval setting: each question is
-given only the answer-supporting Sessions. The cleaned LongMemEval-S set uses
-the same 500 question IDs but supplies the complete conversation haystack. This
-increases the average search space from 1.90 to 47.73 Sessions and from 21.92 to
-493.50 messages per question.
-
-Using the same `mimo-v2.5-pro` answer model and `deepseek-v4-pro` official judge
-prompt, Lumina scored **75.8% (379/500)** on LongMemEval-S:
-
-| Question type | Oracle | LongMemEval-S | Difference |
-|---|---:|---:|---:|
-| Overall | 86.00% (430/500) | 75.80% (379/500) | -10.20 pp |
-| Single-session user | 97.14% | 88.57% | -8.57 pp |
-| Knowledge update | 91.03% | 89.74% | -1.29 pp |
-| Temporal reasoning | 88.72% | 80.45% | -8.27 pp |
-| Single-session preference | 80.00% | 53.33% | -26.67 pp |
-| Multi-session | 79.70% | 63.91% | -15.79 pp |
-| Single-session assistant | 76.79% | 69.64% | -7.15 pp |
-
-The retrieval comparison explains most of the answer-accuracy gap:
-
-| Retrieval metric | Oracle | LongMemEval-S |
+| Question type | Correct | Accuracy |
 |---|---:|---:|
-| Evidence hit rate | 99.79% | 91.44% |
-| Gold message recall | 98.05% | 84.95% |
-| Injected chunk recall | 95.75% | 80.75% |
-| Injected text coverage | 88.13% | 71.20% |
-| Source Session recall | 100.00% | 98.44% |
-| Evidence MRR | 0.701 | 0.504 |
-| Average retrieved evidence | 27.95 | 36.86 |
-| Average memory context | 1,717 tokens | 2,344 tokens |
-| Average retrieval duration | 8.34 seconds | 9.48 seconds |
+| Knowledge update | 74/78 | 94.87% |
+| Single-session user | 65/70 | 92.86% |
+| Temporal reasoning | 114/133 | 85.71% |
+| Multi-session | 103/133 | 77.44% |
+| Single-session assistant | 40/56 | 71.43% |
+| Single-session preference | 19/30 | 63.33% |
 
-Of the 479 questions with labeled evidence, complete gold-message recall fell
-from 456 oracle questions to 373 LongMemEval-S questions. When all gold messages
-were present, answer accuracy was nearly unchanged: 88.16% on oracle and 87.67%
-on LongMemEval-S. The 10.2-point overall difference therefore comes primarily
-from exact evidence being missed, only partially recalled, or ranked too low in
-the much larger haystack, rather than from a broad regression in answer-model
-quality. The LongMemEval-S run completed 500 unique predictions with no runtime
-or retrieval-channel errors; its 75.8% result is the current full-haystack
-baseline and should not be compared directly with oracle-only scores.
+Retrieval measurements below come from the 500 diagnostics emitted by that
+run. Prepared-sidecar latency excludes one-time sidecar synchronization.
+
+| Retrieval metric | Average | P50 | P95 |
+|---|---:|---:|---:|
+| Prepared-sidecar search | 8.25 s | 7.17 s | 17.20 s |
+| Query encoding | 2.56 s | 1.72 s | 8.44 s |
+| Personalized PageRank | 0.91 s | 0.84 s | 1.53 s |
+| Evidence selection | 1.80 s | 1.69 s | 2.89 s |
+| Missing-sidecar synchronization | 343.09 s | 394.79 s | 458.27 s |
 
 Published LongMemEval accuracy, sorted for orientation:
 
@@ -172,7 +134,7 @@ Published LongMemEval accuracy, sorted for orientation:
 | Engram | 91.6% | GPT-5 composer, GPT-4o judge; prompt and run artifacts published |
 | Hindsight | 91.4% | Gemini 3 Pro; benchmark repository published |
 | HydraDB | 90.79% | Gemini 3 Pro; paper-reported |
-| **LuminaCode (LongMemEval-S)** | **75.8%** | Full haystack; DeepSeek Judge; official prompt reused; 500 questions |
+| **LuminaCode (LongMemEval-S)** | **83.0%** | Full haystack; `mimo-v2.5-pro` answer and official evaluator; 500 questions |
 | LiCoMemory | 73.8% | GPT-4o-mini, five-run mean |
 | Mem0-G | 64.8% | GPT-4o-mini controlled baseline |
 | Mem0 | 62.6% | GPT-4o-mini controlled baseline |
@@ -189,26 +151,10 @@ Sources: [LongMemEval](https://github.com/xiaowu0162/longmemeval),
 [HydraDB paper](https://research.hydradb.com/hydradb.pdf),
 [Honcho](https://github.com/plastic-labs/honcho), and the
 [Exabase M-1 announcement](https://www.prnewswire.com/news-releases/exabase-achieves-highest-reported-score-on-leading-ai-memory-benchmark-using-a-smaller-cheaper-model-302780919.html).
-Exabase and Honcho
-scores are included as publicly reported results with less complete reproduction
-material. Reader, retrieval depth, context budget, and judge differ across
-reports, so this table is not a strict apples-to-apples leaderboard.
-
-Published LoCoMo LLM-Judge results:
-
-| System | Overall | Multi-Hop | Temporal | Open Domain | Single-Hop |
-|---|---:|---:|---:|---:|---:|
-| [Attemory](https://github.com/AttemorySystem/attemory/blob/main/benchmarks/results/LoCoMo/report.txt) | 94.52% | 81.25% | 92.52% | 96.91% | 93.97% |
-| [MemoryLake](https://github.com/memorylake-ai/memorylake-locomo-benchmark) | 94.03% | 91.84% | 91.28% | 85.42% | 96.79% |
-| [EverMemOS](https://arxiv.org/abs/2601.02163) | 93.05% | 91.84% | 89.72% | 76.04% | 96.67% |
-| [MemCog](https://arxiv.org/abs/2605.28046) | 92.98% | 80.21% | 92.81% | 94.89% | 91.84% |
-| [Backboard](https://github.com/Backboard-io/Backboard-Locomo-Benchmark) | 90.00% | 75.00% | 91.90% | 91.20% | 89.36% |
-| [Hindsight](https://github.com/vectorize-io/hindsight-benchmarks) | 89.61% | 70.83% | 83.80% | 95.12% | 86.17% |
-| **LuminaCode** | **77.40%** | **55.21%** | **76.32%** | **82.05%** | **72.34%** |
-| [Memobase v0.0.37](https://github.com/memodb-io/memobase/blob/main/docs/experiments/locomo-benchmark/README.md) | 75.78% | 46.88% | 85.05% | 77.17% | 70.92% |
-| Zep | 75.14% | 66.04% | 79.79% | 67.71% | 74.11% |
-| Mem0-Graph | 68.44% | 47.19% | 58.13% | 75.71% | 65.71% |
-| Mem0 | 66.88% | 51.15% | 55.51% | 72.93% | 67.13% |
+Exabase and Honcho scores are included as publicly reported results with less
+complete reproduction material. Reader, retrieval depth, context budget,
+answer model, and judge differ across reports, so this table is not a strict
+apples-to-apples leaderboard.
 
 ## Agent Team
 
@@ -450,7 +396,7 @@ Use `/mcp` to inspect registered MCP tools.
 
 ## Sessions and Runtime Data
 
-AppRoot v2 uses five ownership layers:
+AppRoot uses five ownership layers:
 
 ```text
 <AppRoot>/
@@ -537,7 +483,7 @@ Default AppRoot resolution is `$HOME/.lumina` on macOS/Linux and
 `%LOCALAPPDATA%\LuminaCode` on Windows, falling back to
 `%USERPROFILE%\.lumina`. `LUMINA_APP_ROOT` is the only root override;
 `LUMINA_RESOURCE_ROOT` changes bundled resources only. See
-[AppRoot v2](docs/app-root-v2.md) for the complete storage and migration
+[AppRoot layout](docs/app-root.md) for the complete storage and migration
 contract.
 
 macOS/Linux:
@@ -545,6 +491,23 @@ macOS/Linux:
 ```sh
 make install
 ```
+
+The default install first checks the host hardware, required toolchain, free
+space, and usable execution provider. It then downloads a revision- and
+SHA-256-pinned BGE-M3 profile from ModelScope: MLX INT8 with the managed Metal
+runtime on Apple Silicon, ONNX INT8 for CPU, or ONNX FP16 for a supported
+managed accelerator runtime. It replaces the installed application only after
+the model, tokenizer, linear heads, native runtime, and inference probe pass.
+BGE-M3 is the sole local model for memory writes and retrieval; installation
+fails without a valid model and does not fall back to another embedding space.
+`LUMINA_MEMORY_EMBEDDING_DEVICE` selects a device explicitly, while
+`LUMINA_MEMORY_MODEL_VARIANT=metal-int8|cpu-int8|accelerator-fp16` pins a
+packaging profile.
+
+Installation output is streamed to the terminal and an install log. If any
+stage fails, the installer exits nonzero and reports the failed stage, original
+error message, exit code, log path, and rollback state. An incomplete
+`app.new` is removed and an application swap is restored automatically.
 
 For unattended installs that must not edit a shell profile, use
 `make install NO_PATH_UPDATE=1`. The Windows equivalent is `-NoPathUpdate`.

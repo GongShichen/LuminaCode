@@ -434,7 +434,7 @@ func TestOpenAICompatibleStructuredCompletionStreamsSplitToolInput(t *testing.T)
 		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
 			t.Fatalf("invalid request body: %v", err)
 		}
-		writeOpenAIToolStream(w, "ExtractMemoryBatch", map[string]any{"memories": []any{}})
+		writeOpenAIToolStream(w, "CompileSemanticMemory", map[string]any{"proposals": []any{}})
 	}))
 	defer server.Close()
 	client, err := api.NewAPIClient("test-key", server.URL, "deepseek-chat", 256, nil, nil, "openai_compatible")
@@ -442,20 +442,48 @@ func TestOpenAICompatibleStructuredCompletionStreamsSplitToolInput(t *testing.T)
 		t.Fatal(err)
 	}
 	response, err := client.CompleteStructured(context.Background(), "sys", nil, api.StructuredCompletionOptions{
-		MaxTokens: 128, RequiredTool: "ExtractMemoryBatch", DisableThinking: true,
-		Tools: []map[string]any{{"name": "ExtractMemoryBatch", "input_schema": map[string]any{"type": "object"}}},
+		MaxTokens: 128, RequiredTool: "CompileSemanticMemory", DisableThinking: true,
+		Tools: []map[string]any{{"name": "CompileSemanticMemory", "input_schema": map[string]any{"type": "object"}}},
 	})
 	if err != nil || len(response.ToolCalls) != 1 {
 		t.Fatalf("streamed structured completion failed: response=%#v error=%v", response, err)
 	}
 	input, _ := response.ToolCalls[0]["input"].(map[string]any)
-	if _, ok := input["memories"]; !ok {
+	if _, ok := input["proposals"]; !ok {
 		t.Fatalf("split tool arguments were not reconstructed: %#v", response.ToolCalls[0])
 	}
 	toolChoice, _ := requestBody["tool_choice"].(map[string]any)
 	if requestBody["stream"] != true || requestBody["max_completion_tokens"] != float64(128) ||
 		toolChoice["type"] != "function" {
 		t.Fatalf("structured request did not preserve streaming options: %#v", requestBody)
+	}
+}
+
+func TestOpenAICompatibleStructuredCompletionUsesExplicitTemperature(t *testing.T) {
+	var requestBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+			t.Fatalf("invalid request body: %v", err)
+		}
+		writeOpenAITextStream(w, `{"supports":["e01"],"answer":"ok","insufficient":false}`)
+	}))
+	defer server.Close()
+	client, err := api.NewAPIClient("test-key", server.URL, "mimo-v2.5-pro", 900,
+		nil, nil, "openai_compatible")
+	if err != nil {
+		t.Fatal(err)
+	}
+	temperature := 0.0
+	if _, err := client.CompleteStructured(context.Background(), "sys", nil,
+		api.StructuredCompletionOptions{
+			MaxTokens: 900, DisableThinking: true, Temperature: &temperature,
+		}); err != nil {
+		t.Fatal(err)
+	}
+	thinking, _ := requestBody["thinking"].(map[string]any)
+	if thinking["type"] != "disabled" || requestBody["temperature"] != float64(0) {
+		t.Fatalf("deterministic structured options were not preserved: %#v", requestBody)
 	}
 }
 

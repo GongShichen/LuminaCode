@@ -26,7 +26,6 @@ func isolatedConfigForCWD(t *testing.T, cwd string) config.Config {
 	// Tests that exercise query expansion opt in explicitly and provide a
 	// dedicated expansion-model response. Other tests keep their API mock
 	// focused on the main agent request.
-	cfg.MemoryQueryExpansionEnabled = false
 	return cfg
 }
 

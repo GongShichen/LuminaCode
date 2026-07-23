@@ -9,13 +9,14 @@ APP_ROOT ?= $(or $(LUMINA_APP_ROOT),$(HOME)/.lumina)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf dev)
 PURGE ?= 0
 SKIP_MANAGED_COMPONENTS ?= 0
+SKIP_MEMORY_MODELS ?= 0
 NO_PATH_UPDATE ?= 0
 BUILD_PATH := $(BUILD_DIR)/$(APP_NAME)
 BACKEND_BUILD_PATH := $(BUILD_DIR)/$(BACKEND_NAME)
 INSTALL_PATH := $(INSTALL_DIR)/$(APP_NAME)
 BACKEND_INSTALL_PATH := $(INSTALL_DIR)/$(BACKEND_NAME)
 
-.PHONY: help build install uninstall purge doctor clean
+.PHONY: help build install _install-preflight _install-build _install-deploy uninstall purge doctor clean
 
 help:
 	@printf '%s\n' \
@@ -23,7 +24,7 @@ help:
 		'' \
 		'Targets:' \
 		'  make build      Build the frontend launcher and Go backend' \
-		'  make install    Install or atomically upgrade AppRoot v2' \
+		'  make install    Install or atomically upgrade AppRoot' \
 		'  make doctor     Inspect the resolved AppRoot and managed components' \
 		'  make uninstall  Remove app/cache/state; preserve config/data/layout.json' \
 		'  make purge      Remove the complete AppRoot, including user data' \
@@ -63,7 +64,21 @@ build:
 	} > "$(BUILD_PATH)"; \
 	chmod 0755 "$(BUILD_PATH)"
 
-install: build
+install:
+	@MAKE="$(MAKE)" sh scripts/install.sh
+
+_install-preflight:
+	@chmod 0755 scripts/install-preflight.sh scripts/setup-memory-models.sh
+	@LUMINA_APP_ROOT="$(APP_ROOT)" \
+		SKIP_MANAGED_COMPONENTS="$(SKIP_MANAGED_COMPONENTS)" \
+		SKIP_MEMORY_MODELS="$(SKIP_MEMORY_MODELS)" \
+		scripts/install-preflight.sh
+
+_install-build:
+	@$(MAKE) build
+	@sh scripts/build-bge-metal.sh
+
+_install-deploy:
 	@set -eu; \
 	os="$$(uname -s)"; \
 	case "$$os" in Darwin) os_name="macOS" ;; Linux) os_name="Linux" ;; *) echo "Unsupported OS: $$os"; exit 1 ;; esac; \
@@ -78,15 +93,18 @@ install: build
 		case "$$shell_name" in zsh) rc_file="$${ZDOTDIR:-$$HOME}/.zshrc" ;; bash) if [ "$$os" = "Darwin" ]; then rc_file="$$HOME/.bash_profile"; else rc_file="$$HOME/.bashrc"; fi ;; *) rc_file="$$HOME/.profile" ;; esac; \
 	fi; \
 	chmod 0755 scripts/install-app-layout.sh; \
+	chmod 0755 scripts/setup-memory-models.sh; \
+	if [ "$(SKIP_MANAGED_COMPONENTS)" = "1" ]; then models_status=skipped; \
+	elif [ "$(SKIP_MEMORY_MODELS)" = "1" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(CURDIR)/$(BACKEND_BUILD_PATH)" LUMINA_BGE_METAL_BIN="$(CURDIR)/tmp/lumina-bge-metal" scripts/setup-memory-models.sh doctor; models_status=verified-preinstalled; \
+	else LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(CURDIR)/$(BACKEND_BUILD_PATH)" LUMINA_BGE_METAL_BIN="$(CURDIR)/tmp/lumina-bge-metal" scripts/setup-memory-models.sh install; models_status=installed; fi; \
 	NPM="$(NPM)" scripts/install-app-layout.sh "$(APP_ROOT)" "$(CURDIR)/$(BACKEND_BUILD_PATH)" "$(VERSION)"; \
 	mkdir -p "$(INSTALL_DIR)"; \
 	install -m 0755 "$(BUILD_PATH)" "$(INSTALL_PATH)"; \
 	install -m 0755 "$(BACKEND_BUILD_PATH)" "$(BACKEND_INSTALL_PATH)"; \
-	if [ "$(SKIP_MANAGED_COMPONENTS)" = "1" ]; then searxng_status=skipped; arxiv_status=skipped; embedding_status=skipped; \
+	if [ "$(SKIP_MANAGED_COMPONENTS)" = "1" ]; then searxng_status=skipped; arxiv_status=skipped; \
 	else \
 		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-searxng.sh" configure; then searxng_status=configured; else searxng_status=failed; fi; \
 		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" install; then arxiv_status=configured; else arxiv_status=failed; fi; \
-		if LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" install; then embedding_status=installed; else embedding_status=failed; fi; \
 	fi; \
 	if [ "$(INSTALL_DIR)" = "$$HOME/.local/bin" ]; then path_line='export PATH="$$HOME/.local/bin:$$PATH"'; path_marker='$$HOME/.local/bin'; else path_line='export PATH="$(INSTALL_DIR):$$PATH"'; path_marker='$(INSTALL_DIR)'; fi; \
 	app_root_line=""; \
@@ -100,7 +118,7 @@ install: build
 	echo "CLI: $(INSTALL_PATH)"; \
 	echo "Backend: $(BACKEND_INSTALL_PATH)"; \
 	echo "AppRoot: $(APP_ROOT)"; \
-	echo "SearxNG: $$searxng_status; arXiv MCP: $$arxiv_status; embedding: $$embedding_status"; \
+	echo "SearxNG: $$searxng_status; arXiv MCP: $$arxiv_status; memory models: $$models_status"; \
 	if [ "$(NO_PATH_UPDATE)" != "1" ] && ! command -v "$(APP_NAME)" >/dev/null 2>&1; then echo "Open a new shell or run: source $$rc_file"; fi
 
 doctor:
@@ -110,7 +128,7 @@ doctor:
 	if [ ! -x "$$backend" ]; then echo "lumina-backend is not installed or built"; exit 1; fi; \
 	LUMINA_APP_ROOT="$(APP_ROOT)" "$$backend" layout doctor; \
 	if [ -x "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" status; fi; \
-	if [ -x "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-memory-embedding.sh" status || true; fi
+	if [ -x "$(APP_ROOT)/app/scripts/setup-memory-models.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$$backend" "$(APP_ROOT)/app/scripts/setup-memory-models.sh" doctor; fi
 
 uninstall:
 	@set -eu; \
@@ -119,6 +137,7 @@ uninstall:
 	if [ -x "$(BACKEND_INSTALL_PATH)" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(BACKEND_INSTALL_PATH)" shutdown >/dev/null 2>&1 || true; fi; \
 	if [ -x "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" uninstall || true; elif [ -x scripts/setup-arxiv-mcp.sh ]; then LUMINA_APP_ROOT="$(APP_ROOT)" scripts/setup-arxiv-mcp.sh uninstall || true; fi; \
 	if [ -x "$(APP_ROOT)/app/scripts/setup-searxng.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-searxng.sh" uninstall || true; elif [ -x setup-searxng.sh ]; then LUMINA_APP_ROOT="$(APP_ROOT)" ./setup-searxng.sh uninstall || true; fi; \
+	if [ -x "$(APP_ROOT)/app/scripts/setup-memory-models.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(BACKEND_INSTALL_PATH)" "$(APP_ROOT)/app/scripts/setup-memory-models.sh" uninstall || true; elif [ -x scripts/setup-memory-models.sh ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(BACKEND_INSTALL_PATH)" scripts/setup-memory-models.sh uninstall || true; fi; \
 	rm -f "$(INSTALL_PATH)" "$(BACKEND_INSTALL_PATH)"; \
 	if [ "$(PURGE)" = "1" ]; then rm -rf "$(APP_ROOT)"; echo "Purged $(APP_ROOT)"; \
 	else rm -rf "$(APP_ROOT)/app" "$(APP_ROOT)/cache" "$(APP_ROOT)/state"; echo "Preserved $(APP_ROOT)/config, $(APP_ROOT)/data, and layout.json"; fi; \

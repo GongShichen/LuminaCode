@@ -48,7 +48,6 @@ type AppPaths struct {
 	UserTeamsDir        string `json:"user_teams_dir"`
 	DataDir             string `json:"data_dir"`
 	MemoryDir           string `json:"memory_dir"`
-	MemoryDB            string `json:"memory_db"`
 	SessionsDir         string `json:"sessions_dir"`
 	ActiveSessionsDir   string `json:"active_sessions_dir"`
 	ArchivedSessionsDir string `json:"archived_sessions_dir"`
@@ -142,7 +141,7 @@ func Resolve(opts ResolveOptions) (AppPaths, error) {
 	dataDir := join(root, "data")
 	stateDir := join(root, "state")
 	cacheDir := join(root, "cache")
-	memoryModelDir := join(cacheDir, "models", "memory", "multilingual-e5-small")
+	memoryModelDir := join(cacheDir, "models", "memory", "bge-m3")
 	return AppPaths{
 		Platform: goos, Root: root, LayoutFile: join(root, "layout.json"),
 		AppDir: appDir, FrontendDir: join(appDir, "frontend"), ResourcesDir: resourcesDir,
@@ -153,10 +152,10 @@ func Resolve(opts ResolveOptions) (AppPaths, error) {
 		ConfigDir:  configDir, SettingsFile: join(configDir, "settings.json"), MCPConfigFile: join(configDir, "mcp.json"),
 		InstructionsDir: join(configDir, "instructions"), PromptsDir: join(configDir, "prompts"),
 		UserSkillsDir: join(configDir, "skills"), UserTeamsDir: join(configDir, "teams"),
-		DataDir: dataDir, MemoryDir: join(dataDir, "memory"), MemoryDB: join(dataDir, "memory", "lumina-memory.sqlite"),
+		DataDir: dataDir, MemoryDir: join(dataDir, "memory"),
 		SessionsDir: join(dataDir, "sessions"), ActiveSessionsDir: join(dataDir, "sessions", "active"),
 		ArchivedSessionsDir: join(dataDir, "sessions", "archive"), ProjectsDataDir: join(dataDir, "projects"),
-		LegacyDataDir: join(dataDir, "legacy", "v1"),
+		LegacyDataDir: join(dataDir, "legacy", "layout"),
 		StateDir:      stateDir, RunDir: join(stateDir, "run"), EndpointFile: join(stateDir, "run", "backend.json"),
 		LogsDir: join(stateDir, "logs"), BackendLogFile: join(stateDir, "logs", "backend.log"),
 		ManagedDir: join(stateDir, "managed"), ManagedMCPFile: join(stateDir, "managed", "mcp.json"),

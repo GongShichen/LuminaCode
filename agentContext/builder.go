@@ -22,23 +22,10 @@ const projectInstructionFilename = "LUMINA.md"
 var projectInstructionFilenames = []string{projectInstructionFilename, "AGENTS.md"}
 
 const memorySectionTemplate = "## Long-Term Memory\n\n" +
-	"LuminaCode maintains cross-session long-term memory in a local SQLite store at `{memory_store}`. You do not read or write this file directly; the runtime recalls relevant memories and writes new memories through the structured memory pipeline.\n\n" +
-	"Relevant long-term memories may be injected as hidden user context. Treat them as durable hints, not as fresh evidence. If a memory mentions file paths, commands, project behavior, or implementation details, verify the current repository state before relying on it.\n\n" +
-	"### Memory scopes\n" +
-	"- **user** - Cross-project user preferences and stable background.\n" +
-	"- **project** - Durable project decisions, architecture rules, and long-running TODOs for this project root.\n" +
-	"- **team** - Reusable Team-level collaboration rules and outcomes.\n" +
-	"- **agent_type** - Reusable experience for a role such as frontend, backend, research, QA, or reviewer.\n" +
-	"- **team_agent** - Private long-term memory for one role inside one Team.\n\n" +
-	"### Memory types\n" +
-	"- **semantic** facts and durable knowledge.\n" +
-	"- **episodic** lessons from previous tasks.\n" +
-	"- **procedural** durable behavior rules.\n" +
-	"- **preference** user preferences.\n" +
-	"- **feedback** user corrections.\n" +
-	"- **project** project-specific decisions.\n" +
-	"- **reference** stable external references.\n\n" +
-	"Save only information with clear cross-session value. Do not save temporary debugging details, current diffs, transient tool output, or anything that only matters for the current turn."
+	"LuminaCode maintains cross-session memory with Memory Fabric at `{memory_store}`. Its evidence ledger preserves source events before optional semantic compilation; its local index performs recall without a remote API call. You do not read or write these databases directly.\n\n" +
+	"Relevant evidence or semantic nodes may be injected as hidden user context. Treat recalled content as durable hints tied to its source and reference time, not as fresh evidence. Verify current files, commands, project behavior, and external state before relying on them.\n\n" +
+	"Semantic memory contains grounded claims, episodes, and procedures. Preferences, constraints, state, and configuration may have scoped or time-versioned alternatives. Never silently choose one side of an unresolved conflict, and do not substitute a nearby entity when the exact target is missing.\n\n" +
+	"Save only information with clear cross-session value. Raw tool observations may be retained as evidence, but semantic memory must not promote temporary debugging details, current diffs, transient output, or anything that only matters for the current turn."
 
 const sessionMemorySection = "## Session History Recall\n\n" +
 	"This session maintains a local SQLite commit log that summarizes conversation intervals. It is not a replacement for the full context; use it only when history may have been compressed or when you are unsure about earlier details. " +
@@ -899,10 +886,10 @@ func BuildMemorySection(cfg *config.Config) string {
 	if cfg == nil {
 		cfg = config.GetConfigPtr()
 	}
-	if !cfg.LongTermMemoryEnabled {
+	if !cfg.LongTermMemoryEnabled || !cfg.UsesMemoryFabric() {
 		return ""
 	}
-	memoryStore := strings.TrimSpace(cfg.LongTermMemoryStore)
+	memoryStore := strings.TrimSpace(cfg.MemoryPath)
 	if memoryStore == "" {
 		return ""
 	}

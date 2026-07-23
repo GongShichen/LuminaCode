@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -10,7 +9,6 @@ import (
 
 	"LuminaCode/apppaths"
 	"LuminaCode/backend"
-	"LuminaCode/longmemory"
 )
 
 func runLayoutCLI(args []string) error {
@@ -89,8 +87,7 @@ func runLayoutCLI(args []string) error {
 		}
 		report, migrateErr := apppaths.Migrate(paths, apppaths.MigrationOptions{
 			Apply: *apply, SourceRoot: *source, CurrentProjectRoot: *projectRoot, InstalledVersion: *installedVersion,
-			PackagedResources:  *packagedResources,
-			BeforeLayoutCommit: migrateLegacyMemory,
+			PackagedResources: *packagedResources,
 		})
 		if err := writeJSON(os.Stdout, report); err != nil {
 			return err
@@ -117,33 +114,6 @@ func runLayoutCLI(args []string) error {
 		return apppaths.BindLegacyProject(paths, *legacy, *root)
 	default:
 		return fmt.Errorf("unknown layout command %q", args[0])
-	}
-}
-
-func migrateLegacyMemory(paths apppaths.AppPaths, _ *apppaths.MigrationReport) error {
-	existed := false
-	if _, err := os.Stat(paths.MemoryDB); err == nil {
-		existed = true
-	}
-	store, err := longmemory.Open(context.Background(), paths.MemoryDB)
-	if err != nil {
-		if !existed {
-			removeSQLiteFiles(paths.MemoryDB)
-		}
-		return err
-	}
-	if err := store.Close(); err != nil {
-		if !existed {
-			removeSQLiteFiles(paths.MemoryDB)
-		}
-		return err
-	}
-	return nil
-}
-
-func removeSQLiteFiles(path string) {
-	for _, suffix := range []string{"", "-shm", "-wal"} {
-		_ = os.Remove(path + suffix)
 	}
 }
 

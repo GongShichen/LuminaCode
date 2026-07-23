@@ -159,7 +159,7 @@ func Migrate(paths AppPaths, opts MigrationOptions) (MigrationReport, error) {
 	preserveSource := !samePath(sourceRoot, paths.Root)
 	backupPath := ""
 	if preserveSource {
-		backupPath = sourceRoot + ".legacy-v1-" + now.UTC().Format("20060102-150405")
+		backupPath = sourceRoot + ".legacy-" + now.UTC().Format("20060102-150405")
 		if _, statErr := os.Stat(backupPath); statErr == nil {
 			return report, fmt.Errorf("legacy backup already exists: %s", backupPath)
 		} else if !os.IsNotExist(statErr) {
@@ -237,7 +237,7 @@ func Migrate(paths AppPaths, opts MigrationOptions) (MigrationReport, error) {
 		report.LegacyBackup = backupPath
 	}
 	report.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	reportPath := filepath.Join(paths.MigrationsDir, "v2-report.json")
+	reportPath := filepath.Join(paths.MigrationsDir, "migration-report.json")
 	if err := writeJSONAtomic(reportPath, report, 0o600); err != nil {
 		restoreMigrationSource(sourceRoot, backupPath)
 		restoreMigrationFiles(snapshots)
@@ -250,6 +250,13 @@ func Migrate(paths AppPaths, opts MigrationOptions) (MigrationReport, error) {
 		restoreMigrationFiles(snapshots)
 		rollbackMigration(completed)
 		return report, err
+	}
+	retiredMemoryRoot := filepath.Join(sourceRoot, "memory")
+	if preserveSource {
+		retiredMemoryRoot = filepath.Join(backupPath, "memory")
+	}
+	if err := os.RemoveAll(retiredMemoryRoot); err != nil {
+		report.Warnings = append(report.Warnings, "could not remove retired memory data: "+err.Error())
 	}
 	return report, nil
 }
@@ -382,7 +389,7 @@ func buildMigrationOperations(paths AppPaths, opts MigrationOptions, report *Mig
 		{"TEAM", paths.BundledTeamsDir, filepath.Join(paths.LegacyDataDir, "resources", "TEAM")},
 	}
 	for _, resource := range resources {
-		add("copy", resource.old, resource.legacy, "preserve v1 installed resources")
+		add("copy", resource.old, resource.legacy, "preserve installed resources")
 	}
 	planUserResourceImports(paths, opts, report, add)
 	for _, resource := range resources {
@@ -392,8 +399,6 @@ func buildMigrationOperations(paths AppPaths, opts MigrationOptions, report *Mig
 	add("move", "setup-searxng.sh", filepath.Join(paths.ScriptsDir, "setup-searxng.sh"), "move managed script into app layer")
 	add("move", "mcp/arxiv-mcp", paths.ArxivMCPDir, "move managed MCP extension into app layer")
 	add("move", "models", paths.ModelsDir, "move regenerable models into cache layer")
-	add("move", "memory/lumina-memory.sqlite", paths.MemoryDB, "move durable memory database")
-	add("move", "memory/migration-log.jsonl", filepath.Join(paths.MigrationsDir, "memory-legacy-import.jsonl"), "move memory migration log")
 	add("move", "sessions", paths.ActiveSessionsDir, "move active sessions")
 	add("move", "session-archive", paths.ArchivedSessionsDir, "move archived sessions")
 	add("move", "searxng", paths.SearxNGDir, "move managed service state")
@@ -435,13 +440,12 @@ func buildMigrationOperations(paths AppPaths, opts MigrationOptions, report *Mig
 		if _, ok := known[entry.Name()]; ok {
 			continue
 		}
-		add("move", filepath.ToSlash(filepath.Join("CONFIG", entry.Name())), filepath.Join(paths.LegacyDataDir, "config", entry.Name()), "preserve unclassified v1 configuration")
+		add("move", filepath.ToSlash(filepath.Join("CONFIG", entry.Name())), filepath.Join(paths.LegacyDataDir, "config", entry.Name()), "preserve unclassified legacy configuration")
 	}
 	if !configAliasesTarget {
 		add("move", "CONFIG", filepath.Join(paths.LegacyDataDir, "config-residual"), "preserve emptied legacy configuration directory")
 	}
 	add("move", "mcp", filepath.Join(paths.LegacyDataDir, "mcp"), "preserve unclassified managed MCP files")
-	add("move", "memory", filepath.Join(paths.LegacyDataDir, "memory"), "preserve unclassified legacy memory files")
 	add("move", "project", filepath.Join(paths.LegacyDataDir, "project-runtime"), "preserve unclassified project runtime files")
 	planCanonicalTopLevelNames(paths, report)
 
@@ -518,7 +522,7 @@ func planUserResourceImports(paths AppPaths, opts MigrationOptions, report *Migr
 				continue
 			}
 			if !identical {
-				report.Warnings = append(report.Warnings, fmt.Sprintf("legacy %s %q differs from the packaged resource; preserved under data/legacy/v1/resources for manual confirmation", resource.kind, entry.Name()))
+				report.Warnings = append(report.Warnings, fmt.Sprintf("legacy %s %q differs from the packaged resource; preserved under data/legacy/layout/resources for manual confirmation", resource.kind, entry.Name()))
 			}
 		}
 	}

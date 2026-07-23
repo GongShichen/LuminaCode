@@ -199,6 +199,7 @@ func TestCoreQueryLoopOutputTokenEscalationOmitsRequestMaxTokens(t *testing.T) {
 	cfg.APIMaxTokens = 32
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
+	cfg.LongTermMemoryEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
@@ -309,6 +310,7 @@ func TestCoreQueryLoopTruncatedToolUseExecutesBeforeNextModelTurnLikePython(t *t
 	cfg.APIMaxTokens = 256
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
+	cfg.LongTermMemoryEnabled = false
 	engine := agent.NewCoreExecutionEngine(&cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
@@ -1188,10 +1190,12 @@ func TestQueryLoopStripsLegacyMemoryIndexContextBeforeRequest(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.NewConfigForCWD(dir)
 	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
+	cfg.MemoryBackend = "fabric"
+	cfg.MemoryPath = filepath.Join(dir, "memory-fabric")
 	cfg.APIKey = ""
 	cfg.APIBaseURL = ""
 	engine := agent.NewCoreExecutionEngine(&cfg)
+	t.Cleanup(engine.Shutdown)
 	state := agent.NewAgentState()
 	state.Messages = []map[string]any{
 		memory.BuildMetaUserMessage("old index", "memory_index"),

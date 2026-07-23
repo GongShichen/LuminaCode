@@ -45,6 +45,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
+	github.com/viant/vec v0.1.1-0.20240628004145-aad750556278 // indirect
 	go.mongodb.org/mongo-driver v1.17.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/net v0.52.0 // indirect

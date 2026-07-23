@@ -39,20 +39,6 @@ func TestAgentBenchLoadCasesJSONAndLimit(t *testing.T) {
 	}
 }
 
-func TestMemoryBenchmarkMetricsDoNotDependOnSessionNamePrefixes(t *testing.T) {
-	sourcePath := filepath.Join("..", "benchmark", "agentbench", "memory_bench.go")
-	source, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	for _, forbidden := range []string{"countMemoriesBySourcePrefix", `HasPrefix(hit.SourceSessionID`, `"memoryarena-"`} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("memory benchmark metrics must use exact persisted provenance, found %q", forbidden)
-		}
-	}
-}
-
 func TestAgentBenchPercentileInterpolation(t *testing.T) {
 	if got := agentbench.Percentile(nil, 90); got != nil {
 		t.Fatalf("empty percentile should be nil")

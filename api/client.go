@@ -49,11 +49,13 @@ type CacheEdit struct {
 }
 
 type Response struct {
-	Text         string           `json:"text"`
-	ToolCalls    []map[string]any `json:"tool_calls"`
-	StopReason   string           `json:"stop_reason"`
-	InputTokens  int              `json:"input_tokens"`
-	OutputTokens int              `json:"output_tokens"`
+	Text                     string           `json:"text"`
+	ToolCalls                []map[string]any `json:"tool_calls"`
+	StopReason               string           `json:"stop_reason"`
+	InputTokens              int              `json:"input_tokens"`
+	CacheReadInputTokens     int              `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int              `json:"cache_creation_input_tokens"`
+	OutputTokens             int              `json:"output_tokens"`
 }
 
 type LLMRequestOptions struct {
@@ -61,11 +63,13 @@ type LLMRequestOptions struct {
 	MaxTokens           int         `json:"-"`
 	RequiredTool        string      `json:"-"`
 	DisableThinking     bool        `json:"-"`
+	Temperature         *float64    `json:"-"`
 }
 
 type CompleteOptions struct {
-	MaxTokens int
-	Tools     []map[string]any
+	MaxTokens   int
+	Tools       []map[string]any
+	Temperature *float64
 }
 
 type StructuredCompletionOptions struct {
@@ -73,6 +77,7 @@ type StructuredCompletionOptions struct {
 	Tools           []map[string]any
 	RequiredTool    string
 	DisableThinking bool
+	Temperature     *float64
 }
 
 type StructuredCompletionClient interface {
@@ -229,8 +234,12 @@ func (c *LLMClientBase) RetryRequest(
 ) (map[string]any, error) {
 	cfg := c.RetryConfig
 	var lastErr error
+	cooldownKey := providerCooldownKey(c.BaseURL)
 
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		if !waitProviderCooldown(ctx, cooldownKey) {
+			return nil, ctx.Err()
+		}
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
 		resp, err := makeRequest(reqCtx, c.HTTPClient)
 
@@ -277,10 +286,14 @@ func (c *LLMClientBase) RetryRequest(
 			if err := json.Unmarshal(bodyBytes, &data); err != nil {
 				return nil, fmt.Errorf("invalid JSON in 200 response: %.200s", string(bodyBytes))
 			}
+			noteProviderSuccess(cooldownKey)
 			return data, nil
 		}
 
 		statusErr := NewAPIStatusError(c.ProviderName, resp.StatusCode, resp.Status, bodyBytes)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			noteProviderRateLimit(cooldownKey)
+		}
 		if isRetryableHTTPError(resp.StatusCode, statusErr.Body, cfg) && attempt < cfg.MaxRetries {
 			if !sleepBackoff(ctx, attempt, cfg) {
 				return nil, ctx.Err()
@@ -334,7 +347,7 @@ func (c *AnthropicClient) Complete(
 	opts CompleteOptions,
 ) (string, error) {
 	response, err := collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools,
-		&LLMRequestOptions{MaxTokens: opts.MaxTokens}))
+		&LLMRequestOptions{MaxTokens: opts.MaxTokens, Temperature: opts.Temperature}))
 	if err != nil {
 		return "", err
 	}
@@ -349,6 +362,7 @@ func (c *AnthropicClient) CompleteStructured(
 ) (Response, error) {
 	return collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools, &LLMRequestOptions{
 		MaxTokens: opts.MaxTokens, RequiredTool: opts.RequiredTool, DisableThinking: opts.DisableThinking,
+		Temperature: opts.Temperature,
 	}))
 }
 
@@ -398,6 +412,9 @@ func (c *AnthropicClient) StreamChat(
 	}
 	if options != nil && options.MaxTokens > 0 {
 		bodyMap["max_tokens"] = options.MaxTokens
+	}
+	if options != nil && options.Temperature != nil {
+		bodyMap["temperature"] = *options.Temperature
 	}
 	if len(apiTools) > 0 {
 		bodyMap["tools"] = apiTools
@@ -644,7 +661,7 @@ func (c *OpenAICompatibleClient) Complete(
 	opts CompleteOptions,
 ) (string, error) {
 	response, err := collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools,
-		&LLMRequestOptions{MaxTokens: opts.MaxTokens}))
+		&LLMRequestOptions{MaxTokens: opts.MaxTokens, Temperature: opts.Temperature}))
 	if err != nil {
 		return "", err
 	}
@@ -659,6 +676,7 @@ func (c *OpenAICompatibleClient) CompleteStructured(
 ) (Response, error) {
 	return collectCompletionStream(c.StreamChat(ctx, systemPrompt, messages, opts.Tools, &LLMRequestOptions{
 		MaxTokens: opts.MaxTokens, RequiredTool: opts.RequiredTool, DisableThinking: opts.DisableThinking,
+		Temperature: opts.Temperature,
 	}))
 }
 
@@ -681,6 +699,9 @@ func (c *OpenAICompatibleClient) StreamChat(
 	}
 	if options != nil && options.MaxTokens > 0 {
 		bodyMap["max_completion_tokens"] = options.MaxTokens
+	}
+	if options != nil && options.Temperature != nil {
+		bodyMap["temperature"] = *options.Temperature
 	}
 
 	if len(tools) > 0 {
@@ -926,6 +947,8 @@ func collectCompletionStream(stream <-chan EventResult) (Response, error) {
 			})
 		case "usage":
 			response.InputTokens = getInt(event, "input_tokens")
+			response.CacheReadInputTokens = getInt(event, "cache_read_input_tokens")
+			response.CacheCreationInputTokens = getInt(event, "cache_creation_input_tokens")
 			response.OutputTokens = getInt(event, "output_tokens")
 		case "stop_reason":
 			response.StopReason = getString(event, "stop_reason")

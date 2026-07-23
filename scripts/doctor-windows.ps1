@@ -67,9 +67,8 @@ $skills = Join-Path $paths.Resources "skills"
 $defaults = $paths.Settings
 $mcpConfig = $paths.McpConfig
 $arxivPython = Join-Path $paths.Extensions "arxiv-mcp\.venv\Scripts\python.exe"
-$embeddingModel = Join-Path $paths.MemoryModel "model.onnx"
-$embeddingTokenizer = Join-Path $paths.MemoryModel "tokenizer.json"
-$embeddingRuntime = Join-Path $paths.MemoryModel "runtime\onnxruntime.dll"
+$bgeModel = Join-Path $paths.MemoryBGEModel "onnx\model.onnx"
+$bgeRuntime = Join-Path $paths.MemoryBGEModel "runtime\onnxruntime.dll"
 $endpoint = $paths.Endpoint
 $command = Get-Command lumina -ErrorAction SilentlyContinue
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -109,13 +108,13 @@ if (Test-Path $defaults) {
     Status-Line "WebSearch" "not configured"
 }
 Status-Line "arXiv MCP" ($(if ((Test-Path $arxivPython) -and (Test-Path $mcpConfig)) { "installed" } else { "not installed" }))
-Status-Line "Embedding" ($(if ((Test-Path $embeddingModel) -and (Test-Path $embeddingTokenizer) -and (Test-Path $embeddingRuntime)) { "installed" } else { "missing" }))
+Status-Line "BGE-M3" ($(if ((Test-Path $bgeModel) -and (Test-Path $bgeRuntime)) { "installed" } else { "missing" }))
 if (Test-Path $backend) {
     try {
         & $backend memory doctor | Out-Null
-        Status-Line "Embedding test" "inference ready"
+        Status-Line "BGE-M3 memory test" "inference ready"
     } catch {
-        Status-Line "Embedding test" "failed: $($_.Exception.Message)"
+        Status-Line "BGE-M3 memory test" "failed: $($_.Exception.Message)"
     }
 }
 Status-Line "Endpoint" ($(if (Test-Path $endpoint) { $endpoint } else { "not running" }))

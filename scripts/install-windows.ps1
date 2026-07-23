@@ -139,43 +139,83 @@ $appNew = Join-Path $AppRoot "app.new"
 $appOld = Join-Path $AppRoot "app.old"
 $swapped = $false
 $version = "dev"
+$installStage = "startup"
+$installLogRoot = Join-Path $tmpDir "install-logs"
+New-Item -ItemType Directory -Path $installLogRoot -Force | Out-Null
+$installLog = Join-Path $installLogRoot "install-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))-$PID.log"
+Start-Transcript -LiteralPath $installLog -Force | Out-Null
 
-Write-Host "LuminaCode Windows install"
-Write-Host "Repo:        $repoRoot"
-Write-Host "Install dir: $InstallDir"
-Write-Host "App root:    $AppRoot"
-
-Assert-Command go
-Assert-Command node
-Assert-Command npm
-$cCompilerName = $(if ($env:CC) { $env:CC } else { "gcc" })
-Assert-Command $cCompilerName
-$env:CGO_ENABLED = "1"
-
-if ($ConfigureApi) {
-    if (-not $ApiKey) {
-        $ApiKey = Convert-SecureStringToPlainText (Read-Host "API key" -AsSecureString)
-    }
-    $BaseUrl = Read-OptionalValue -Prompt "API base URL" -CurrentValue $BaseUrl
-    $Model = Read-OptionalValue -Prompt "API model" -CurrentValue $Model
-    $ApiType = Read-OptionalValue -Prompt "API type (openai_compatible, anthropic, auto)" -CurrentValue $ApiType
-    if ($ApiType -notin @("openai_compatible", "anthropic", "auto")) { throw "Invalid API type '$ApiType'." }
-    $WriteDefaults = $true
-}
-
-New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-Push-Location $repoRoot
 try {
-    if (-not $SkipNpmInstall) { Invoke-Native "install frontend dependencies" { & npm --prefix frontend install } }
-    Invoke-Native "build frontend" { & npm --prefix frontend run build }
-    if (-not (Test-Path $frontendDist)) { throw "Frontend build output was not created: $frontendDist" }
-    Invoke-Native "build Go backend" { & go build -o $backendBuildPath . }
+    $installStage = "hardware and model preflight"
+    Write-Host "LuminaCode Windows install"
+    Write-Host "Repo:        $repoRoot"
+    Write-Host "Install dir: $InstallDir"
+    Write-Host "App root:    $AppRoot"
+    Write-Host "Install log: $installLog"
+
+    Assert-Command go
+    Assert-Command node
+    Assert-Command npm
+    Assert-Command curl.exe
+    $cCompilerName = $(if ($env:CC) { $env:CC } else { "gcc" })
+    Assert-Command $cCompilerName
+    $env:CGO_ENABLED = "1"
+
+    $processor = Get-CimInstance Win32_Processor | Select-Object -First 1
+    $video = @(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name)
+    $memoryBytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    Write-Host "Hardware preflight"
+    Write-Host "  platform: Windows/$env:PROCESSOR_ARCHITECTURE"
+    Write-Host "  processor: $($processor.Name.Trim())"
+    Write-Host "  accelerator: $(if ($video) { $video -join ', ' } else { 'none detected' })"
+    Write-Host "  memory: $([math]::Floor($memoryBytes / 1MB)) MiB"
+
+    if ($SkipManagedComponents) {
+        Write-Host "  managed memory runtime: skipped (SkipManagedComponents)"
+    } elseif ($env:SKIP_MEMORY_MODELS -eq "1") {
+        & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action preflight-installed -AppRoot $AppRoot
+        if ($LASTEXITCODE -ne 0) { throw "Preinstalled BGE-M3 preflight failed." }
+    } else {
+        & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action preflight -AppRoot $AppRoot
+        if ($LASTEXITCODE -ne 0) { throw "BGE-M3 install preflight failed." }
+    }
+
+    $installStage = "configuration"
+    if ($ConfigureApi) {
+        if (-not $ApiKey) {
+            $ApiKey = Convert-SecureStringToPlainText (Read-Host "API key" -AsSecureString)
+        }
+        $BaseUrl = Read-OptionalValue -Prompt "API base URL" -CurrentValue $BaseUrl
+        $Model = Read-OptionalValue -Prompt "API model" -CurrentValue $Model
+        $ApiType = Read-OptionalValue -Prompt "API type (openai_compatible, anthropic, auto)" -CurrentValue $ApiType
+        if ($ApiType -notin @("openai_compatible", "anthropic", "auto")) { throw "Invalid API type '$ApiType'." }
+        $WriteDefaults = $true
+    }
+
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    Push-Location $repoRoot
+    try {
+        $installStage = "frontend build"
+        if (-not $SkipNpmInstall) { Invoke-Native "install frontend dependencies" { & npm --prefix frontend install } }
+        Invoke-Native "build frontend" { & npm --prefix frontend run build }
+        if (-not (Test-Path $frontendDist)) { throw "Frontend build output was not created: $frontendDist" }
+        $installStage = "Go backend build"
+	    Invoke-Native "build Go backend" { & go build -o $backendBuildPath . }
+	    if (-not $SkipManagedComponents) {
+            $installStage = "memory model installation"
+		    if ($env:SKIP_MEMORY_MODELS -eq "1") {
+			    Invoke-Native "verify preinstalled memory models" { & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action doctor -AppRoot $AppRoot -Backend $backendBuildPath }
+		    } else {
+			    Invoke-Native "install memory models" { & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action install -AppRoot $AppRoot -Backend $backendBuildPath }
+		    }
+	    }
     try {
         $described = & git describe --tags --always --dirty 2>$null
         if ($LASTEXITCODE -eq 0 -and $described) { $version = ([string]$described).Trim() }
     } catch {}
 
-    New-Item -ItemType Directory -Path $AppRoot -Force | Out-Null
+        $installStage = "atomic application deployment"
+        New-Item -ItemType Directory -Path $AppRoot -Force | Out-Null
     if ((Test-Path $appNew) -or (Test-Path $appOld)) {
         throw "Stale app.new/app.old exists under $AppRoot; inspect it before retrying."
     }
@@ -188,14 +228,14 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot ".Lumina\CONFIG\defaults.json.example") -Destination (Join-Path $appNew "resources\defaults\settings.example.json")
     Copy-Item -LiteralPath (Join-Path $repoRoot "frontend\dist") -Destination (Join-Path $appNew "frontend") -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "frontend\package.json"), (Join-Path $repoRoot "frontend\package-lock.json") -Destination (Join-Path $appNew "frontend")
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "app-paths.ps1"), (Join-Path $PSScriptRoot "setup-arxiv-mcp-windows.ps1"), (Join-Path $PSScriptRoot "setup-memory-embedding-windows.ps1") -Destination (Join-Path $appNew "scripts")
+	Copy-Item -LiteralPath (Join-Path $PSScriptRoot "app-paths.ps1"), (Join-Path $PSScriptRoot "setup-arxiv-mcp-windows.ps1"), (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1"), (Join-Path $PSScriptRoot "memory-models.lock") -Destination (Join-Path $appNew "scripts")
     Push-Location (Join-Path $appNew "frontend")
     try { Invoke-Native "install production frontend dependencies" { & npm ci --omit=dev } } finally { Pop-Location }
     Remove-Item -LiteralPath (Join-Path $appNew "frontend\package-lock.json") -Force
 
     $env:LUMINA_APP_ROOT = $AppRoot
     & $backendBuildPath shutdown 2>$null
-    Invoke-Native "migrate AppRoot v2" { & $backendBuildPath layout migrate --apply --project-root $repoRoot --packaged-resources (Join-Path $appNew "resources") --installed-version $version }
+    Invoke-Native "migrate AppRoot layout" { & $backendBuildPath layout migrate --apply --project-root $repoRoot --packaged-resources (Join-Path $appNew "resources") --installed-version $version }
 
     if (Test-Path $paths.Extensions) {
         Copy-DirectoryContents -Source $paths.Extensions -Destination (Join-Path $appNew "extensions")
@@ -209,7 +249,8 @@ try {
     Remove-Item -LiteralPath $appOld -Recurse -Force -ErrorAction SilentlyContinue
     $swapped = $false
 
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        $installStage = "launcher installation"
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Copy-Item -LiteralPath $backendBuildPath -Destination $installedBackend -Force
     Write-LuminaLauncher -Path $installedLauncher -AppRoot $AppRoot
 
@@ -222,29 +263,42 @@ try {
     if (-not $SkipManagedComponents) {
         try { & (Join-Path $paths.App "scripts\setup-arxiv-mcp-windows.ps1") -Action install -AppRoot $AppRoot }
         catch { Write-Warning "arXiv MCP setup failed: $($_.Exception.Message)" }
-        try { & (Join-Path $paths.App "scripts\setup-memory-embedding-windows.ps1") -Action install -AppRoot $AppRoot }
-        catch { Write-Warning "Memory embedding setup failed: $($_.Exception.Message)" }
     }
 
     $pathUpdated = $false
     if (-not $NoPathUpdate) { $pathUpdated = Add-UserPath -Path $InstallDir }
     Invoke-Native "installed launcher help" { & $installedLauncher --help }
-} catch {
-    if ($swapped) {
-        Remove-Item -LiteralPath $paths.App -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path $appOld) { Move-Item -LiteralPath $appOld -Destination $paths.App }
+    } catch {
+        if ($swapped) {
+            Remove-Item -LiteralPath $paths.App -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $appOld) { Move-Item -LiteralPath $appOld -Destination $paths.App }
+        }
+        throw
+    } finally {
+        Remove-Item -LiteralPath $appNew -Recurse -Force -ErrorAction SilentlyContinue
+        Pop-Location
     }
-    throw
-} finally {
-    Remove-Item -LiteralPath $appNew -Recurse -Force -ErrorAction SilentlyContinue
-    Pop-Location
-}
 
-Write-Host ""
-Write-Host "Installed LuminaCode $version"
-Write-Host "Launcher: $installedLauncher"
-Write-Host "Backend:  $installedBackend"
-Write-Host "AppRoot:  $AppRoot"
-if ($NoPathUpdate) { Write-Host "PATH was not updated." }
-elseif ($pathUpdated) { Write-Host "Added install dir to the user PATH." }
-else { Write-Host "Install dir is already in the user PATH." }
+    $installStage = "complete"
+    Write-Host ""
+    Write-Host "Installed LuminaCode $version"
+    Write-Host "Launcher: $installedLauncher"
+    Write-Host "Backend:  $installedBackend"
+    Write-Host "AppRoot:  $AppRoot"
+    Write-Host "Log:      $installLog"
+    if ($NoPathUpdate) { Write-Host "PATH was not updated." }
+    elseif ($pathUpdated) { Write-Host "Added install dir to the user PATH." }
+    else { Write-Host "Install dir is already in the user PATH." }
+} catch {
+    Write-Error @"
+LuminaCode installation failed.
+  stage: $installStage
+  error: $($_.Exception.Message)
+  log: $installLog
+  application: app.new was cleaned and a swapped application was restored automatically
+Fix the reported error and run the installer again.
+"@
+    exit 1
+} finally {
+    try { Stop-Transcript | Out-Null } catch {}
+}

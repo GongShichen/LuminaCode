@@ -16,13 +16,27 @@ func BuildRecalledMemoriesMessage(recalled []MemoryRecall) map[string]any {
 	parts := make([]string, 0, len(recalled))
 	filenames := make([]string, 0, len(recalled))
 	recallIDs := make([]string, 0, len(recalled))
+	seenRecallIDs := map[string]struct{}{}
 	for _, item := range recalled {
 		parts = append(parts, strings.TrimSpace(item.Content))
 		filenames = append(filenames, item.Filename)
-		if item.RecallID != "" {
-			recallIDs = append(recallIDs, item.RecallID)
-		} else {
-			recallIDs = append(recallIDs, item.Filename)
+		itemIDs := item.RecallIDs
+		if len(itemIDs) == 0 {
+			itemIDs = []string{item.RecallID}
+			if item.RecallID == "" {
+				itemIDs[0] = item.Filename
+			}
+		}
+		for _, recallID := range itemIDs {
+			recallID = strings.TrimSpace(recallID)
+			if recallID == "" {
+				continue
+			}
+			if _, exists := seenRecallIDs[recallID]; exists {
+				continue
+			}
+			seenRecallIDs[recallID] = struct{}{}
+			recallIDs = append(recallIDs, recallID)
 		}
 	}
 	combined := "<system-reminder>\n" + joinDoubleNewline(parts) + "\n</system-reminder>"
@@ -54,7 +68,7 @@ func RecalledMemoryIDs(messages []map[string]any, source ...string) map[string]s
 		}
 		if values, ok := metadata["recall_ids"].([]string); ok {
 			for _, value := range values {
-				if strings.HasPrefix(value, "mem_") {
+				if value = strings.TrimSpace(value); value != "" {
 					result[value] = struct{}{}
 				}
 			}
@@ -62,8 +76,10 @@ func RecalledMemoryIDs(messages []map[string]any, source ...string) map[string]s
 		}
 		if values, ok := metadata["recall_ids"].([]any); ok {
 			for _, value := range values {
-				if s, ok := value.(string); ok && strings.HasPrefix(s, "mem_") {
-					result[s] = struct{}{}
+				if s, ok := value.(string); ok {
+					if s = strings.TrimSpace(s); s != "" {
+						result[s] = struct{}{}
+					}
 				}
 			}
 			continue

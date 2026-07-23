@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"LuminaCode/longmemory"
+	"LuminaCode/memory"
 )
 
 func TestMemoryRuntimeDoesNotDependOnBenchmarkPackages(t *testing.T) {
 	_, current, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(current))
-	for _, directory := range []string{"agent", "memory", "longmemory"} {
+	for _, directory := range []string{"agent", "memory"} {
 		err := filepath.WalkDir(filepath.Join(root, directory), func(path string, entry os.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
 				return err
@@ -36,8 +36,8 @@ func TestMemoryRuntimeDoesNotDependOnBenchmarkPackages(t *testing.T) {
 
 func TestMemoryPublicQueryTypesContainNoEvaluationFields(t *testing.T) {
 	payload, err := json.Marshal(struct {
-		Query    longmemory.MemoryQuery
-		Document longmemory.RetrievalDocument
+		Query    memory.SearchRequest
+		Document memory.Evidence
 	}{})
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestMemoryBenchmarkAdapterCannotWriteStorageTablesDirectly(t *testing.T) {
 	_, current, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(current))
 	err := filepath.WalkDir(filepath.Join(root, "benchmark"), func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return err
 		}
 		content, readErr := os.ReadFile(path)
@@ -62,7 +62,7 @@ func TestMemoryBenchmarkAdapterCannotWriteStorageTablesDirectly(t *testing.T) {
 			return readErr
 		}
 		lower := strings.ToLower(string(content))
-		for _, statement := range []string{"insert into memories", "insert into memory_facts", "insert into memory_entities", "insert into memory_session_index"} {
+		for _, statement := range []string{"insert into events", "insert into semantic_nodes", "insert into conflicts", "insert into resolutions"} {
 			if strings.Contains(lower, statement) {
 				t.Fatalf("benchmark adapter writes memory storage directly: %s contains %q", path, statement)
 			}

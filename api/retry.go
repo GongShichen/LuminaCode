@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -82,6 +83,27 @@ type RequestParts struct {
 	Headers map[string]string
 	Body    []byte
 }
+
+var providerCooldown = struct {
+	sync.Mutex
+	entries map[string]providerCooldownEntry
+}{
+	entries: map[string]providerCooldownEntry{},
+}
+
+var providerQuotaExhausted = struct {
+	sync.Mutex
+	entries map[string]string
+}{
+	entries: map[string]string{},
+}
+
+type providerCooldownEntry struct {
+	Level int
+	Until time.Time
+}
+
+var providerCooldownSteps = []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
 
 type EventResult struct {
 	Event map[string]any
@@ -257,6 +279,23 @@ func RetryWithBackoff(
 				break
 			}
 
+			cooldownKey := providerCooldownKey(req.URL)
+			if reason, exhausted := providerQuotaExhaustedReason(cooldownKey); exhausted {
+				sendEvent(ctx, out, map[string]any{
+					"type":        "error",
+					"message":     reason,
+					"error_type":  "api_quota_exhausted",
+					"provider":    cooldownKey,
+					"raw_error":   reason,
+					"retryable":   false,
+					"status_code": http.StatusTooManyRequests,
+				})
+				return
+			}
+			if !waitProviderCooldown(ctx, cooldownKey) {
+				sendErr(ctx, out, ctx.Err())
+				return
+			}
 			stream := streamFn(ctx, req.URL, req.Headers, req.Body)
 
 			shouldRetry := false
@@ -266,7 +305,24 @@ func RetryWithBackoff(
 					lastErr = item.Err
 					lastError = item.Err.Error()
 
+					if IsQuotaExhaustedError(item.Err) {
+						noteProviderQuotaExhausted(cooldownKey, lastError)
+						sendEvent(ctx, out, map[string]any{
+							"type":        "error",
+							"message":     lastError,
+							"error_type":  "api_quota_exhausted",
+							"provider":    cooldownKey,
+							"status_code": statusCodeFromError(item.Err),
+							"raw_error":   rawBodyFromError(item.Err),
+							"retryable":   false,
+						})
+						return
+					}
+
 					if isRetryableError(item.Err) {
+						if retryableStatusCode(item.Err) == http.StatusTooManyRequests {
+							noteProviderRateLimit(cooldownKey)
+						}
 						shouldRetry = true
 						break
 					}
@@ -286,6 +342,7 @@ func RetryWithBackoff(
 			}
 
 			if !shouldRetry {
+				noteProviderSuccess(cooldownKey)
 				return
 			}
 
@@ -342,6 +399,117 @@ func rawBodyFromError(err error) any {
 		return statusErr.Body
 	}
 	return nil
+}
+
+func retryableStatusCode(err error) int {
+	var retryableStatus RetryableStatusError
+	if errors.As(err, &retryableStatus) {
+		return retryableStatus.StatusCode
+	}
+	var statusErr APIStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
+	}
+	return 0
+}
+
+func providerCooldownKey(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host)
+	}
+	return strings.ToLower(strings.TrimRight(rawURL, "/"))
+}
+
+func waitProviderCooldown(ctx context.Context, key string) bool {
+	if key == "" {
+		return true
+	}
+	for {
+		providerCooldown.Lock()
+		entry := providerCooldown.entries[key]
+		wait := time.Until(entry.Until)
+		providerCooldown.Unlock()
+		if wait <= 0 {
+			return true
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+func noteProviderRateLimit(key string) {
+	if key == "" {
+		return
+	}
+	providerCooldown.Lock()
+	defer providerCooldown.Unlock()
+	entry := providerCooldown.entries[key]
+	if entry.Level < len(providerCooldownSteps) {
+		entry.Level++
+	}
+	if entry.Level <= 0 {
+		entry.Level = 1
+	}
+	delay := providerCooldownSteps[entry.Level-1]
+	entry.Until = time.Now().Add(delay)
+	providerCooldown.entries[key] = entry
+}
+
+func noteProviderSuccess(key string) {
+	if key == "" {
+		return
+	}
+	providerCooldown.Lock()
+	defer providerCooldown.Unlock()
+	entry := providerCooldown.entries[key]
+	if entry.Level <= 1 {
+		delete(providerCooldown.entries, key)
+		return
+	}
+	entry.Level--
+	entry.Until = time.Time{}
+	providerCooldown.entries[key] = entry
+}
+
+func noteProviderQuotaExhausted(key, reason string) {
+	if key == "" {
+		return
+	}
+	providerQuotaExhausted.Lock()
+	defer providerQuotaExhausted.Unlock()
+	providerQuotaExhausted.entries[key] = strings.TrimSpace(reason)
+}
+
+func providerQuotaExhaustedReason(key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	providerQuotaExhausted.Lock()
+	defer providerQuotaExhausted.Unlock()
+	reason, ok := providerQuotaExhausted.entries[key]
+	if strings.TrimSpace(reason) == "" {
+		reason = "API quota exhausted"
+	}
+	return reason, ok
+}
+
+func resetProviderCooldownForTest() {
+	providerCooldown.Lock()
+	defer providerCooldown.Unlock()
+	providerCooldown.entries = map[string]providerCooldownEntry{}
+	providerQuotaExhausted.Lock()
+	defer providerQuotaExhausted.Unlock()
+	providerQuotaExhausted.entries = map[string]string{}
 }
 
 func sleepBackoff(ctx context.Context, attempt int, config RetryConfig) bool {
@@ -406,4 +574,48 @@ func isRetryableError(err error) bool {
 	}
 	var retryableStatus RetryableStatusError
 	return errors.As(err, &retryableStatus)
+}
+
+func IsQuotaExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var retryableStatus RetryableStatusError
+	if errors.As(err, &retryableStatus) {
+		return isQuotaExhaustedStatus(retryableStatus.StatusCode, retryableStatus.Body+" "+retryableStatus.Status)
+	}
+	var statusErr APIStatusError
+	if errors.As(err, &statusErr) {
+		return isQuotaExhaustedStatus(statusErr.StatusCode, statusErr.Body+" "+statusErr.Status)
+	}
+	return IsQuotaExhaustedMessage(err.Error())
+}
+
+func IsQuotaExhaustedMessage(message string) bool {
+	return containsQuotaExhaustedText(strings.ToLower(message))
+}
+
+func isQuotaExhaustedStatus(statusCode int, body string) bool {
+	if statusCode == http.StatusPaymentRequired {
+		return true
+	}
+	if statusCode != http.StatusTooManyRequests {
+		return false
+	}
+	return containsQuotaExhaustedText(strings.ToLower(body))
+}
+
+func containsQuotaExhaustedText(lower string) bool {
+	for _, fragment := range []string{
+		"quota exhausted",
+		"insufficient quota",
+		"insufficient balance",
+		"payment required",
+		"billing hard limit",
+	} {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
 }

@@ -208,17 +208,17 @@ func TestBuildMemorySectionDescribesGeneralAgentMemoryRules(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.NewConfig()
 	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = filepath.Join(dir, "lumina-memory.sqlite")
+	cfg.MemoryBackend = "fabric"
+	cfg.MemoryPath = filepath.Join(dir, "memory-fabric")
 
 	got := agentContext.BuildMemorySection(&cfg)
 	for _, want := range []string{
 		"## Long-Term Memory",
-		"local SQLite store at `" + cfg.LongTermMemoryStore + "`",
-		"You do not read or write this file directly",
-		"**user** - Cross-project user preferences",
-		"**project** - Durable project decisions",
-		"**agent_type** - Reusable experience",
-		"**feedback** user corrections",
+		"Memory Fabric at `" + cfg.MemoryPath + "`",
+		"You do not read or write these databases directly",
+		"evidence ledger preserves source events",
+		"Semantic memory contains grounded claims, episodes, and procedures",
+		"Never silently choose one side of an unresolved conflict",
 		"only matters for the current turn",
 	} {
 		if !strings.Contains(got, want) {

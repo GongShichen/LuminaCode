@@ -132,6 +132,9 @@ func (c *FallbackLLMClient) CompleteStructured(
 	if err == nil {
 		err = fmt.Errorf("primary model did not return required structured output %q", opts.RequiredTool)
 	}
+	if IsQuotaExhaustedError(err) {
+		return Response{}, err
+	}
 	return c.completeStructuredFallback(ctx, systemPrompt, messages, opts, err)
 }
 
@@ -268,6 +271,10 @@ func streamEventProducedOutput(event map[string]any) bool {
 
 func fallbackEligibleEvent(event map[string]any) (string, bool) {
 	message := stringValue(event["message"])
+	if strings.EqualFold(strings.TrimSpace(stringValue(event["error_type"])), "api_quota_exhausted") ||
+		IsQuotaExhaustedMessage(message) || IsQuotaExhaustedMessage(stringValue(event["raw_error"])) {
+		return message, false
+	}
 	if containsNonFallbackError(message) || containsNonFallbackError(stringValue(event["raw_error"])) {
 		return message, false
 	}
@@ -286,6 +293,9 @@ func fallbackEligibleEvent(event map[string]any) (string, bool) {
 
 func fallbackEligibleError(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if IsQuotaExhaustedError(err) {
 		return false
 	}
 	if containsNonFallbackError(err.Error()) {
@@ -325,6 +335,10 @@ func containsNonFallbackError(value string) bool {
 		"permission",
 		"model_not_found",
 		"not_found",
+		"quota exhausted",
+		"insufficient quota",
+		"insufficient balance",
+		"payment required",
 	} {
 		if strings.Contains(lower, fragment) {
 			return true

@@ -68,6 +68,14 @@ if (Test-Path $arxivSetup) {
     catch { Write-Warning "Could not remove installer-owned arXiv MCP config: $($_.Exception.Message)" }
 }
 
+$modelSetup = Join-Path $paths.App "scripts\setup-memory-models-windows.ps1"
+if (-not (Test-Path $modelSetup)) { $modelSetup = Join-Path $PSScriptRoot "setup-memory-models-windows.ps1" }
+if (Test-Path $modelSetup) {
+    try { & $modelSetup -Action uninstall -AppRoot $AppRoot -Backend $backend }
+    catch { Write-Warning "Could not remove managed memory models: $($_.Exception.Message)" }
+}
+
+
 foreach ($path in @($launcher, $backend)) {
     if (Test-Path $path) { Remove-Item -LiteralPath $path -Force; Write-Host "Removed $path" }
 }

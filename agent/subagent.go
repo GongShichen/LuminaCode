@@ -9,7 +9,6 @@ import (
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
 	"LuminaCode/config"
-	"LuminaCode/longmemory"
 	"LuminaCode/memory"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
@@ -498,9 +497,13 @@ func (s *SubAgent) buildSystemPrompt() string {
 func (s *SubAgent) buildInitialMessages(ctx context.Context, prompt string) []map[string]any {
 	var messages []map[string]any
 	if s.Config.LongTermMemoryEnabled {
-		packet, _ := s.recallLongTermAgentEvidence(ctx, prompt, nil)
-		if msg := longmemory.BuildEvidenceContextMessage(packet); msg != nil {
-			messages = append(messages, msg)
+		engine, _ := s.ExtraContext["_memory_engine"].(memory.Engine)
+		state := &AgentState{MemorySessionID: s.sessionIDForMemoryUse(), MemoryAgentType: s.AgentType,
+			MemoryQueryTime: time.Now().UTC()}
+		if recalled := RunMemoryRecallWithEngine(ctx, s.Config, state, prompt, engine); len(recalled) > 0 {
+			if msg := memory.BuildRecalledMemoriesMessage(recalled); msg != nil {
+				messages = append(messages, msg)
+			}
 		}
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}}})
@@ -516,95 +519,6 @@ func (s *SubAgent) longTermAgentMemoryBehavior() string {
 		agentType = "subagent"
 	}
 	return fmt.Sprintf("## Role Long-Term Memory\n\nAgent-type memory: `%s`.\n\nThis sub-agent may receive long-term memories for user, project, and agent_type scopes. Treat recalled memories as durable hints and verify current project files before relying on code or path claims. Do not write memory files directly; durable memories are extracted by LuminaCode's structured memory runtime.", agentType)
-}
-
-func (s *SubAgent) recallLongTermAgentEvidence(ctx context.Context, query string, surfaced map[string]struct{}) (longmemory.EvidencePacket, []string) {
-	if !s.Config.LongTermMemoryEnabled || strings.TrimSpace(query) == "" {
-		return longmemory.EvidencePacket{}, nil
-	}
-	store, err := longmemory.Open(ctx, s.Config.LongTermMemoryStore)
-	if err != nil {
-		return longmemory.EvidencePacket{}, nil
-	}
-	defer store.Close()
-	agentType := strings.TrimSpace(s.AgentType)
-	if agentType == "" {
-		agentType = strings.TrimSpace(s.Definition.Name)
-	}
-	teamID, _ := s.ExtraContext["team_session_id"].(string)
-	teamAgentID, _ := s.ExtraContext["team_agent_id"].(string)
-	teamName, _ := s.ExtraContext["team_name"].(string)
-	scopes := longmemory.RuntimeScopesCanonical(s.Config.ProjectRoot(), agentType, teamName, teamAgentID)
-	limit := s.Config.MemoryAtomMaxSelected
-	if limit <= 0 {
-		limit = 32
-	}
-	memoryQuery := longmemory.MemoryQuery{Text: strings.TrimSpace(query), Timestamp: time.Now().UTC(), Scopes: scopes,
-		SessionID: s.sessionIDForMemoryUse(), TeamSessionID: teamID, AgentID: agentType}
-	catalog, catalogErr := store.InspectCatalog(ctx, scopes)
-	expansion, expansionModel, expansionError := expandMemoryQuery(ctx, s.Config, memoryQuery, catalog,
-		func(ctx context.Context, model string) (api.LLMClient, error) {
-			return CreateConfiguredLLMClient(s.Config, model, 1024, nil, api.DefaultRetryConfigPtr())
-		})
-	if catalogErr != nil {
-		if expansionError != "" {
-			expansionError += "; "
-		}
-		expansionError += "inspect memory catalog: " + catalogErr.Error()
-	}
-	var embedder longmemory.Embedder
-	if s.Config.MemoryEmbeddingEnabled {
-		if local, embedErr := longmemory.SharedLocalEmbedder(s.Config.MemoryEmbeddingModel, s.Config.MemoryEmbeddingModelDir); embedErr == nil {
-			embedder = longmemory.SharedEmbeddingScheduler(local, longmemory.EmbeddingSchedulerOptions{
-				BatchSize: s.Config.MemoryEmbeddingBatchSize, BatchWait: time.Duration(s.Config.MemoryEmbeddingBatchWaitMS) * time.Millisecond,
-				QueryCacheEntries: s.Config.MemoryEmbeddingQueryCacheEntries,
-				ExecutionTimeout:  time.Duration(s.Config.MemoryEmbeddingExecutionTimeout * float64(time.Second))})
-		}
-	}
-	result, err := store.SearchAllChannels(ctx, memoryQuery, expansion, embedder, longmemory.HybridSearchOptions{
-		FTSCandidates:       s.Config.MemoryFTSCandidates,
-		VectorCandidates:    s.Config.MemoryVectorCandidates,
-		GraphCandidates:     s.Config.MemoryGraphCandidates,
-		GraphMaxHops:        s.Config.MemoryGraphMaxHops,
-		RRFK:                s.Config.MemoryRRFK,
-		MaxItems:            limit,
-		CoreContextTokens:   s.Config.MemoryCoreContextTokens,
-		TargetContextTokens: s.Config.MemoryContextTargetTokens,
-		MaxContextTokens:    s.Config.MemoryContextMaxTokens,
-		LocalTimeout:        time.Duration(s.Config.MemoryRetrievalLocalTimeoutSeconds * float64(time.Second)),
-		SessionID:           s.sessionIDForMemoryUse(),
-		TeamSessionID:       teamID,
-		AgentID:             agentType,
-		ExcludeIDs:          surfaced,
-		ExpansionModel:      expansionModel,
-		ExpansionError:      expansionError,
-		NeighborChunks:      s.Config.MemoryEvidenceNeighborChunks,
-		AtomMaxSelected:     limit, CoverageMaxFacets: s.Config.MemoryCoverageMaxFacets,
-		CoverageCompletionRounds:      s.Config.MemoryCoverageCompletionRounds,
-		CoverageRelevanceWeight:       s.Config.MemoryCoverageRelevanceWeight,
-		CoverageFacetWeight:           s.Config.MemoryCoverageFacetWeight,
-		CoverageProvenanceWeight:      s.Config.MemoryCoverageProvenanceWeight,
-		CoverageSourceWeight:          s.Config.MemoryCoverageSourceWeight,
-		CoverageCoherenceWeight:       s.Config.MemoryCoverageCoherenceWeight,
-		EvidencePrimaryBudgetRatio:    s.Config.MemoryEvidencePrimaryBudgetRatio,
-		EvidenceCompletionBudgetRatio: s.Config.MemoryEvidenceCompletionBudgetRatio,
-		EvidenceContextBudgetRatio:    s.Config.MemoryEvidenceContextBudgetRatio,
-	})
-	if err != nil {
-		return longmemory.EvidencePacket{}, nil
-	}
-	ids := make([]string, 0, len(result.Packet.Evidence))
-	for _, evidence := range result.Packet.Evidence {
-		ids = append(ids, evidence.MemoryID)
-	}
-	_ = store.RecordUsed(ctx, longmemory.UsedRecord{
-		SessionID:     s.sessionIDForMemoryUse(),
-		TeamSessionID: teamID,
-		AgentID:       agentType,
-		Query:         query,
-		MemoryIDs:     ids,
-	})
-	return result.Packet, ids
 }
 
 func (s *SubAgent) sessionIDForMemoryUse() string {

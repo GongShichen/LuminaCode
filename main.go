@@ -19,8 +19,8 @@ import (
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
-	"LuminaCode/longmemory"
 	"LuminaCode/maintenance"
+	"LuminaCode/memory"
 	"LuminaCode/session"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
@@ -41,7 +41,7 @@ func main() {
 
 func runMemoryCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lumina-backend memory <list|search|get|delete|archive|approve|restore|prioritize|deprioritize|supersede|export|import|used|doctor>")
+		return fmt.Errorf("usage: lumina-backend memory <search|remember|forget|doctor|seal|flush>")
 	}
 	cfg := config.NewConfig()
 	if len(cfg.PathErrors) > 0 {
@@ -56,253 +56,133 @@ func runMemoryCLI(args []string) error {
 	if !cfg.LongTermMemoryEnabled {
 		return fmt.Errorf("long-term memory is disabled")
 	}
+	if !cfg.UsesMemoryFabric() {
+		return fmt.Errorf("Memory Fabric is required")
+	}
 	ctx := context.Background()
-	store, err := longmemory.Open(ctx, cfg.LongTermMemoryStore)
+	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	if fabric == nil {
+		return fmt.Errorf("Memory Fabric is unavailable")
+	}
+	defer fabric.Close()
+	space := agent.MemoryFabricSpace(cfg)
 	switch args[0] {
-	case "list":
-		flags := flag.NewFlagSet("memory list", flag.ContinueOnError)
-		includeInactive := flags.Bool("all", false, "include inactive memories")
-		includeExpired := flags.Bool("expired", false, "include expired memories")
-		limit := flags.Int("limit", 50, "max items")
-		scopeType := flags.String("scope-type", "", "filter by scope type")
-		scopeKey := flags.String("scope-key", "", "filter by scope key")
-		memoryType := flags.String("type", "", "filter by memory type")
-		tag := flags.String("tag", "", "filter by tag")
-		createdAfter := flags.String("created-after", "", "filter by created_at lower bound, RFC3339 or YYYY-MM-DD")
-		createdBefore := flags.String("created-before", "", "filter by created_at upper bound, RFC3339 or YYYY-MM-DD")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		opts := memoryCLIOptions(*limit, *includeInactive, *includeExpired, *scopeType, *scopeKey, *memoryType, *tag, *createdAfter, *createdBefore)
-		items, err := store.List(ctx, opts)
-		if err != nil {
-			return err
-		}
-		return writeJSON(os.Stdout, items)
 	case "search":
 		flags := flag.NewFlagSet("memory search", flag.ContinueOnError)
-		limit := flags.Int("limit", cfg.MemoryAtomMaxSelected, "max items")
-		includeInactive := flags.Bool("all", false, "include inactive memories")
-		includeExpired := flags.Bool("expired", false, "include expired memories")
-		scopeType := flags.String("scope-type", "", "filter by scope type")
-		scopeKey := flags.String("scope-key", "", "filter by scope key")
-		memoryType := flags.String("type", "", "filter by memory type")
-		tag := flags.String("tag", "", "filter by tag")
-		createdAfter := flags.String("created-after", "", "filter by created_at lower bound, RFC3339 or YYYY-MM-DD")
-		createdBefore := flags.String("created-before", "", "filter by created_at upper bound, RFC3339 or YYYY-MM-DD")
+		limit := flags.Int("limit", cfg.MemoryRecallMaxItems, "max evidence items")
+		maxTokens := flags.Int("max-context-tokens", cfg.MemoryContextMaxTokens, "maximum evidence context tokens")
+		contextID := flags.String("context", "", "current context/session ID")
+		at := flags.String("at", "", "reference time (RFC3339 or YYYY-MM-DD)")
+		diagnostics := flags.Bool("diagnostics", false, "include local retrieval diagnostics")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		query := strings.TrimSpace(strings.Join(flags.Args(), " "))
-		opts := memoryCLIOptions(*limit, *includeInactive, *includeExpired, *scopeType, *scopeKey, *memoryType, *tag, *createdAfter, *createdBefore)
-		opts.Query = query
-		if len(opts.Scopes) == 0 {
-			opts.Scopes = longmemory.RuntimeScopesCanonical(cfg.ProjectRoot(), "main", "", "")
+		if query == "" {
+			return fmt.Errorf("memory search requires a query")
 		}
-		opts.MaxCandidates = cfg.MemoryFTSCandidates
-		opts.ContextMaxRunes = cfg.MemoryContextMaxTokens * 4
-		items, err := store.Search(ctx, opts)
+		result, err := fabric.Search(ctx, memory.SearchRequest{Space: space, Query: query,
+			ContextID: *contextID, ReferenceTime: parseMemoryCLITime(*at), MaxEvidence: *limit,
+			MaxContextTokens: *maxTokens, IncludeDiagnostics: *diagnostics})
 		if err != nil {
 			return err
 		}
-		return writeJSON(os.Stdout, items)
-	case "get":
-		if len(args) < 2 {
-			return fmt.Errorf("memory get requires memory_id")
+		return writeJSON(os.Stdout, result)
+	case "remember":
+		flags := flag.NewFlagSet("memory remember", flag.ContinueOnError)
+		mode := flags.String("mode", string(memory.WriteExplicit), "explicit|correction|preference|constraint|critical_result")
+		contextID := flags.String("context", "cli-memory", "context/session ID")
+		requireSemantic := flags.Bool("require-semantic", false, "fail unless semantic compilation completes")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
 		}
-		entry, err := store.Get(ctx, args[1])
+		text := strings.TrimSpace(strings.Join(flags.Args(), " "))
+		if text == "" {
+			return fmt.Errorf("memory remember requires text")
+		}
+		writeMode := memory.MemoryWriteMode(strings.ToLower(strings.TrimSpace(*mode)))
+		switch writeMode {
+		case memory.WriteExplicit, memory.WriteCorrection, memory.WritePreference,
+			memory.WriteConstraint, memory.WriteCriticalResult:
+		default:
+			return fmt.Errorf("unsupported memory write mode: %s", writeMode)
+		}
+		result, err := fabric.Remember(ctx, memory.MemoryRequest{Space: space, ContextID: *contextID,
+			Events: []memory.RawEvent{{Space: space, ContextID: *contextID, SessionID: *contextID,
+				Actor: "user", SourceKind: "explicit-memory", Content: text, OccurredAt: time.Now().UTC()}},
+			Mode: writeMode, RequireSemantic: *requireSemantic})
 		if err != nil {
+			if result.Durable {
+				_ = writeJSON(os.Stdout, result)
+			}
 			return err
 		}
-		return writeJSON(os.Stdout, entry)
-	case "delete":
-		flags := flag.NewFlagSet("memory delete", flag.ContinueOnError)
-		hard := flags.Bool("hard", false, "physically delete the memory")
+		return writeJSON(os.Stdout, result)
+	case "forget":
+		flags := flag.NewFlagSet("memory forget", flag.ContinueOnError)
+		eventID := flags.String("event", "", "source event ID")
+		memoryID := flags.String("memory", "", "semantic memory ID")
+		contextID := flags.String("context", "", "context/session ID")
+		purge := flags.Bool("purge", false, "physically purge selected evidence and projections")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if flags.NArg() == 0 {
-			return fmt.Errorf("memory delete requires memory_id")
+		if *memoryID == "" && flags.NArg() > 0 {
+			*memoryID = flags.Arg(0)
 		}
-		return store.Delete(ctx, flags.Arg(0), *hard)
-	case "archive":
-		if len(args) < 2 {
-			return fmt.Errorf("memory archive requires memory_id")
+		selector := memory.Selector{Space: space}
+		if *eventID != "" {
+			selector.EventIDs = []string{*eventID}
 		}
-		return store.Archive(ctx, args[1], "manual_archive")
-	case "approve":
-		if len(args) < 2 {
-			return fmt.Errorf("memory approve requires memory_id")
+		if *memoryID != "" {
+			selector.MemoryIDs = []string{*memoryID}
 		}
-		return store.Approve(ctx, args[1])
-	case "restore":
-		if len(args) < 2 {
-			return fmt.Errorf("memory restore requires memory_id")
+		if *contextID != "" {
+			selector.ContextIDs = []string{*contextID}
 		}
-		return store.Restore(ctx, args[1])
-	case "prioritize":
-		flags := flag.NewFlagSet("memory prioritize", flag.ContinueOnError)
-		importance := flags.Float64("importance", 1, "importance 0..1")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
+		mode := memory.ForgetTombstone
+		if *purge {
+			mode = memory.ForgetPurge
 		}
-		if flags.NArg() == 0 {
-			return fmt.Errorf("memory prioritize requires memory_id")
-		}
-		return store.UpdateImportance(ctx, flags.Arg(0), *importance)
-	case "deprioritize":
-		if len(args) < 2 {
-			return fmt.Errorf("memory deprioritize requires memory_id")
-		}
-		return store.Deprioritize(ctx, args[1])
-	case "supersede":
-		flags := flag.NewFlagSet("memory supersede", flag.ContinueOnError)
-		newID := flags.String("new", "", "existing replacement memory_id")
-		candidatePath := flags.String("candidate", "", "JSON/JSONL/Markdown candidate file containing replacement memory")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if flags.NArg() == 0 {
-			return fmt.Errorf("memory supersede requires old memory_id")
-		}
-		oldID := flags.Arg(0)
-		if *candidatePath != "" {
-			before, err := store.List(ctx, longmemory.SearchOptions{Limit: 100000, IncludeInactive: true, IncludeExpired: true})
-			if err != nil {
-				return err
-			}
-			seen := map[string]struct{}{}
-			for _, entry := range before {
-				seen[entry.MemoryID] = struct{}{}
-			}
-			if _, err := backend.ImportMemoryCandidates(ctx, store, *candidatePath, nil); err != nil {
-				return err
-			}
-			after, err := store.List(ctx, longmemory.SearchOptions{Limit: 100000, IncludeInactive: true, IncludeExpired: true})
-			if err != nil {
-				return err
-			}
-			var replacement string
-			for _, entry := range after {
-				if _, ok := seen[entry.MemoryID]; !ok {
-					replacement = entry.MemoryID
-					break
-				}
-			}
-			if replacement == "" {
-				return fmt.Errorf("candidate import did not create a replacement memory")
-			}
-			return store.Supersede(ctx, oldID, replacement)
-		}
-		if *newID == "" {
-			return fmt.Errorf("memory supersede requires --new or --candidate")
-		}
-		return store.Supersede(ctx, oldID, *newID)
-	case "export":
-		flags := flag.NewFlagSet("memory export", flag.ContinueOnError)
-		format := flags.String("format", "markdown", "export format")
-		out := flags.String("out", "", "output directory")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		if strings.ToLower(*format) != "markdown" {
-			return fmt.Errorf("unsupported memory export format: %s", *format)
-		}
-		dir, err := longmemory.ExportMarkdown(ctx, store, *out)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(os.Stdout, dir)
-		return nil
-	case "import":
-		if len(args) < 2 {
-			return fmt.Errorf("memory import requires an explicit JSON/JSONL/Markdown file or directory path")
-		}
-		n, err := backend.ImportMemoryCandidates(ctx, store, args[1], nil)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stdout, "imported %d memories\n", n)
-		return nil
-	case "used":
-		flags := flag.NewFlagSet("memory used", flag.ContinueOnError)
-		limit := flags.Int("limit", 100, "max records")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		records, err := store.ListUsed(ctx, *limit)
-		if err != nil {
-			return err
-		}
-		return writeJSON(os.Stdout, records)
+		return fabric.Forget(ctx, selector, mode)
 	case "doctor":
 		if len(cfg.MemoryConfigErrors) > 0 {
 			return fmt.Errorf("invalid memory configuration: %s", strings.Join(cfg.MemoryConfigErrors, "; "))
 		}
-		if !cfg.MemoryEmbeddingEnabled {
-			return fmt.Errorf("memory embedding is disabled")
-		}
-		embedder, err := longmemory.SharedLocalEmbedder(cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+		report, err := fabric.Doctor(ctx)
 		if err != nil {
 			return err
 		}
-		vectors, err := embedder.Embed(ctx, []string{"LuminaCode memory embedding self check"}, longmemory.EmbeddingQuery)
+		return writeJSON(os.Stdout, report)
+	case "seal":
+		flags := flag.NewFlagSet("memory seal", flag.ContinueOnError)
+		contextID := flags.String("context", "", "context/session ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *contextID == "" && flags.NArg() > 0 {
+			*contextID = flags.Arg(0)
+		}
+		if *contextID == "" {
+			return fmt.Errorf("memory seal requires --context")
+		}
+		job, err := fabric.SealContext(ctx, memory.ContextRef{ID: *contextID, Space: space,
+			Type: "conversation", ClosedAt: time.Now().UTC()})
 		if err != nil {
 			return err
 		}
-		dimensions := 0
-		if len(vectors) > 0 {
-			dimensions = len(vectors[0])
+		return writeJSON(os.Stdout, job)
+	case "flush":
+		if err := fabric.Flush(ctx); err != nil {
+			return err
 		}
-		if len(vectors) != 1 || dimensions != embedder.Dimensions() {
-			return fmt.Errorf("memory embedding self check returned shape %d x %d", len(vectors), dimensions)
-		}
-		catalog, catalogErr := store.InspectCatalog(ctx, nil)
-		if catalogErr != nil {
-			return catalogErr
-		}
-		return writeJSON(os.Stdout, map[string]any{"status": "ready", "model": embedder.Model(),
-			"dimensions": embedder.Dimensions(), "model_dir": cfg.MemoryEmbeddingModelDir,
-			"provider": embedder.Provider(), "provider_diagnostics": embedder.ProviderDiagnostics(),
-			"indexed_memories": catalog.TotalMemories, "indexed_sessions": catalog.TotalSessions,
-			"indexed_chunks": catalog.TotalChunks, "indexed_atoms": catalog.TotalAtoms,
-			"embedding_batch_size":                cfg.MemoryEmbeddingBatchSize,
-			"embedding_batch_wait_ms":             cfg.MemoryEmbeddingBatchWaitMS,
-			"embedding_execution_timeout_seconds": cfg.MemoryEmbeddingExecutionTimeout,
-			"coverage_max_facets":                 cfg.MemoryCoverageMaxFacets,
-			"coverage_completion_rounds":          cfg.MemoryCoverageCompletionRounds,
-			"coverage_support_target":             cfg.MemoryCoverageSupportTarget,
-			"coverage_residual_trigger":           cfg.MemoryCoverageResidualTrigger,
-			"coverage_min_marginal_gain":          cfg.MemoryCoverageMinMarginalGain,
-			"atom_structural_context_enabled":     cfg.MemoryAtomStructuralContextEnabled,
-			"atom_structural_context_max_tokens":  cfg.MemoryAtomStructuralContextTokens,
-			"query_expansion_additional_wait_ms":  cfg.MemoryQueryExpansionAdditionalWait,
-			"lifecycle_enabled":                   cfg.MemoryLifecycleEnabled,
-			"maintenance_interval_seconds":        cfg.MemoryMaintenanceIntervalSeconds,
-			"archive_value_threshold":             cfg.MemoryArchiveValueThreshold, "auto_hard_delete": false})
+		return writeJSON(os.Stdout, map[string]any{"flushed": true})
 	default:
 		return fmt.Errorf("unknown memory command: %s", args[0])
 	}
-}
-
-func memoryCLIOptions(limit int, includeInactive, includeExpired bool, scopeType, scopeKey, memoryType, tag, createdAfter, createdBefore string) longmemory.SearchOptions {
-	opts := longmemory.SearchOptions{Limit: limit, IncludeInactive: includeInactive, IncludeExpired: includeExpired}
-	if strings.TrimSpace(scopeType) != "" && strings.TrimSpace(scopeKey) != "" {
-		opts.Scopes = []longmemory.Scope{{Type: longmemory.ScopeType(scopeType), Key: scopeKey}}
-	}
-	if strings.TrimSpace(memoryType) != "" {
-		opts.Types = []longmemory.MemoryType{longmemory.MemoryType(memoryType)}
-	}
-	if strings.TrimSpace(tag) != "" {
-		opts.Tags = []string{tag}
-	}
-	opts.CreatedAfter = parseMemoryCLITime(createdAfter)
-	opts.CreatedBefore = parseMemoryCLITime(createdBefore)
-	return opts
 }
 
 func parseMemoryCLITime(text string) time.Time {
@@ -336,6 +216,9 @@ func run(args []string) error {
 	}
 	if len(args) > 0 && args[0] == "memory" {
 		return runMemoryCLI(args[1:])
+	}
+	if len(args) > 0 && args[0] == "models" {
+		return runModelsCLI(args[1:])
 	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -423,11 +306,14 @@ func run(args []string) error {
 		if err := cfg.ValidateMemoryConfig(); err != nil {
 			return err
 		}
-		store, err := longmemory.Open(context.Background(), cfg.LongTermMemoryStore)
+		fabric, err := agent.OpenConfiguredMemoryFabric(context.Background(), cfg, false)
 		if err != nil {
-			return fmt.Errorf("open long-term memory store: %w", err)
+			return fmt.Errorf("open Memory Fabric: %w", err)
 		}
-		_ = store.Close()
+		if fabric == nil {
+			return fmt.Errorf("Memory Fabric is required")
+		}
+		_ = fabric.Close()
 	}
 
 	store := session.NewStore(cfg.SessionDir)
@@ -448,7 +334,7 @@ func run(args []string) error {
 	}
 
 	if verboseEnabled && cfg.LongTermMemoryEnabled {
-		fmt.Printf("[debug] Long-term memory:  %s\n", cfg.LongTermMemoryStore)
+		fmt.Printf("[debug] Long-term memory:  %s\n", cfg.MemoryPath)
 	}
 
 	if cfg.APIKey == "" {

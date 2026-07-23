@@ -16,10 +16,19 @@ const (
 	SuiteSWEBenchVerifiedSubset = "swebench_verified_subset"
 	SuiteTerminalBenchSmoke     = "terminal_bench_smoke"
 	SuiteLongMemEval            = "longmemeval"
-	SuiteMemoryArena            = "memoryarena"
+	LongMemEvalPhasePrepare     = "prepare"
+	LongMemEvalPhaseAnswer      = "answer"
+	LongMemEvalPhaseEvaluate    = "evaluate"
 	DefaultCaseTimeout          = 900
 	ReportPrefix                = "agent-benchmark-"
 )
+
+// LongMemEvalAnswerRunner is deliberately narrower than AgentRunner. It owns
+// one local-retrieval plus one logical answer request and cannot expose coding
+// tools, MCP servers, or the general agent system prompt.
+type LongMemEvalAnswerRunner interface {
+	RunAnswer(context.Context, config.Config, string, string, time.Time) AgentRunResult
+}
 
 type CaseSpec struct {
 	ID               string   `json:"id"`
@@ -52,98 +61,62 @@ type CommandResult struct {
 }
 
 type AgentRunResult struct {
-	Events          []agent.StreamEvent `json:"events"`
-	FinalText       string              `json:"final_text,omitempty"`
-	ErrorType       string              `json:"error_type,omitempty"`
-	TransientErrors []string            `json:"transient_errors,omitempty"`
-	InputTokens     int                 `json:"input_tokens"`
-	OutputTokens    int                 `json:"output_tokens"`
-	ToolCalls       int                 `json:"tool_calls"`
-	TTFTMillis      *float64            `json:"ttft_ms,omitempty"`
-	FirstToolCallMS *float64            `json:"first_tool_call_ms,omitempty"`
-	Timeline        []TimelineEvent     `json:"timeline,omitempty"`
+	Events                   []agent.StreamEvent `json:"events"`
+	FinalText                string              `json:"final_text,omitempty"`
+	ErrorType                string              `json:"error_type,omitempty"`
+	TransientErrors          []string            `json:"transient_errors,omitempty"`
+	InputTokens              int                 `json:"input_tokens"`
+	CacheReadInputTokens     int                 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int                 `json:"cache_creation_input_tokens"`
+	OutputTokens             int                 `json:"output_tokens"`
+	ToolCalls                int                 `json:"tool_calls"`
+	TTFTMillis               *float64            `json:"ttft_ms,omitempty"`
+	FirstToolCallMS          *float64            `json:"first_tool_call_ms,omitempty"`
+	Timeline                 []TimelineEvent     `json:"timeline,omitempty"`
+	Diagnostics              any                 `json:"-"`
+}
+
+type StageTokenUsage struct {
+	Calls                    int      `json:"calls"`
+	InputTokens              int      `json:"input_tokens"`
+	CacheReadInputTokens     int      `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int      `json:"cache_creation_input_tokens"`
+	OutputTokens             int      `json:"output_tokens"`
+	Models                   []string `json:"models,omitempty"`
 }
 
 type CaseResult struct {
-	Case              CaseSpec        `json:"case"`
-	Resolved          bool            `json:"resolved"`
-	PatchApplyRate    float64         `json:"patch_apply_rate"`
-	TestPassRate      float64         `json:"test_pass_rate"`
-	DurationSeconds   float64         `json:"duration_seconds"`
-	TTFTMillis        *float64        `json:"ttft_ms,omitempty"`
-	FirstToolCallMS   *float64        `json:"first_tool_call_ms,omitempty"`
-	FirstTestMS       *float64        `json:"first_test_ms,omitempty"`
-	InputTokens       int             `json:"input_tokens"`
-	OutputTokens      int             `json:"output_tokens"`
-	ToolCalls         int             `json:"tool_calls"`
-	ErrorType         string          `json:"error_type,omitempty"`
-	FinalPatchPath    string          `json:"final_patch_path,omitempty"`
-	TranscriptPath    string          `json:"transcript_path,omitempty"`
-	PromptPath        string          `json:"prompt_path,omitempty"`
-	TimelinePath      string          `json:"timeline_path,omitempty"`
-	TestOutputPath    string          `json:"test_output_path,omitempty"`
-	ResultPath        string          `json:"result_path,omitempty"`
-	WorkDir           string          `json:"workdir"`
-	SetupResults      []CommandResult `json:"setup_results,omitempty"`
-	TestResults       []CommandResult `json:"test_results,omitempty"`
-	ExpectedArtifact  string          `json:"expected_artifact,omitempty"`
-	ExpectedSatisfied bool            `json:"expected_satisfied"`
-	Timeline          []TimelineEvent `json:"timeline,omitempty"`
-	ExpectedAnswer    any             `json:"expected_answer,omitempty"`
-	Hypothesis        string          `json:"hypothesis,omitempty"`
-	MemoryHits        []string        `json:"memory_hits,omitempty"`
-	MemoryHitDetails  []MemoryHit     `json:"memory_hit_details,omitempty"`
-	MemoryMetrics     *MemoryMetrics  `json:"memory_metrics,omitempty"`
-	MemoryStorePath   string          `json:"memory_store_path,omitempty"`
-	AnswerMatch       bool            `json:"answer_match"`
-}
-
-type MemoryHit struct {
-	Rank            int      `json:"rank"`
-	MemoryID        string   `json:"memory_id"`
-	DocumentKind    string   `json:"document_kind,omitempty"`
-	ParentID        string   `json:"parent_id,omitempty"`
-	MessageID       string   `json:"message_id,omitempty"`
-	Title           string   `json:"title"`
-	SourceSessionID string   `json:"source_session_id,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	Evidence        bool     `json:"evidence"`
-	Stale           bool     `json:"stale"`
-}
-
-type MemoryMetrics struct {
-	RetrievedCount            int      `json:"retrieved_count"`
-	EvidenceTotal             int      `json:"evidence_total,omitempty"`
-	EvidenceHitCount          int      `json:"evidence_hit_count,omitempty"`
-	EvidenceHit               bool     `json:"evidence_hit"`
-	EvidenceRecallAtK         float64  `json:"evidence_recall_at_k,omitempty"`
-	FirstEvidenceRank         *int     `json:"first_evidence_rank,omitempty"`
-	EvidenceMRR               float64  `json:"evidence_mrr,omitempty"`
-	GoldSourceSessionCount    int      `json:"gold_source_session_count,omitempty"`
-	GoldSourceSessionHitCount int      `json:"gold_source_session_hit_count,omitempty"`
-	SourceSessionRecall       float64  `json:"source_session_recall,omitempty"`
-	GoldMessageCount          int      `json:"gold_message_count,omitempty"`
-	GoldMessageHitCount       int      `json:"gold_message_hit_count,omitempty"`
-	GoldMessageRecall         float64  `json:"gold_message_recall,omitempty"`
-	GoldChunkCount            int      `json:"gold_chunk_count,omitempty"`
-	GoldChunkHitCount         int      `json:"gold_chunk_hit_count,omitempty"`
-	InjectedChunkRecall       float64  `json:"injected_chunk_recall,omitempty"`
-	InjectedTextCoverage      float64  `json:"injected_text_coverage,omitempty"`
-	MemoryTokenEstimate       int      `json:"memory_token_estimate,omitempty"`
-	MemoryTokenRatio          float64  `json:"memory_token_ratio,omitempty"`
-	RetrievalRuns             int      `json:"retrieval_runs,omitempty"`
-	RetrievalDurationMS       int64    `json:"retrieval_duration_ms,omitempty"`
-	StaleUseCount             int      `json:"stale_use_count,omitempty"`
-	StaleUseRate              float64  `json:"stale_use_rate,omitempty"`
-	RetrievalErrorType        string   `json:"retrieval_error_type,omitempty"`
-	SubtaskTotal              int      `json:"subtask_total,omitempty"`
-	SubtaskAnswered           int      `json:"subtask_answered,omitempty"`
-	SubtaskAnswerRate         float64  `json:"subtask_answer_rate,omitempty"`
-	MemoryUpdateCount         int      `json:"memory_update_count,omitempty"`
-	MemoryUpdateSuccessRate   float64  `json:"memory_update_success_rate,omitempty"`
-	PreviousSubtaskHitCount   int      `json:"previous_subtask_hit_count,omitempty"`
-	PreviousSubtaskHitRate    float64  `json:"previous_subtask_hit_rate,omitempty"`
-	RecallWarnings            []string `json:"recall_warnings,omitempty"`
+	Case                     CaseSpec                   `json:"case"`
+	Resolved                 bool                       `json:"resolved"`
+	PatchApplyRate           float64                    `json:"patch_apply_rate"`
+	TestPassRate             float64                    `json:"test_pass_rate"`
+	DurationSeconds          float64                    `json:"duration_seconds"`
+	TTFTMillis               *float64                   `json:"ttft_ms,omitempty"`
+	FirstToolCallMS          *float64                   `json:"first_tool_call_ms,omitempty"`
+	FirstTestMS              *float64                   `json:"first_test_ms,omitempty"`
+	InputTokens              int                        `json:"input_tokens"`
+	CacheReadInputTokens     int                        `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int                        `json:"cache_creation_input_tokens"`
+	OutputTokens             int                        `json:"output_tokens"`
+	ToolCalls                int                        `json:"tool_calls"`
+	ErrorType                string                     `json:"error_type,omitempty"`
+	FinalPatchPath           string                     `json:"final_patch_path,omitempty"`
+	TranscriptPath           string                     `json:"transcript_path,omitempty"`
+	PromptPath               string                     `json:"prompt_path,omitempty"`
+	TimelinePath             string                     `json:"timeline_path,omitempty"`
+	TestOutputPath           string                     `json:"test_output_path,omitempty"`
+	ResultPath               string                     `json:"result_path,omitempty"`
+	WorkDir                  string                     `json:"workdir"`
+	SetupResults             []CommandResult            `json:"setup_results,omitempty"`
+	TestResults              []CommandResult            `json:"test_results,omitempty"`
+	ExpectedArtifact         string                     `json:"expected_artifact,omitempty"`
+	ExpectedSatisfied        bool                       `json:"expected_satisfied"`
+	Timeline                 []TimelineEvent            `json:"timeline,omitempty"`
+	ExpectedAnswer           any                        `json:"expected_answer,omitempty"`
+	Hypothesis               string                     `json:"hypothesis,omitempty"`
+	MemoryStorePath          string                     `json:"memory_store_path,omitempty"`
+	AnswerMatch              bool                       `json:"answer_match"`
+	StageTokenUsage          map[string]StageTokenUsage `json:"stage_token_usage,omitempty"`
 }
 
 type LatencySummary struct {
@@ -171,28 +144,6 @@ type SuiteSummary struct {
 	AverageTestPassRate     float64            `json:"average_test_pass_rate"`
 	TotalToolCalls          int                `json:"total_tool_calls"`
 	BenchmarkSuiteBreakdown map[string]float64 `json:"benchmark_suite_breakdown,omitempty"`
-	Memory                  MemorySummary      `json:"memory,omitempty"`
-}
-
-type MemorySummary struct {
-	EvidenceCaseCount              int            `json:"evidence_case_count,omitempty"`
-	EvidenceHitCases               int            `json:"evidence_hit_cases,omitempty"`
-	AverageRetrievedCount          float64        `json:"average_retrieved_count,omitempty"`
-	EvidenceHitRate                float64        `json:"evidence_hit_rate,omitempty"`
-	AverageEvidenceRecallAtK       float64        `json:"average_evidence_recall_at_k,omitempty"`
-	AverageEvidenceMRR             float64        `json:"average_evidence_mrr,omitempty"`
-	AverageSourceSessionRecall     float64        `json:"average_source_session_recall,omitempty"`
-	AverageGoldMessageRecall       float64        `json:"average_gold_message_recall,omitempty"`
-	AverageInjectedChunkRecall     float64        `json:"average_injected_chunk_recall,omitempty"`
-	AverageInjectedTextCoverage    float64        `json:"average_injected_text_coverage,omitempty"`
-	AverageMemoryTokenEstimate     float64        `json:"average_memory_token_estimate,omitempty"`
-	AverageMemoryTokenRatio        float64        `json:"average_memory_token_ratio,omitempty"`
-	AverageRetrievalDurationMS     float64        `json:"average_retrieval_duration_ms,omitempty"`
-	AverageStaleUseRate            float64        `json:"average_stale_use_rate,omitempty"`
-	AverageSubtaskAnswerRate       float64        `json:"average_subtask_answer_rate,omitempty"`
-	AverageMemoryUpdateSuccessRate float64        `json:"average_memory_update_success_rate,omitempty"`
-	AveragePreviousSubtaskHitRate  float64        `json:"average_previous_subtask_hit_rate,omitempty"`
-	RetrievalErrorCategories       map[string]int `json:"retrieval_error_categories,omitempty"`
 }
 
 type TopFailingCase struct {
@@ -230,26 +181,27 @@ type HarnessDiagnostic struct {
 }
 
 type Report struct {
-	Suite                string              `json:"suite"`
-	GeneratedAt          string              `json:"generated_at"`
-	DebugRun             bool                `json:"debug_run"`
-	RootDir              string              `json:"root_dir"`
-	OutputDir            string              `json:"output_dir"`
-	WorkDir              string              `json:"work_dir"`
-	BenchmarkDir         string              `json:"benchmark_dir,omitempty"`
-	Model                string              `json:"model,omitempty"`
-	Summary              SuiteSummary        `json:"summary"`
-	Results              []CaseResult        `json:"results"`
-	PredictionsPath      string              `json:"predictions_path,omitempty"`
-	HarnessOutputPath    string              `json:"harness_output_path,omitempty"`
-	HarnessCommand       string              `json:"harness_command,omitempty"`
-	HarnessExitCode      *int                `json:"harness_exit_code,omitempty"`
-	HarnessParsedStats   map[string]any      `json:"harness_parsed_stats,omitempty"`
-	OfficialMetrics      map[string]any      `json:"official_metrics,omitempty"`
-	LuminaDiagnostics    []HarnessDiagnostic `json:"lumina_diagnostics,omitempty"`
-	UpstreamStatusBefore string              `json:"upstream_status_before,omitempty"`
-	UpstreamStatusAfter  string              `json:"upstream_status_after,omitempty"`
-	UpstreamDirtyAfter   bool                `json:"upstream_dirty_after"`
+	Suite                string                     `json:"suite"`
+	GeneratedAt          string                     `json:"generated_at"`
+	DebugRun             bool                       `json:"debug_run"`
+	RootDir              string                     `json:"root_dir"`
+	OutputDir            string                     `json:"output_dir"`
+	WorkDir              string                     `json:"work_dir"`
+	BenchmarkDir         string                     `json:"benchmark_dir,omitempty"`
+	Model                string                     `json:"model,omitempty"`
+	Summary              SuiteSummary               `json:"summary"`
+	Results              []CaseResult               `json:"results"`
+	PredictionsPath      string                     `json:"predictions_path,omitempty"`
+	HarnessOutputPath    string                     `json:"harness_output_path,omitempty"`
+	HarnessCommand       string                     `json:"harness_command,omitempty"`
+	HarnessExitCode      *int                       `json:"harness_exit_code,omitempty"`
+	HarnessParsedStats   map[string]any             `json:"harness_parsed_stats,omitempty"`
+	OfficialMetrics      map[string]any             `json:"official_metrics,omitempty"`
+	StageTokenUsage      map[string]StageTokenUsage `json:"stage_token_usage,omitempty"`
+	LuminaDiagnostics    []HarnessDiagnostic        `json:"lumina_diagnostics,omitempty"`
+	UpstreamStatusBefore string                     `json:"upstream_status_before,omitempty"`
+	UpstreamStatusAfter  string                     `json:"upstream_status_after,omitempty"`
+	UpstreamDirtyAfter   bool                       `json:"upstream_dirty_after"`
 }
 
 type AgentRunner interface {
@@ -257,22 +209,30 @@ type AgentRunner interface {
 }
 
 type RunnerOptions struct {
-	Suite              string
-	CasesPath          string
-	CaseID             string
-	Limit              int
-	RootDir            string
-	OutputDir          string
-	WorkDir            string
-	ArtifactsDir       string
-	BenchmarkDir       string
-	TimeoutSeconds     int
-	CaseParallel       int
-	NoResume           bool
-	Config             config.Config
-	AgentRunner        AgentRunner
-	HarnessCmd         string
-	SWEBenchHarnessCmd string
-	PreparedEnv        bool
-	Now                func() time.Time
+	Suite                   string
+	CasesPath               string
+	CaseID                  string
+	Limit                   int
+	RootDir                 string
+	OutputDir               string
+	WorkDir                 string
+	ArtifactsDir            string
+	BenchmarkDir            string
+	TimeoutSeconds          int
+	CaseParallel            int
+	NoResume                bool
+	Config                  config.Config
+	AgentRunner             AgentRunner
+	LongMemEvalPhase        string
+	LongMemEvalIndexDir     string
+	LongMemEvalIndexSource  string
+	LongMemEvalRunID        string
+	LongMemEvalPredictions  string
+	LongMemEvalSmokeSize    int
+	LongMemEvalQuestionType string
+	LongMemEvalAnswerRunner LongMemEvalAnswerRunner
+	HarnessCmd              string
+	SWEBenchHarnessCmd      string
+	PreparedEnv             bool
+	Now                     func() time.Time
 }

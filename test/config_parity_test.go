@@ -44,12 +44,11 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "session_memory_max_commits": 33,
   "session_memory_max_messages": 444,
   "session_memory_vacuum_after_eviction": true,
-  "long_term_memory_store": ".Lumina/memory/lumina-memory.sqlite",
-  "extraction_model": "extract-model",
+  "memory_backend": "fabric",
+  "memory_path": ".Lumina/memory/fabric",
   "skills_dir": ".Lumina/PROJECT_SKILLS",
   "bundled_skills_dir": ".Lumina/SKILLS",
   "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
-  "memory_extraction_prompt_path": ".Lumina/SYSTEM/extraction_system.md",
   "ui_backend": "legacy_terminal",
   "worktree_dir": ".Lumina/worktrees"
 }`
@@ -92,11 +91,8 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 		!cfg.SessionMemoryVacuumAfterEviction {
 		t.Fatalf("session memory defaults/env were not applied: %#v", cfg)
 	}
-	if cfg.LongTermMemoryStore != filepath.Join(dir, ".Lumina", "memory", "lumina-memory.sqlite") {
-		t.Fatalf("long-term memory store was not resolved from defaults: %#v", cfg.LongTermMemoryStore)
-	}
-	if cfg.ExtractionModel == nil || *cfg.ExtractionModel != "extract-model" {
-		t.Fatalf("extraction model was not applied: %#v", cfg.ExtractionModel)
+	if cfg.MemoryPath != filepath.Join(dir, ".Lumina", "memory", "fabric") {
+		t.Fatalf("memory path was not resolved from defaults: %#v", cfg.MemoryPath)
 	}
 	if cfg.BundledSkillsDir != filepath.Join(dir, ".Lumina", "SKILLS") {
 		t.Fatalf("bundled skill path was not resolved: %s", cfg.BundledSkillsDir)
@@ -163,9 +159,6 @@ func TestConfigFindsBundledResourcesOutsideLuminaRoot(t *testing.T) {
 	if cfg.SystemPromptPath != filepath.Join(root, ".Lumina", "SYSTEM", "system-prompt.md") {
 		t.Fatalf("system prompt should resolve from Lumina root, got %s", cfg.SystemPromptPath)
 	}
-	if cfg.MemoryExtractionPromptPath != filepath.Join(root, ".Lumina", "SYSTEM", "extraction_system.md") {
-		t.Fatalf("extraction prompt should resolve from Lumina root, got %s", cfg.MemoryExtractionPromptPath)
-	}
 	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
 		t.Fatalf("bundled defaults should start fullscreen by default, got %s", cfg.UIBackend)
 	}
@@ -211,8 +204,7 @@ func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
 	defaults := `{
   "api_max_tokens": 4321,
   "bundled_skills_dir": ".Lumina/SKILLS",
-  "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
-  "memory_extraction_prompt_path": ".Lumina/SYSTEM/extraction_system.md"
+  "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md"
 }`
 	if err := os.WriteFile(filepath.Join(resourceRoot, "CONFIG", "defaults.json"), []byte(defaults), 0o644); err != nil {
 		t.Fatal(err)
@@ -234,9 +226,6 @@ func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
 	}
 	if cfg.SystemPromptPath != filepath.Join(resourceRoot, "SYSTEM", "system-prompt.md") {
 		t.Fatalf("direct system prompt path mismatch: %s", cfg.SystemPromptPath)
-	}
-	if cfg.MemoryExtractionPromptPath != filepath.Join(resourceRoot, "SYSTEM", "extraction_system.md") {
-		t.Fatalf("direct extraction prompt path mismatch: %s", cfg.MemoryExtractionPromptPath)
 	}
 }
 

@@ -89,6 +89,8 @@ github.com/sugarme/tokenizer v0.3.0 h1:FE8DYbNSz/kSbgEo9l/RjgYHkIJYEdskumitFQBE9
 github.com/sugarme/tokenizer v0.3.0/go.mod h1:VJ+DLK5ZEZwzvODOWwY0cw+B1dabTd3nCB5HuFCItCc=
 github.com/viant/sqlite-vec v0.3.0 h1:D0wCrkJ0KsO3sanmHV/m+58UwCZMFxU0wcK8LsYk00o=
 github.com/viant/sqlite-vec v0.3.0/go.mod h1:SA89LGdU/cxpc/gsvat2MYtJYrv3bg9mtW/uHMs2nBs=
+github.com/viant/vec v0.1.1-0.20240628004145-aad750556278 h1:t/x3ZoccWTkshYEwzhnW/VZe/enASwqs9IKcJPfI3cs=
+github.com/viant/vec v0.1.1-0.20240628004145-aad750556278/go.mod h1:d1coA6/d5WBePJe0nDhgE7aRYkMd7CMiRWSNid3tvds=
 github.com/yalue/onnxruntime_go v1.31.0 h1:1ln4YW1SFOFfGJZXe3jNOb2JUSt+l2pEneZfV8HdtFA=
 github.com/yalue/onnxruntime_go v1.31.0/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

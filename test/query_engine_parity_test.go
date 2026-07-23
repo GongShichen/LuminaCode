@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"LuminaCode/agent"
-	"LuminaCode/longmemory"
+	"LuminaCode/memory"
 	"LuminaCode/skills"
 )
 
@@ -230,8 +230,7 @@ Lumina identity.
 		t.Fatal(err)
 	}
 	cfg := isolatedConfigForCWD(t, dir)
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = filepath.Join(dir, "memory.sqlite")
+	enableTestMemoryFabric(&cfg, dir)
 	cfg.SkillsEnabled = false
 	engine := agent.NewQueryEngine(&cfg)
 	state := agent.NewAgentState()
@@ -242,7 +241,7 @@ Lumina identity.
 
 	if !strings.Contains(state.SystemPrompt, "Lumina identity.") ||
 		!strings.Contains(state.SystemPrompt, "## Long-Term Memory") ||
-		!strings.Contains(state.SystemPrompt, "local SQLite store") ||
+		!strings.Contains(state.SystemPrompt, "Memory Fabric") ||
 		strings.Contains(state.SystemPrompt, "stale prompt") {
 		t.Fatalf("system prompt was not refreshed with long-term memory section:\n%s", state.SystemPrompt)
 	}
@@ -250,23 +249,11 @@ Lumina identity.
 
 func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *testing.T) {
 	dir := t.TempDir()
-	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
-		MemoryType: longmemory.TypeProject,
-		Title:      "Repo Note",
-		Summary:    "Important repo note",
-		Content:    "Remember the blue switch.",
-		Importance: 0.9,
-		Confidence: 0.9,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	cfg := isolatedConfigForCWD(t, dir)
+	enableTestMemoryFabric(&cfg, dir)
+	fabric := openSeededTestMemoryFabric(t, cfg, []memory.RawEvent{{
+		ID: "repo-note", ContextID: "seed", Content: "Remember the blue switch.",
+	}})
 
 	var requestCount atomic.Int32
 	var mainBody map[string]any
@@ -291,18 +278,16 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	}))
 	defer server.Close()
 
-	cfg := isolatedConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "claude-test"
 	cfg.APIType = "anthropic"
 	cfg.APIMaxTokens = 256
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = store.Path()
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := agent.NewCoreExecutionEngineWithMemoryEngine(&cfg, fabric)
+	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.LastQuery = "what should I remember?"
@@ -327,35 +312,12 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	if err := os.WriteFile(target, []byte("hello from test"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
-		MemoryType: longmemory.TypeFeedback,
-		Title:      "initial",
-		Summary:    "Initial preference memory.",
-		Content:    "Initial memory body. continue",
-		Importance: 0.9,
-		Confidence: 0.9,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:  longmemory.ScopeProject,
-		ScopeKey:   longmemory.CanonicalProjectScopeKey(dir),
-		MemoryType: longmemory.TypeReference,
-		Title:      "followup",
-		Summary:    "Follow-up memory after reading source.txt.",
-		Content:    "Follow-up memory body for source.txt.",
-		Importance: 0.9,
-		Confidence: 0.9,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	cfg := isolatedConfigForCWD(t, dir)
+	enableTestMemoryFabric(&cfg, dir)
+	fabric := openSeededTestMemoryFabric(t, cfg, []memory.RawEvent{
+		{ID: "initial-memory", ContextID: "seed", Content: "Initial memory body. Continue after reading the file."},
+		{ID: "followup-memory", ContextID: "seed", Content: "Follow-up memory body for source.txt."},
+	})
 
 	var streamCalls atomic.Int32
 	var secondStreamBody map[string]any
@@ -387,18 +349,16 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	}))
 	defer server.Close()
 
-	cfg := isolatedConfigForCWD(t, dir)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = server.URL
 	cfg.APIModel = "custom-router-model"
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 5000
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = store.Path()
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := agent.NewCoreExecutionEngineWithMemoryEngine(&cfg, fabric)
+	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.LastQuery = "read file and continue"

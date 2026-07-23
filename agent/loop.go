@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -73,33 +74,37 @@ type RuntimeCacheEditState struct {
 type CoreExecutionEngine struct {
 	Config config.Config
 
-	mu                 sync.Mutex
-	aborted            bool
-	Registry           *coretools.ToolRegistry
-	LastState          *AgentState
-	permissionFuture   chan permissionDecision
-	skillPermissionCh  chan bool
-	mcpTrustCh         chan bool
-	skillPermissionQ   []StreamEvent
-	TaskRuntime        *AgentTaskRuntime
-	mcpMu              sync.Mutex
-	mcpInitialized     bool
-	mcpContext         coretools.ExecutionContext
-	extraction         *ExtractionController
-	skillRegistry      *skills.SkillRegistry
-	skillDiscovery     *skills.SkillDiscovery
-	skillPersistence   *skills.SkillPersistence
-	skillRecoveryReady map[string]bool
-	l3Regions          []agentContext.CollapsedRegion
-	cacheEditState     RuntimeCacheEditState
-	SessionID          string
-	AgentID            string
-	AgentType          string
-	TeamName           string
-	TeamSessionID      string
-	TeamAgentID        string
-	sessionMemory      *sessionmemory.Manager
-	StateObserver      func(*AgentState)
+	mu                     sync.Mutex
+	aborted                bool
+	Registry               *coretools.ToolRegistry
+	LastState              *AgentState
+	permissionFuture       chan permissionDecision
+	skillPermissionCh      chan bool
+	mcpTrustCh             chan bool
+	skillPermissionQ       []StreamEvent
+	TaskRuntime            *AgentTaskRuntime
+	mcpMu                  sync.Mutex
+	mcpInitialized         bool
+	mcpContext             coretools.ExecutionContext
+	extraction             *ExtractionController
+	memoryMu               sync.RWMutex
+	memoryEngine           memory.Engine
+	memoryEngineErr        error
+	memoryEngineRuntimeKey string
+	skillRegistry          *skills.SkillRegistry
+	skillDiscovery         *skills.SkillDiscovery
+	skillPersistence       *skills.SkillPersistence
+	skillRecoveryReady     map[string]bool
+	l3Regions              []agentContext.CollapsedRegion
+	cacheEditState         RuntimeCacheEditState
+	SessionID              string
+	AgentID                string
+	AgentType              string
+	TeamName               string
+	TeamSessionID          string
+	TeamAgentID            string
+	sessionMemory          *sessionmemory.Manager
+	StateObserver          func(*AgentState)
 }
 
 type permissionDecision struct {
@@ -108,6 +113,17 @@ type permissionDecision struct {
 }
 
 func NewCoreExecutionEngine(cfg *config.Config) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, nil, false)
+}
+
+// NewCoreExecutionEngineWithMemoryEngine creates an execution engine with an
+// already-open memory engine. Ownership of memoryEngine transfers to the core
+// engine, which closes it during shutdown.
+func NewCoreExecutionEngineWithMemoryEngine(cfg *config.Config, memoryEngine memory.Engine) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, memoryEngine, true)
+}
+
+func newCoreExecutionEngine(cfg *config.Config, memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
 	if cfg == nil {
 		c := config.GetConfig()
 		cfg = &c
@@ -119,7 +135,14 @@ func NewCoreExecutionEngine(cfg *config.Config) *CoreExecutionEngine {
 		sessionMemory: sessionmemory.NewManager(),
 	}
 	e.RegisterDefaultTools()
-	e.extraction = NewExtractionController(e.Config, e.Registry)
+	e.extraction = NewExtractionController(e.Config)
+	if injected {
+		e.memoryEngine = memoryEngine
+		e.memoryEngineRuntimeKey = fabricMemoryRuntimeKey(e.Config)
+		e.extraction.Engine = memoryEngine
+	} else {
+		e.configureMemoryEngine(context.Background(), e.Config)
+	}
 	return e
 }
 
@@ -131,9 +154,16 @@ func (e *CoreExecutionEngine) RefreshRuntimeConfig(cfg config.Config) {
 	if e == nil {
 		return
 	}
+	previousKey := fabricMemoryRuntimeKey(e.Config)
 	e.Config = cfg
 	if e.extraction != nil {
 		e.extraction.Config = cfg
+	}
+	if previousKey != fabricMemoryRuntimeKey(cfg) || (isFabricMemoryBackend(cfg) && e.memoryEngineSnapshot() == nil) {
+		if e.extraction != nil {
+			e.extraction.Cancel()
+		}
+		e.configureMemoryEngine(context.Background(), cfg)
 	}
 }
 
@@ -196,6 +226,9 @@ func (e *CoreExecutionEngine) runForkSkill(ctx context.Context, skill skills.Ski
 	}
 	if extraContext == nil {
 		extraContext = coretools.ExecutionContext{}
+	}
+	if _, exists := extraContext["_memory_engine"]; !exists {
+		extraContext["_memory_engine"] = e.memoryEngineSnapshot()
 	}
 	extraContext["_skill_agent_scope"] = subagentScope
 	sub := NewSubAgent(e.Config, baseRegistry, definition, state, modelOverride, agentName, extraContext, thinkingBudgetTokens)
@@ -337,6 +370,7 @@ func (e *CoreExecutionEngine) Reset() {
 	if e.extraction != nil {
 		e.extraction.Cancel()
 	}
+	e.flushAndSealMemory(context.Background())
 	if e.skillPersistence != nil {
 		e.skillPersistence.ClearAll()
 	}
@@ -356,6 +390,8 @@ func (e *CoreExecutionEngine) Shutdown() {
 	if e.extraction != nil {
 		e.extraction.Cancel()
 	}
+	e.flushAndSealMemory(context.Background())
+	e.closeMemoryEngine()
 	if e.skillPersistence != nil {
 		e.skillPersistence.ClearAll()
 	}
@@ -564,6 +600,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"_skill_agent_scope":      "main",
 			"_turn_count":             state.TurnCount,
 			"_permission_runtime":     e,
+			"_memory_engine":          e.memoryEngineSnapshot(),
 		}
 		if e.Config.MCPEnabled {
 			e.ensureMCPTools(execCtx)
@@ -700,7 +737,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			e.RecordSessionMemory(ctx, state, false)
 			if e.extraction != nil &&
 				e.Config.LongTermMemoryEnabled &&
-				e.Config.MemoryBackgroundExtractionEnabled &&
+				isFabricMemoryBackend(e.Config) &&
 				state.LastQuery != "" {
 				e.extraction.Config = e.Config
 				e.extraction.SourceSessionID = e.SessionID
@@ -772,7 +809,7 @@ func (e *CoreExecutionEngine) prefetchMemoryRecall(ctx context.Context, state *A
 		if strings.TrimSpace(query) == "" {
 			query = state.LastQuery
 		}
-		resultCh <- RunMemoryRecallWithRuntime(recallCtx, e.Config, state, query, e.expansionClientFactory())
+		resultCh <- RunMemoryRecallWithEngine(recallCtx, e.Config, state, query, e.memoryEngineSnapshot())
 	}()
 	select {
 	case recalled := <-resultCh:
@@ -939,10 +976,54 @@ func (e *CoreExecutionEngine) executeAndCommitTools(ctx context.Context, state *
 		}))
 	}
 	CommitToolResultsTurn(state, toolResults, executor)
+	e.recordFabricToolEvents(ctx, state, toolResults, executor)
+	e.injectMemoryRecallAfterTools(ctx, state, toolResults, executor)
 	if pending, ok := executor.Context["_pending_skill_messages"].([]map[string]any); ok && len(pending) > 0 {
 		state.Messages = append(state.Messages, pending...)
 		executor.Context["_pending_skill_messages"] = []map[string]any{}
 	}
+}
+
+func (e *CoreExecutionEngine) injectMemoryRecallAfterTools(ctx context.Context, state *AgentState,
+	toolResults []map[string]any, executor *StreamingToolExecutor) {
+	if e == nil || state == nil || !e.Config.LongTermMemoryEnabled || len(toolResults) == 0 {
+		return
+	}
+	query := toolMemoryRecallQuery(state.LastQuery, toolResults, executor)
+	if query == "" {
+		return
+	}
+	// Tool follow-up recall is deliberately local. Tool inputs and outputs are
+	// useful retrieval anchors but must not become a second remote expansion.
+	recalled := RunMemoryRecallWithEngine(ctx, e.Config, state, query, e.memoryEngineSnapshot())
+	for _, item := range recalled {
+		if len(item.RecallIDs) > 0 {
+			InjectRecalledMemories(state, recalled)
+			return
+		}
+	}
+}
+
+func toolMemoryRecallQuery(original string, toolResults []map[string]any, executor *StreamingToolExecutor) string {
+	parts := []string{strings.TrimSpace(original)}
+	for _, result := range toolResults {
+		toolUseID := stringFromAny(result["tool_use_id"])
+		if executor != nil {
+			if slot := executor.GetSlot(toolUseID); slot != nil {
+				parts = append(parts, strings.TrimSpace(slot.TC.Name))
+				if encoded, err := json.Marshal(slot.TC.Input); err == nil {
+					parts = append(parts, string(encoded))
+				}
+			}
+		}
+		parts = append(parts, strings.TrimSpace(stringFromAny(result["content"])))
+	}
+	query := strings.TrimSpace(strings.Join(parts, "\n"))
+	runes := []rune(query)
+	if len(runes) > 4000 {
+		query = string(runes[:4000])
+	}
+	return query
 }
 
 func (e *CoreExecutionEngine) requestSkillShellPermission(ctx context.Context, executor *StreamingToolExecutor, req skills.SkillShellPermissionRequest) bool {
@@ -996,12 +1077,6 @@ func (e *CoreExecutionEngine) BuildClient(maxTokens int, model string, thinkingB
 		model = e.Config.APIModel
 	}
 	return CreateConfiguredLLMClient(e.Config, model, maxTokens, thinkingBudgetTokens, api.DefaultRetryConfigPtr())
-}
-
-func (e *CoreExecutionEngine) expansionClientFactory() MemoryExpansionClientFactory {
-	return func(ctx context.Context, model string) (api.LLMClient, error) {
-		return e.BuildClient(1024, model, nil)
-	}
 }
 
 func (e *CoreExecutionEngine) PostToolUse(tc coretools.ToolCall, state *AgentState) {

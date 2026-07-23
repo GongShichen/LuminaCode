@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	suite := flag.String("suite", agentbench.SuiteAiderPolyglotSmoke, "Benchmark suite: terminal_bench, tau_bench, swebench_verified, aider_polyglot_smoke, swebench_verified_subset, terminal_bench_smoke, longmemeval, memoryarena.")
+	suite := flag.String("suite", agentbench.SuiteAiderPolyglotSmoke, "Benchmark suite: terminal_bench, tau_bench, swebench_verified, aider_polyglot_smoke, swebench_verified_subset, terminal_bench_smoke, longmemeval.")
 	casesPath := flag.String("cases", "", "Optional JSON/JSONL case manifest path.")
 	caseID := flag.String("case", "", "Optional upstream case/task identifier. Debug mode only; passed to official harness via LUMINA_BENCHMARK_CASE.")
 	limit := flag.Int("limit", 0, "Optional case limit.")
@@ -30,11 +30,26 @@ func main() {
 	harnessCmd := flag.String("harness-cmd", "", "Official benchmark harness command for terminal_bench, tau_bench, or swebench_verified.")
 	swebenchHarnessCmd := flag.String("swebench-harness-cmd", "", "Legacy SWE-bench harness command. Prefer -harness-cmd.")
 	preparedEnv := flag.Bool("prepared-env", false, "Require the official harness to reuse prebuilt benchmark environments. For terminal_bench this validates --no-rebuild and --no-cleanup.")
+	longMemEvalPhase := flag.String("longmemeval-phase", "", "Required for LongMemEval: prepare, answer, or evaluate. Phases never auto-chain.")
+	longMemEvalIndexDir := flag.String("longmemeval-index-dir", "", "Prepared LongMemEval index directory. Defaults to <work-dir>/longmemeval-prepared-index.")
+	longMemEvalIndexSource := flag.String("longmemeval-index-source", "", "Existing per-case store source. Defaults to <work-dir>/cases.")
+	longMemEvalRunID := flag.String("longmemeval-run-id", "", "Answer run identifier used for isolated retrieval traces and checkpoints.")
+	longMemEvalPredictions := flag.String("longmemeval-predictions", "", "Prediction JSONL to validate and evaluate in the evaluate phase.")
+	longMemEvalSmokeSize := flag.Int("longmemeval-smoke-size", 0, "Deterministic question-type-stratified LongMemEval smoke size. Reuse the same value across prepare, answer, and evaluate.")
+	longMemEvalQuestionType := flag.String("longmemeval-question-type", "", "Optional LongMemEval question type filter for a deterministic smoke run.")
 	flag.Parse()
+	if *suite == agentbench.SuiteLongMemEval {
+		phase := strings.TrimSpace(*longMemEvalPhase)
+		if phase != agentbench.LongMemEvalPhasePrepare && phase != agentbench.LongMemEvalPhaseAnswer && phase != agentbench.LongMemEvalPhaseEvaluate {
+			fmt.Fprintln(os.Stderr, "LongMemEval requires -longmemeval-phase prepare|answer|evaluate")
+			os.Exit(2)
+		}
+	}
 
 	cfg := config.NewConfig()
 	cfg.Yolo = true
-	if cfg.APIKey == "" || cfg.APIBaseURL == "" || cfg.APIModel == "" {
+	requiresAPI := *suite != agentbench.SuiteLongMemEval || strings.TrimSpace(*longMemEvalPhase) != agentbench.LongMemEvalPhasePrepare
+	if requiresAPI && (cfg.APIKey == "" || cfg.APIBaseURL == "" || cfg.APIModel == "") {
 		fmt.Fprintln(os.Stderr, "agent benchmark requires API key, base URL, and model configuration")
 		os.Exit(2)
 	}
@@ -50,22 +65,29 @@ func main() {
 	}
 	start := time.Now()
 	report, err := agentbench.RunSuite(context.Background(), agentbench.RunnerOptions{
-		Suite:              *suite,
-		CasesPath:          expandHome(*casesPath),
-		CaseID:             *caseID,
-		Limit:              *limit,
-		RootDir:            rootDir,
-		OutputDir:          expandHome(*outputDir),
-		WorkDir:            expandHome(*workDir),
-		ArtifactsDir:       expandHome(*artifactsDir),
-		BenchmarkDir:       expandHome(*benchmarkDir),
-		TimeoutSeconds:     *timeout,
-		CaseParallel:       *caseParallel,
-		NoResume:           !*resume,
-		Config:             cfg,
-		HarnessCmd:         *harnessCmd,
-		SWEBenchHarnessCmd: *swebenchHarnessCmd,
-		PreparedEnv:        *preparedEnv,
+		Suite:                   *suite,
+		CasesPath:               expandHome(*casesPath),
+		CaseID:                  *caseID,
+		Limit:                   *limit,
+		RootDir:                 rootDir,
+		OutputDir:               expandHome(*outputDir),
+		WorkDir:                 expandHome(*workDir),
+		ArtifactsDir:            expandHome(*artifactsDir),
+		BenchmarkDir:            expandHome(*benchmarkDir),
+		TimeoutSeconds:          *timeout,
+		CaseParallel:            *caseParallel,
+		NoResume:                !*resume,
+		Config:                  cfg,
+		HarnessCmd:              *harnessCmd,
+		SWEBenchHarnessCmd:      *swebenchHarnessCmd,
+		PreparedEnv:             *preparedEnv,
+		LongMemEvalPhase:        strings.TrimSpace(*longMemEvalPhase),
+		LongMemEvalIndexDir:     expandHome(*longMemEvalIndexDir),
+		LongMemEvalIndexSource:  expandHome(*longMemEvalIndexSource),
+		LongMemEvalRunID:        strings.TrimSpace(*longMemEvalRunID),
+		LongMemEvalPredictions:  expandHome(*longMemEvalPredictions),
+		LongMemEvalSmokeSize:    *longMemEvalSmokeSize,
+		LongMemEvalQuestionType: strings.TrimSpace(*longMemEvalQuestionType),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent benchmark failed: %v\n", err)
@@ -85,7 +107,7 @@ func main() {
 	fmt.Printf("JSON report: %s\n", jsonPath)
 	fmt.Printf("Markdown report: %s\n", mdPath)
 	if report.PredictionsPath != "" {
-		fmt.Printf("SWE-bench predictions: %s\n", report.PredictionsPath)
+		fmt.Printf("Predictions: %s\n", report.PredictionsPath)
 	}
 	if report.HarnessOutputPath != "" {
 		fmt.Printf("Harness output: %s\n", report.HarnessOutputPath)
@@ -97,6 +119,9 @@ func main() {
 		os.Exit(1)
 	}
 	if agentbench.IsOfficialSuite(report.Suite) {
+		return
+	}
+	if report.Suite == agentbench.SuiteLongMemEval {
 		return
 	}
 	if report.Summary.ResolvedCases != report.Summary.TotalCases {

@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	ErrMigrationRequired    = errors.New("LuminaCode AppRoot v1 requires layout migration")
+	ErrMigrationRequired    = errors.New("legacy LuminaCode AppRoot requires layout migration")
 	ErrLayoutNotInitialized = errors.New("LuminaCode AppRoot layout is not initialized; run 'lumina-backend layout migrate --dry-run' then '--apply'")
 )
 
@@ -135,7 +135,13 @@ func EnsurePrivatePermissions(paths AppPaths) error {
 		}
 	}
 	files := []string{
-		paths.SettingsFile, paths.MCPConfigFile, paths.MemoryDB, paths.MemoryDB + "-shm", paths.MemoryDB + "-wal",
+		paths.SettingsFile, paths.MCPConfigFile,
+		filepath.Join(paths.MemoryDir, "fabric", "ledger.sqlite"),
+		filepath.Join(paths.MemoryDir, "fabric", "ledger.sqlite-shm"),
+		filepath.Join(paths.MemoryDir, "fabric", "ledger.sqlite-wal"),
+		filepath.Join(paths.MemoryDir, "fabric", "index.sqlite"),
+		filepath.Join(paths.MemoryDir, "fabric", "index.sqlite-shm"),
+		filepath.Join(paths.MemoryDir, "fabric", "index.sqlite-wal"),
 		paths.EndpointFile, paths.BackendLogFile, paths.ManagedMCPFile,
 	}
 	for _, path := range files {

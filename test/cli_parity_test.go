@@ -8,7 +8,7 @@ import (
 	"LuminaCode/skills"
 )
 
-func TestCLICommandMetadataMatchesPythonBuiltins(t *testing.T) {
+func TestCLICommandMetadataMatchesBuiltins(t *testing.T) {
 	wantCommands := []string{
 		"/help",
 		"/clear",
@@ -25,14 +25,9 @@ func TestCLICommandMetadataMatchesPythonBuiltins(t *testing.T) {
 		"/NewTeam",
 		"/Memory",
 		"/MemorySearch",
+		"/MemoryRemember",
 		"/MemoryForget",
-		"/MemoryApprove",
-		"/MemoryRestore",
-		"/MemoryPrioritize",
-		"/MemoryDeprioritize",
-		"/MemorySupersede",
-		"/MemoryExport",
-		"/MemoryImport",
+		"/MemoryDoctor",
 		"/mcp",
 		"/resume",
 		"/storage",

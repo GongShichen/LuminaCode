@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,7 +14,7 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/config"
-	"LuminaCode/longmemory"
+	"LuminaCode/memory"
 	coretools "LuminaCode/tools"
 )
 
@@ -36,7 +35,6 @@ func subAgentTestConfigForCWD(t *testing.T, cwd string) config.Config {
 	t.Helper()
 	cfg := config.NewConfigForCWD(cwd)
 	cfg.LongTermMemoryEnabled = false
-	cfg.MemoryQueryExpansionEnabled = false
 	cfg.SessionDir = t.TempDir()
 	return cfg
 }
@@ -303,34 +301,20 @@ func TestSubAgentContinuationSkipsNotificationDrainLikePython(t *testing.T) {
 func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 	dir := t.TempDir()
 	cfg := subAgentTestConfigForCWD(t, dir)
-	memoryPath := filepath.Join(dir, "lumina-memory.sqlite")
-	store, err := longmemory.Open(context.Background(), memoryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	enableTestMemoryFabric(&cfg, dir)
 	projectRoot := cfg.ProjectRoot()
-	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:  longmemory.ScopeAgentType,
-		ScopeKey:   longmemory.AgentTypeScopeKey(projectRoot, "explore"),
-		MemoryType: longmemory.TypeProcedural,
-		Title:      "Search discipline",
-		Content:    "Prefer read-only repository exploration before suggesting edits.",
-		Summary:    "Read-only repository exploration first.",
-		Tags:       []string{"subagent", "explore"},
-		Importance: 0.8,
-		Confidence: 0.9,
-		Status:     longmemory.StatusActive,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	fabric := openSeededTestMemoryFabric(t, cfg, []memory.RawEvent{{
+		ID: "search-discipline", ContextID: "seed",
+		Content: "Explore repository exploration: Prefer read-only repository exploration before suggesting edits.",
+	}})
+	defer fabric.Close()
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = memoryPath
 	registry := coretools.NewToolRegistry(newLargeReadTool())
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
-	sub := agent.NewSubAgent(cfg, registry, def, nil, "", "Explore", coretools.ExecutionContext{})
+	sub := agent.NewSubAgent(cfg, registry, def, nil, "", "Explore", coretools.ExecutionContext{
+		"_memory_engine": fabric,
+	})
 	session := sub.CreateSessionState("repository exploration")
 	prompt := session.SystemPrompt
 	if projectRoot == "" {
@@ -404,34 +388,21 @@ func TestSubAgentPassesForkThinkingBudgetToAnthropicClientLikePython(t *testing.
 func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testing.T) {
 	dir := t.TempDir()
 	cfg := subAgentTestConfigForCWD(t, dir)
-	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:     longmemory.ScopeAgentType,
-		ScopeKey:      longmemory.AgentTypeScopeKey(cfg.ProjectRoot(), "Explore"),
-		MemoryType:    longmemory.TypeReference,
-		Title:         "Repo Note",
-		Content:       "Use this repo note.",
-		Importance:    0.9,
-		Confidence:    0.9,
-		SourceAgentID: "Explore",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	enableTestMemoryFabric(&cfg, dir)
+	fabric := openSeededTestMemoryFabric(t, cfg, []memory.RawEvent{{
+		ID: "repo-note", ContextID: "seed", Content: "Explore inspect repo: Use this repo note.",
+	}})
+	defer fabric.Close()
 
 	cfg.APIModel = "gpt-5"
 	cfg.APIType = "openai_compatible"
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = store.Path()
 	def := agent.AgentDef{Name: "Explore", Description: "Read-only search agent.", MaxTurns: 7}
-	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "Explore", coretools.ExecutionContext{})
+	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(), def, nil, "", "Explore", coretools.ExecutionContext{
+		"_memory_engine": fabric,
+	})
 
 	session := sub.CreateSessionState("inspect repo")
-	if _, ok := session.SurfacedMemoryIDs[entry.MemoryID]; !ok {
+	if _, ok := session.SurfacedMemoryIDs["repo-note"]; !ok {
 		t.Fatalf("expected initial long-term agent memory id to be surfaced, got %#v", session.SurfacedMemoryIDs)
 	}
 }
@@ -439,37 +410,12 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	dir := t.TempDir()
 	cfg := subAgentTestConfigForCWD(t, dir)
-	store, err := longmemory.Open(context.Background(), filepath.Join(dir, "memory.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	entry, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:     longmemory.ScopeProject,
-		ScopeKey:      longmemory.CanonicalProjectScopeKey(cfg.ProjectRoot()),
-		MemoryType:    longmemory.TypeReference,
-		Title:         "Workspace Note",
-		Content:       "Use this workspace-level memory.",
-		Importance:    0.9,
-		Confidence:    0.9,
-		SourceAgentID: "Explore",
+	enableTestMemoryFabric(&cfg, dir)
+	fabric := openSeededTestMemoryFabric(t, cfg, []memory.RawEvent{
+		{ID: "workspace-note", ContextID: "seed", Content: "Explore inspect workspace: Use this workspace-level memory."},
+		{ID: "search-note", ContextID: "seed", Content: "Repo search: Use this search-triggered memory for inspect workspace and repo queries."},
 	})
-	if err != nil || entry == nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Upsert(context.Background(), longmemory.Candidate{
-		ScopeType:     longmemory.ScopeAgentType,
-		ScopeKey:      longmemory.AgentTypeScopeKey(cfg.ProjectRoot(), "Explore"),
-		MemoryType:    longmemory.TypeReference,
-		Title:         "Search Note",
-		Summary:       "Search followup note",
-		Content:       "Use this search-triggered memory for inspect workspace and repo queries.",
-		Importance:    0.9,
-		Confidence:    0.9,
-		SourceAgentID: "Explore",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	defer fabric.Close()
 
 	var streamCalls atomic.Int32
 	var streamSawMemory atomic.Bool
@@ -512,10 +458,10 @@ func TestSubAgentSearchToolTriggersAgentMemoryRecallLikePython(t *testing.T) {
 	cfg.APIType = "openai_compatible"
 	cfg.APIMaxTokens = 256
 	cfg.SessionDir = t.TempDir()
-	cfg.LongTermMemoryEnabled = true
-	cfg.LongTermMemoryStore = store.Path()
 	def := agent.AgentDef{Name: "Explore", Description: "Search agent.", MaxTurns: 5}
-	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(newSearchTool()), def, nil, "", "Explore", coretools.ExecutionContext{})
+	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(newSearchTool()), def, nil, "", "Explore", coretools.ExecutionContext{
+		"_memory_engine": fabric,
+	})
 
 	result, err := sub.Run(context.Background(), "inspect workspace")
 	if err != nil {

@@ -43,16 +43,11 @@ var BuiltinCommandSpecs = []SlashCommandSpec{
 	{Primary: "/TeamOut", Description: "Exit Agent Team mode"},
 	{Primary: "/TeamSummary", Description: "Show Team session summary (Team mode only)"},
 	{Primary: "/NewTeam", Description: "Create a new Agent Team template"},
-	{Primary: "/Memory", Description: "Open long-term memory manager"},
+	{Primary: "/Memory", Description: "Show Memory Fabric health"},
 	{Primary: "/MemorySearch", Description: "Search long-term memory"},
-	{Primary: "/MemoryForget", Description: "Forget a long-term memory"},
-	{Primary: "/MemoryApprove", Description: "Approve a pending long-term memory"},
-	{Primary: "/MemoryRestore", Description: "Restore an archived or deleted long-term memory"},
-	{Primary: "/MemoryPrioritize", Description: "Prioritize a long-term memory"},
-	{Primary: "/MemoryDeprioritize", Description: "Deprioritize a long-term memory"},
-	{Primary: "/MemorySupersede", Description: "Supersede one long-term memory with another"},
-	{Primary: "/MemoryExport", Description: "Export long-term memory"},
-	{Primary: "/MemoryImport", Description: "Import long-term memory"},
+	{Primary: "/MemoryRemember", Description: "Explicitly commit durable semantic memory"},
+	{Primary: "/MemoryForget", Description: "Tombstone or purge Memory Fabric evidence"},
+	{Primary: "/MemoryDoctor", Description: "Check Memory Fabric ledger and index health"},
 	{Primary: "/mcp", Description: "Show registered MCP tools for current session"},
 	{Primary: "/resume", Description: "Resume a previous session by ID"},
 	{Primary: "/storage", Description: "Show session storage usage"},
@@ -144,10 +139,11 @@ func ClassifyREPLSlashCommand(input string, registry *skills.SkillRegistry, cwd 
 		return SlashDispatch{Kind: SlashDispatchExit, Command: cmd, Name: cmdName}
 	}
 	switch cmd {
-	case "help", "clear", "save", "s", "tokens", "compact", "compress", "skill", "mcp", "team", "teamout", "teamsummary", "newteam", "memory", "memorysearch", "memoryforget", "memoryexport", "memoryimport", "storage", "pin", "unpin":
+	case "help", "clear", "save", "s", "tokens", "compact", "compress", "skill", "mcp", "team", "teamout", "teamsummary", "newteam", "memory", "memorydoctor", "storage", "pin", "unpin":
 		return SlashDispatch{Kind: SlashDispatchBuiltin, Command: cmd, Name: cmdName}
 	}
-	if cmdName == "yolo" || cmdName == "resume" || cmdName == "cleanup" {
+	if cmdName == "yolo" || cmdName == "resume" || cmdName == "cleanup" ||
+		cmdName == "memorysearch" || cmdName == "memoryremember" || cmdName == "memoryforget" {
 		return SlashDispatch{Kind: SlashDispatchBuiltin, Command: cmd, Name: cmdName}
 	}
 	if registry != nil {

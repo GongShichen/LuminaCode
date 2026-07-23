@@ -77,7 +77,9 @@ function Get-LuminaPaths {
         ManagedMcp = Join-Path $root "state\managed\mcp.json"
         SearxNG = Join-Path $root "state\services\searxng"
         Cache = Join-Path $root "cache"
-        MemoryModel = Join-Path $root "cache\models\memory\multilingual-e5-small"
+        MemoryModels = Join-Path $root "cache\models\memory"
+        MemoryModel = Join-Path $root "cache\models\memory\bge-m3"
+        MemoryBGEModel = Join-Path $root "cache\models\memory\bge-m3"
     }
 }
 
