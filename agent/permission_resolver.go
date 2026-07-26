@@ -10,14 +10,19 @@ import (
 )
 
 const (
-	PermissionOnce   = "once"
-	PermissionAlways = "always"
-	PermissionDeny   = "deny"
+	PermissionOnce           = "once"
+	PermissionAlways         = "always"
+	PermissionDeny           = "deny"
+	wslSandboxDecisionMapKey = "_wsl_sandbox_setup_decisions"
 )
 
 type PermissionCheck func(coretools.ToolCall, coretools.Tool, *AgentState) bool
 type PreToolHook func(context.Context, coretools.ToolCall)
 type PermissionPrompt func(context.Context, StreamEvent) (string, string)
+
+type SandboxSetupRequester interface {
+	SandboxSetupRequest(coretools.ExecutionContext, any) (bool, map[string]any)
+}
 
 type PermissionResolver struct {
 	Registry        *coretools.ToolRegistry
@@ -57,45 +62,88 @@ func (r *PermissionResolver) Resolve(ctx context.Context, toolCalls []coretools.
 			continue
 		}
 		validated, _ := tool.DecodeInput(tc.Input)
-		if requirement, ok := sandboxUnavailableRequirement(tool, tc, state); ok {
-			event := NewStreamEvent("permission_needed", tc.Name, map[string]any{
-				"tool_call":           tc,
-				"risk":                "high",
-				"dangerous":           true,
-				"sandbox_unavailable": true,
-				"sandbox_platform":    requirement.platform,
-				"sandbox_backend":     requirement.backend,
-				"enables_yolo":        true,
-				"command":             stringFromAny(tc.Input["command"]),
-				"reason":              requirement.reason,
-			})
-			decision := PermissionDeny
-			if r.RequestDecision != nil {
-				decision, _ = r.RequestDecision(ctx, event)
-			} else {
-				events = append(events, event)
+		sandboxSetupHandled := false
+		if setupRequester, ok := tool.(SandboxSetupRequester); ok {
+			if needed, metadata := setupRequester.SandboxSetupRequest(executor.Context, validated); needed {
+				if metadata == nil {
+					metadata = map[string]any{}
+				}
+				metadata["tool_call"] = tc
+				event := NewStreamEvent("permission_needed", tc.Name, metadata)
+				decision := PermissionDeny
+				if r.RequestDecision != nil {
+					decision, _ = r.RequestDecision(ctx, event)
+				} else {
+					events = append(events, event)
+				}
+				switch decision {
+				case "install", PermissionOnce, PermissionAlways, "true":
+					if !sandboxSetupCanInstall(metadata) {
+						denyContent := DeniedToolResultContent(state, tc)
+						executor.DenyTool(tc.ID)
+						events = append(events, NewStreamEvent("tool_result", denyContent, map[string]any{"tool_use_id": tc.ID, "denied": true}))
+						continue
+					}
+					executor.SetToolDecisionMapValue(wslSandboxDecisionMapKey, tc.ID, "install")
+					sandboxSetupHandled = true
+				case "local":
+					if !sandboxSetupAllowsLocalFallback(metadata) {
+						denyContent := DeniedToolResultContent(state, tc)
+						executor.DenyTool(tc.ID)
+						events = append(events, NewStreamEvent("tool_result", denyContent, map[string]any{"tool_use_id": tc.ID, "denied": true}))
+						continue
+					}
+					executor.SetToolDecisionMapValue(wslSandboxDecisionMapKey, tc.ID, "local")
+					sandboxSetupHandled = true
+				default:
+					denyContent := DeniedToolResultContent(state, tc)
+					executor.DenyTool(tc.ID)
+					events = append(events, NewStreamEvent("tool_result", denyContent, map[string]any{"tool_use_id": tc.ID, "denied": true}))
+					continue
+				}
 			}
-			if decision != PermissionOnce && decision != PermissionAlways && decision != "true" {
-				denyContent := DeniedToolResultContent(state, tc)
-				executor.DenyTool(tc.ID)
-				events = append(events, NewStreamEvent("tool_result", denyContent, map[string]any{"tool_use_id": tc.ID, "denied": true}))
+		}
+		if !sandboxSetupHandled {
+			if requirement, ok := sandboxUnavailableRequirement(tool, tc, state); ok {
+				event := NewStreamEvent("permission_needed", tc.Name, map[string]any{
+					"tool_call":           tc,
+					"risk":                "high",
+					"dangerous":           true,
+					"sandbox_unavailable": true,
+					"sandbox_platform":    requirement.platform,
+					"sandbox_backend":     requirement.backend,
+					"enables_yolo":        true,
+					"command":             stringFromAny(tc.Input["command"]),
+					"reason":              requirement.reason,
+				})
+				decision := PermissionDeny
+				if r.RequestDecision != nil {
+					decision, _ = r.RequestDecision(ctx, event)
+				} else {
+					events = append(events, event)
+				}
+				if decision != PermissionOnce && decision != PermissionAlways && decision != "true" {
+					denyContent := DeniedToolResultContent(state, tc)
+					executor.DenyTool(tc.ID)
+					events = append(events, NewStreamEvent("tool_result", denyContent, map[string]any{"tool_use_id": tc.ID, "denied": true}))
+					continue
+				}
+				if state.PermissionState == nil {
+					state.PermissionState = security.DefaultPermissionState()
+				}
+				state.PermissionState.YoloMode = true
+				if r.EnableYolo != nil {
+					r.EnableYolo(state)
+				}
+				delete(state.DeniedToolCalls, tc.Name)
+				delete(state.ToolErrors, tc.Name)
+				events = append(events, NewStreamEvent("text", "\n[system] YOLO mode enabled because the OS sandbox backend is unavailable. This and subsequent shell commands will run without OS sandbox isolation.\n", map[string]any{
+					"yolo_enabled": true,
+					"reason":       "sandbox_unavailable",
+				}))
+				executor.TryStartQueued(tc.ID)
 				continue
 			}
-			if state.PermissionState == nil {
-				state.PermissionState = security.DefaultPermissionState()
-			}
-			state.PermissionState.YoloMode = true
-			if r.EnableYolo != nil {
-				r.EnableYolo(state)
-			}
-			delete(state.DeniedToolCalls, tc.Name)
-			delete(state.ToolErrors, tc.Name)
-			events = append(events, NewStreamEvent("text", "\n[system] YOLO mode enabled because the OS sandbox backend is unavailable. This and subsequent shell commands will run without OS sandbox isolation.\n", map[string]any{
-				"yolo_enabled": true,
-				"reason":       "sandbox_unavailable",
-			}))
-			executor.TryStartQueued(tc.ID)
-			continue
 		}
 		if tool.IsReadOnly(validated) {
 			executor.TryStartQueued(tc.ID)
@@ -196,4 +244,22 @@ func persistAlwaysGrant(state *AgentState, tc coretools.ToolCall, tool coretools
 		return
 	}
 	state.PermissionState.ConfirmTool(tc.Name)
+}
+
+func sandboxSetupAllowsLocalFallback(metadata map[string]any) bool {
+	request, _ := metadata["sandbox_setup_request"].(map[string]any)
+	if request == nil {
+		return false
+	}
+	allowed, ok := request["allow_local_fallback"].(bool)
+	return ok && allowed
+}
+
+func sandboxSetupCanInstall(metadata map[string]any) bool {
+	request, _ := metadata["sandbox_setup_request"].(map[string]any)
+	if request == nil {
+		return false
+	}
+	allowed, ok := request["can_install"].(bool)
+	return ok && allowed
 }

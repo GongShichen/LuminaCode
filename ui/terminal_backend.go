@@ -696,6 +696,27 @@ func (b *TerminalRendererBackend) AskPermission(prompt any, dangerous bool) stri
 		fmt.Fprint(b.out, ". Allow once? [y/N] ")
 		return luminacli.NormalizePermissionAnswer(b.readLine())
 	}
+	if name == "wsl-sandbox-setup" {
+		distro := stringFromAny(input["distro"])
+		command := stringFromAny(input["command"])
+		reason := stringFromAny(input["reason"])
+		fmt.Fprint(b.out, "\nWSL sandbox setup needed")
+		if distro != "" {
+			fmt.Fprintf(b.out, " for %s", distro)
+		}
+		if reason != "" {
+			fmt.Fprintf(b.out, ": %s", reason)
+		}
+		if command != "" {
+			fmt.Fprintf(b.out, "\nCommand: %s", command)
+		}
+		if truthy(input["can_install"]) {
+			fmt.Fprint(b.out, "\nInstall sandbox and run in WSL2? [y/N] ")
+		} else {
+			fmt.Fprint(b.out, "\nNo sandbox image is configured. Run locally instead? [y/N] ")
+		}
+		return luminacli.NormalizePermissionAnswer(b.readLine())
+	}
 	if strings.HasPrefix(name, "skill-shell:") {
 		skillName := strings.TrimPrefix(name, "skill-shell:")
 		command := stringFromAny(input["command"])

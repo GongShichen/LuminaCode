@@ -464,10 +464,17 @@ func webSearchCachePath(execCtx ExecutionContext) string {
 }
 
 func configFromExecCtx(execCtx ExecutionContext) config.Config {
-	if cfg, ok := execCtx["config"].(config.Config); ok {
-		return cfg
+	if execCtx != nil {
+		switch cfg := execCtx["config"].(type) {
+		case config.Config:
+			return cfg
+		case *config.Config:
+			if cfg != nil {
+				return *cfg
+			}
+		}
 	}
-	return config.NewConfig()
+	return config.GetConfig()
 }
 
 func sameWebURL(a, b string) bool {

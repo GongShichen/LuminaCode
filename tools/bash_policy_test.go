@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,28 @@ func TestBashToolFailsClosedWithoutSandboxAndAllowsUserYolo(t *testing.T) {
 	})
 	if !strings.Contains(allowed.Content, "yolo-ok") {
 		t.Fatalf("explicit YOLO should execute without sandbox, got %q", allowed.Content)
+	}
+}
+
+func TestBashToolDoesNotImplicitlyUseLocalFallbackForMissingWSL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows WSL fallback policy test")
+	}
+	t.Setenv("PATH", t.TempDir())
+	tool := NewBashTool()
+	registry := NewToolRegistry(tool)
+	result := registry.Execute(context.Background(), ToolCall{
+		ID: "shell", Name: "run_shell", Input: map[string]any{"command": "echo should-not-run"},
+	}, ExecutionContext{
+		"cwd": t.TempDir(),
+		"config": config.Config{
+			SandboxBackend:               "wsl-bwrap",
+			WSLSandboxDistro:             "LuminaSandbox",
+			WSLSandboxAllowLocalFallback: true,
+		},
+	})
+	if !strings.Contains(result.Content, "WSL sandbox is required") || strings.Contains(result.Content, "should-not-run") {
+		t.Fatalf("missing WSL should fail closed without implicit local fallback, got %q", result.Content)
 	}
 }
 

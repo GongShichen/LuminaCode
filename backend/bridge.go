@@ -53,17 +53,35 @@ func (b *WSRendererBridge) AskPermission(prompt any, dangerous bool) string {
 	b.mu.Lock()
 	b.permissions[requestID] = permissionWaiter{sessionID: b.sessionID, ch: ch}
 	b.mu.Unlock()
+	actions := luminacli.Phase1PermissionActionLabels
+	if name, _ := permissionPromptNameAndInput(prompt); name == "wsl-sandbox-setup" {
+		actions = []string{"Install sandbox", "Run locally"}
+	}
 	b.emitEvent("permission_requested", map[string]any{
 		"request_id": requestID,
 		"prompt":     prompt,
 		"dangerous":  dangerous,
-		"actions":    luminacli.Phase1PermissionActionLabels,
+		"actions":    actions,
 	})
 	select {
 	case decision := <-ch:
 		return luminacli.NormalizePermissionAnswer(decision)
 	case <-time.After(24 * time.Hour):
 		return "deny"
+	}
+}
+
+func permissionPromptNameAndInput(prompt any) (string, map[string]any) {
+	switch value := prompt.(type) {
+	case map[string]any:
+		name, _ := value["name"].(string)
+		input, _ := value["input"].(map[string]any)
+		if input == nil {
+			input = map[string]any{}
+		}
+		return name, input
+	default:
+		return "", nil
 	}
 }
 

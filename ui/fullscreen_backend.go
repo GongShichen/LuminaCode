@@ -1546,6 +1546,13 @@ func (b *FullscreenRendererBackend) permissionModalState(prompt any, dangerous b
 		if content := stringFromAny(input["content"]); content != "" {
 			summaryLines = append(summaryLines, truncateString(content, 200))
 		}
+	case "wsl-sandbox-setup":
+		if reason := stringFromAny(input["reason"]); reason != "" {
+			summaryLines = append(summaryLines, truncateString(reason, 200))
+		}
+		if command := stringFromAny(input["command"]); command != "" {
+			summaryLines = append(summaryLines, truncateString(command, 200))
+		}
 	}
 	risk := "medium"
 	if dangerous {
@@ -1554,6 +1561,10 @@ func (b *FullscreenRendererBackend) permissionModalState(prompt any, dangerous b
 	if name == "" {
 		name = "permission"
 	}
+	actionLabels := []string{"允许一次", "本会话总是允许", "拒绝"}
+	if name == "wsl-sandbox-setup" {
+		actionLabels = []string{"安装沙箱后运行", "安装沙箱后运行", "本地运行"}
+	}
 	return map[string]any{
 		"kind":               "tool_permission",
 		"tool_name":          name,
@@ -1561,7 +1572,7 @@ func (b *FullscreenRendererBackend) permissionModalState(prompt any, dangerous b
 		"display_risk_level": risk,
 		"dangerous":          dangerous,
 		"summary_lines":      summaryLines,
-		"action_labels":      []string{"允许一次", "本会话总是允许", "拒绝"},
+		"action_labels":      actionLabels,
 	}
 }
 

@@ -50,7 +50,13 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
   "bundled_skills_dir": ".Lumina/SKILLS",
   "system_prompt_path": ".Lumina/SYSTEM/system-prompt.md",
   "ui_backend": "legacy_terminal",
-  "worktree_dir": ".Lumina/worktrees"
+  "worktree_dir": ".Lumina/worktrees",
+  "sandbox_backend": "wsl_bwrap",
+  "wsl_sandbox_distro": "ProjectSandbox",
+  "wsl_sandbox_install_dir": "~/.lumina/custom-wsl",
+  "wsl_sandbox_image_url": "https://example.invalid/lumina.wsl",
+  "wsl_sandbox_image_sha256": "ABCDEF",
+  "wsl_sandbox_allow_local_fallback": false
 }`
 	if err := os.WriteFile(filepath.Join(userConfigDir, "settings.json"), []byte(defaults), 0o644); err != nil {
 		t.Fatal(err)
@@ -63,9 +69,17 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	t.Setenv("LUMINA_PROMPT_CACHE_TTL_SECONDS", "77")
 	t.Setenv("LUMINA_ANTHROPIC_CACHE_EDITS", "true")
 	t.Setenv("LUMINA_UI_BACKEND", "legacy_terminal")
+	t.Setenv("LUMINA_SANDBOX_BACKEND", "local_bwrap")
+	t.Setenv("LUMINA_WSL_SANDBOX_DISTRO", "EnvSandbox")
+	t.Setenv("LUMINA_WSL_SANDBOX_IMAGE_PATH", "~/images/sandbox.wsl")
+	t.Setenv("LUMINA_WSL_SANDBOX_ALLOW_LOCAL_FALLBACK", "true")
 	t.Setenv("SESSION_MEM_TURN", "11")
 
 	cfg := config.NewConfig()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.APIMaxTokens != 9999 || cfg.MCPEnabled {
 		t.Fatalf("defaults were not applied: %#v", cfg)
 	}
@@ -102,6 +116,15 @@ func TestConfigLoadsLuminaDefaultsAndEnvOverrides(t *testing.T) {
 	}
 	if cfg.UIBackend != "prompt_toolkit_fullscreen" {
 		t.Fatalf("ui backend should be forced to fullscreen, got %s", cfg.UIBackend)
+	}
+	if cfg.SandboxBackend != "local-bwrap" ||
+		cfg.WSLSandboxDistro != "EnvSandbox" ||
+		cfg.WSLSandboxInstallDir != filepath.Join(home, ".lumina", "custom-wsl") ||
+		cfg.WSLSandboxImageURL != "https://example.invalid/lumina.wsl" ||
+		cfg.WSLSandboxImagePath != filepath.Join(home, "images", "sandbox.wsl") ||
+		cfg.WSLSandboxImageSHA256 != "abcdef" ||
+		!cfg.WSLSandboxAllowLocalFallback {
+		t.Fatalf("sandbox defaults/env were not applied: %#v", cfg)
 	}
 }
 

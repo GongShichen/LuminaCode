@@ -100,6 +100,66 @@ function Add-UserPath {
     return $true
 }
 
+function Stop-LuminaBackend {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackendPath,
+        [Parameter(Mandatory = $true)][string]$EndpointPath
+    )
+
+    $pids = @()
+    if (Test-Path $EndpointPath) {
+        try {
+            $endpoint = Get-Content -Raw -LiteralPath $EndpointPath | ConvertFrom-Json
+            if ($endpoint.pid) {
+                $pids += [int]$endpoint.pid
+            }
+        } catch {
+        }
+    }
+
+    $target = Normalize-PathSegment $BackendPath
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and (Normalize-PathSegment $_.Path) -eq $target
+    } | ForEach-Object {
+        $pids += $_.Id
+    }
+
+    foreach ($pidValue in ($pids | Sort-Object -Unique)) {
+        $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+        if (-not $process) {
+            continue
+        }
+        try {
+            Stop-Process -Id $pidValue -Force -ErrorAction Stop
+            Wait-Process -Id $pidValue -Timeout 5 -ErrorAction SilentlyContinue
+            Write-Host "Stopped existing lumina-backend process $pidValue"
+        } catch {
+            Write-Host "Could not stop lumina-backend process ${pidValue}: $($_.Exception.Message)"
+        }
+    }
+    Start-Sleep -Milliseconds 300
+}
+
+function Copy-ItemWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [int]$Attempts = 8
+    )
+
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq $Attempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds (250 * $i)
+        }
+    }
+}
+
 function Write-ExplicitSettings {
     param([Parameter(Mandatory = $true)][string]$Path)
     $settings = Read-LuminaJsonHashtable -Path $Path
@@ -108,6 +168,15 @@ function Write-ExplicitSettings {
     if ($Model) { $settings["api_model"] = $Model }
     $settings["api_type"] = $ApiType
     $settings["api_max_tokens"] = $MaxTokens
+    Write-LuminaAtomicJson -Path $Path -Value $settings
+}
+
+function Disable-ManagedMemorySettings {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $settings = Read-LuminaJsonHashtable -Path $Path
+    $settings["long_term_memory_enabled"] = $false
+    $settings["memory_embedding_enabled"] = $false
+    $settings["memory_bge_enabled"] = $false
     Write-LuminaAtomicJson -Path $Path -Value $settings
 }
 
@@ -137,6 +206,7 @@ $installedBackend = Join-Path $InstallDir "lumina-backend.exe"
 $installedLauncher = Join-Path $InstallDir "lumina.cmd"
 $appNew = Join-Path $AppRoot "app.new"
 $appOld = Join-Path $AppRoot "app.old"
+$endpointPath = $paths.Endpoint
 $swapped = $false
 $version = "dev"
 $installStage = "startup"
@@ -157,9 +227,14 @@ try {
     Assert-Command node
     Assert-Command npm
     Assert-Command curl.exe
-    $cCompilerName = $(if ($env:CC) { $env:CC } else { "gcc" })
-    Assert-Command $cCompilerName
-    $env:CGO_ENABLED = "1"
+    if ($SkipManagedComponents) {
+        $env:CGO_ENABLED = "0"
+        Write-Host "  native memory toolchain: skipped (CGO_ENABLED=0)"
+    } else {
+        $cCompilerName = $(if ($env:CC) { $env:CC } else { "gcc" })
+        Assert-Command $cCompilerName
+        $env:CGO_ENABLED = "1"
+    }
 
     $processor = Get-CimInstance Win32_Processor | Select-Object -First 1
     $video = @(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name)
@@ -234,7 +309,7 @@ try {
     Remove-Item -LiteralPath (Join-Path $appNew "frontend\package-lock.json") -Force
 
     $env:LUMINA_APP_ROOT = $AppRoot
-    & $backendBuildPath shutdown 2>$null
+    Stop-LuminaBackend -BackendPath $backendBuildPath -EndpointPath $endpointPath
     Invoke-Native "migrate AppRoot layout" { & $backendBuildPath layout migrate --apply --project-root $repoRoot --packaged-resources (Join-Path $appNew "resources") --installed-version $version }
 
     if (Test-Path $paths.Extensions) {
@@ -251,12 +326,17 @@ try {
 
         $installStage = "launcher installation"
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -LiteralPath $backendBuildPath -Destination $installedBackend -Force
+    Stop-LuminaBackend -BackendPath $installedBackend -EndpointPath $endpointPath
+    Copy-ItemWithRetry -Source $backendBuildPath -Destination $installedBackend
     Write-LuminaLauncher -Path $installedLauncher -AppRoot $AppRoot
 
     if ($WriteDefaults) {
         Write-ExplicitSettings -Path $paths.Settings
         Write-Host "Wrote explicit settings: $($paths.Settings)"
+    }
+    if ($SkipManagedComponents) {
+        Disable-ManagedMemorySettings -Path $paths.Settings
+        Write-Host "Disabled managed memory settings: $($paths.Settings)"
     }
     Set-LuminaPrivateAcl -Path @($paths.Config, $paths.Data, $paths.State)
 
