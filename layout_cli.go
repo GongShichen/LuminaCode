@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -78,10 +79,8 @@ func runLayoutCLI(args []string) error {
 		}
 		if *apply {
 			for _, endpoint := range []string{paths.EndpointFile, apppaths.LegacyEndpointFile(*source)} {
-				if _, statErr := os.Stat(endpoint); statErr == nil {
-					if shutdownErr := backend.RunShutdownCLI([]string{"--endpoint", endpoint}); shutdownErr != nil {
-						return fmt.Errorf("stop backend before migration: %w", shutdownErr)
-					}
+				if err := stopLayoutBackend(endpoint, "migration"); err != nil {
+					return err
 				}
 			}
 		}
@@ -106,10 +105,8 @@ func runLayoutCLI(args []string) error {
 		if err := apppaths.CheckLayout(paths); err != nil {
 			return err
 		}
-		if _, statErr := os.Stat(paths.EndpointFile); statErr == nil {
-			if shutdownErr := backend.RunShutdownCLI([]string{"--endpoint", paths.EndpointFile}); shutdownErr != nil {
-				return fmt.Errorf("stop backend before binding project: %w", shutdownErr)
-			}
+		if err := stopLayoutBackend(paths.EndpointFile, "binding project"); err != nil {
+			return err
 		}
 		return apppaths.BindLegacyProject(paths, *legacy, *root)
 	default:
@@ -117,8 +114,38 @@ func runLayoutCLI(args []string) error {
 	}
 }
 
+func stopLayoutBackend(endpoint, action string) error {
+	if _, statErr := os.Stat(endpoint); os.IsNotExist(statErr) {
+		return nil
+	} else if statErr != nil {
+		return fmt.Errorf("inspect backend endpoint before %s: %w", action, statErr)
+	}
+	if shutdownErr := backend.RunShutdownCLI([]string{"--endpoint", endpoint}); shutdownErr != nil {
+		if isStaleBackendEndpointError(shutdownErr) {
+			fmt.Fprintf(os.Stderr, "warning: ignoring stale backend endpoint %s: %v\n", endpoint, shutdownErr)
+			_ = os.Remove(endpoint)
+			return nil
+		}
+		return fmt.Errorf("stop backend before %s: %w", action, shutdownErr)
+	}
+	return nil
+}
+
+func isStaleBackendEndpointError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "actively refused") ||
+		strings.Contains(message, "connectex:")
+}
+
 func defaultLegacySource(paths apppaths.AppPaths) string {
 	if runtime.GOOS != "windows" || apppaths.HasLegacyLayout(paths.Root) {
+		return paths.Root
+	}
+	if !isDefaultWindowsAppRoot(paths.Root) {
 		return paths.Root
 	}
 	home, err := os.UserHomeDir()
@@ -130,4 +157,13 @@ func defaultLegacySource(paths apppaths.AppPaths) string {
 		return legacy
 	}
 	return paths.Root
+}
+
+func isDefaultWindowsAppRoot(root string) bool {
+	localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+	if localAppData == "" {
+		return false
+	}
+	defaultRoot := filepath.Join(localAppData, apppaths.AppName)
+	return strings.EqualFold(filepath.Clean(root), filepath.Clean(defaultRoot))
 }

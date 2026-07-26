@@ -122,7 +122,15 @@ func TestMakeInstallAndUninstallManageMemoryModels(t *testing.T) {
 	windowsInstaller := readRepositoryFile(t, repoRoot, "scripts/install-windows.ps1")
 	if !strings.Contains(windowsInstaller, `$env:CGO_ENABLED = "1"`) ||
 		!strings.Contains(windowsInstaller, "Assert-Command $cCompilerName") {
-		t.Fatal("Windows installer does not enforce a local-embedding-capable backend build")
+		t.Fatal("Windows installer does not enforce a local-embedding-capable backend build when managed memory is enabled")
+	}
+	if !strings.Contains(windowsInstaller, `$env:CGO_ENABLED = "0"`) ||
+		!strings.Contains(windowsInstaller, "native memory toolchain: skipped") ||
+		!strings.Contains(windowsInstaller, "Disable-ManagedMemorySettings") ||
+		!strings.Contains(windowsInstaller, `$settings["long_term_memory_enabled"] = $false`) ||
+		!strings.Contains(windowsInstaller, `$settings["memory_embedding_enabled"] = $false`) ||
+		!strings.Contains(windowsInstaller, `$settings["memory_bge_enabled"] = $false`) {
+		t.Fatal("Windows installer does not support installing without managed memory components")
 	}
 	if strings.Index(windowsInstaller, `-Action preflight`) < 0 ||
 		strings.Index(windowsInstaller, `-Action preflight`) > strings.Index(windowsInstaller, `build frontend`) {

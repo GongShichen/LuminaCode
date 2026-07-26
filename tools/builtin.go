@@ -813,6 +813,8 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 	if cwd == "" {
 		cwd = config.GetConfig().CWD
 	}
+	cfg := configFromExecCtx(execCtx)
+	t.configureSandbox(cfg)
 	var timeoutValue any
 	if in.Timeout != nil {
 		timeoutValue = in.Timeout
@@ -856,11 +858,34 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 	}
 
 	yolo := bashYoloEnabled(execCtx)
-	if !yolo && (t.sandboxManager == nil || !t.sandboxManager.IsSandboxingEnabled()) {
+	resultPrefix := ""
+	localFallback := false
+	if t.sandboxManager != nil && t.sandboxManager.NeedsSetup(in.Command, yolo) {
+		decision := sandboxSetupDecision(execCtx)
+		switch decision {
+		case "install":
+			if err := t.sandboxManager.InstallWSLSandbox(ctx); err != nil {
+				return "<tool_use_error>\nWSL sandbox setup failed: " + err.Error() +
+					"\nConfigure wsl_sandbox_image_path or wsl_sandbox_image_url, or rerun with local fallback.\n</tool_use_error>", nil
+			}
+		case "local":
+			if !t.sandboxManager.AllowLocalFallback() {
+				return "<tool_use_error>\nWSL sandbox is not available and local fallback is disabled.\nConfigure the WSL sandbox image or set wsl_sandbox_allow_local_fallback=true.\n</tool_use_error>", nil
+			}
+			resultPrefix = "[sandbox] WSL sandbox unavailable; command executed locally because local fallback was selected."
+			localFallback = true
+		default:
+			return "<tool_use_error>\nWSL sandbox is required for this command but the sandbox distro is not installed. Approve WSL sandbox setup or explicitly choose local fallback.\n</tool_use_error>", nil
+		}
+	}
+	if !yolo && !localFallback && (t.sandboxManager == nil || !t.sandboxManager.IsSandboxingEnabled()) {
 		return "<tool_use_error>\nOS sandbox backend is unavailable. The command was not executed. Enable YOLO mode explicitly to run without sandbox isolation.\n</tool_use_error>", nil
 	}
 	argv := bashpkg.ShellArgv(in.Command, "")
-	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, yolo, nil) {
+	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, yolo || localFallback, nil) {
+		if runtimeDir := projectRuntimeDirFromContext(execCtx, cwd); strings.TrimSpace(runtimeDir) != "" {
+			_ = os.MkdirAll(runtimeDir, 0o755)
+		}
 		readRoots := append([]string{cwd}, rootsFromAny(execCtx["allowed_read_roots"])...)
 		writeRoots := append([]string{cwd}, rootsFromAny(execCtx["allowed_write_roots"])...)
 		argv = t.sandboxManager.GetSandboxCommand(in.Command, bashpkg.SandboxConfig{
@@ -877,17 +902,70 @@ func (t *BashTool) Execute(ctx context.Context, execCtx ExecutionContext, input 
 
 	var exitCode int
 	var output string
-	if bashpkg.ShouldUseSandbox(in.Command, t.sandboxManager, yolo, nil) {
-		exitCode, output = runArgvCommand(ctx, argv, cwd, timeout, in.Command)
-	} else {
-		exitCode, output = runShellCommand(ctx, in.Command, cwd, timeout)
-	}
+	exitCode, output = runArgvCommand(ctx, argv, cwd, timeout, in.Command)
 	output = truncateBashOutput(output)
 	exitInfo := bashpkg.FormatExitCode(in.Command, exitCode)
-	if strings.TrimSpace(output) == "" {
-		return exitInfo, nil
+	parts := []string{exitInfo}
+	if strings.TrimSpace(resultPrefix) != "" {
+		parts = append(parts, resultPrefix)
 	}
-	return exitInfo + "\n\n" + output, nil
+	if strings.TrimSpace(output) == "" {
+		return strings.Join(parts, "\n\n"), nil
+	}
+	parts = append(parts, output)
+	return strings.Join(parts, "\n\n"), nil
+}
+
+func (t *BashTool) SandboxSetupRequest(execCtx ExecutionContext, input any) (bool, map[string]any) {
+	in := deref[BashInput](input)
+	if in.RunInBackground {
+		return false, nil
+	}
+	cfg := configFromExecCtx(execCtx)
+	t.configureSandbox(cfg)
+	status := t.sandboxManager.WSLSetupStatus(in.Command, bashYoloEnabled(execCtx))
+	if !status.Needed {
+		return false, nil
+	}
+	return true, map[string]any{
+		"sandbox_setup_request": map[string]any{
+			"kind":                 "wsl-bwrap",
+			"distro":               status.Distro,
+			"reason":               status.Reason,
+			"image_url":            status.ImageURL,
+			"image_path":           status.ImagePath,
+			"can_install":          status.CanInstall,
+			"allow_local_fallback": status.AllowLocalFallback,
+		},
+		"risk":      "high",
+		"dangerous": true,
+	}
+}
+
+func (t *BashTool) configureSandbox(cfg config.Config) {
+	if t == nil || t.sandboxManager == nil {
+		return
+	}
+	t.sandboxManager.Configure(bashpkg.SandboxOptions{
+		Backend:               cfg.SandboxBackend,
+		WSLDistro:             cfg.WSLSandboxDistro,
+		WSLInstallDir:         cfg.WSLSandboxInstallDir,
+		WSLImageURL:           cfg.WSLSandboxImageURL,
+		WSLImagePath:          cfg.WSLSandboxImagePath,
+		WSLImageSHA256:        cfg.WSLSandboxImageSHA256,
+		WSLAllowLocalFallback: cfg.WSLSandboxAllowLocalFallback,
+	})
+}
+
+func sandboxSetupDecision(execCtx ExecutionContext) string {
+	toolID := stringFromExecCtx(execCtx, "_tool_call_id")
+	if toolID == "" {
+		return ""
+	}
+	if decisions, ok := execCtx["_wsl_sandbox_setup_decisions"].(map[string]string); ok {
+		return decisions[toolID]
+	}
+	return ""
 }
 
 type ToolSearchInput struct {

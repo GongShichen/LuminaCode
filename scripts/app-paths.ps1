@@ -128,7 +128,13 @@ function Write-LuminaAtomicJson {
     }
     try {
         if (Test-Path -LiteralPath $Path) {
-            [IO.File]::Replace($temporary, $Path, $null, $true)
+            $backup = Join-Path $directory (".lumina-" + [guid]::NewGuid().ToString("N") + ".bak")
+            try {
+                [IO.File]::Replace($temporary, $Path, $backup, $true)
+                Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+            } catch {
+                throw
+            }
         } else {
             [IO.File]::Move($temporary, $Path)
         }

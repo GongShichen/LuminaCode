@@ -381,6 +381,8 @@ func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
 			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
 		} else if _, ok := normalizeMCPTrustRequest(event.Metadata["mcp_trust_request"]); ok {
 			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
+		} else if _, ok := normalizeSandboxSetupRequest(event.Metadata["sandbox_setup_request"]); ok {
+			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
 		} else if tc := event.Metadata["tool_call"]; tc != nil {
 			answer = r.UI.AskPermission(tc, truthy(event.Metadata["dangerous"]) || stringFromAny(event.Metadata["risk"]) == "high")
 		} else {
@@ -448,6 +450,15 @@ func (r *UiRuntime) BuildPermissionModalState(event UiEvent) map[string]any {
 		targetSummary = FormatMCPTrustTarget(req)
 		summaryLines = []string{truncateString(targetSummary, 200)}
 		kind = "mcp_trust_permission"
+	} else if req, ok := normalizeSandboxSetupRequest(event.Metadata["sandbox_setup_request"]); ok {
+		toolName = "wsl-sandbox-setup"
+		targetSummary = sandboxSetupTarget(req, event.Metadata["tool_call"])
+		summaryLines = []string{truncateString(firstNonEmpty(stringFromAny(req["reason"]), targetSummary), 200)}
+		kind = "sandbox_setup_permission"
+	}
+	actionLabels := append([]string{}, luminacli.Phase1PermissionActionLabels...)
+	if kind == "sandbox_setup_permission" {
+		actionLabels = []string{"Install sandbox", "Install sandbox", "Run locally"}
 	}
 	return map[string]any{
 		"kind":               kind,
@@ -457,7 +468,7 @@ func (r *UiRuntime) BuildPermissionModalState(event UiEvent) map[string]any {
 		"display_risk_level": displayRisk,
 		"dangerous":          truthy(event.Metadata["dangerous"]),
 		"summary_lines":      nonEmptyStrings(summaryLines),
-		"action_labels":      append([]string{}, luminacli.Phase1PermissionActionLabels...),
+		"action_labels":      actionLabels,
 	}
 }
 
@@ -795,6 +806,15 @@ func permissionPromptFromEvent(event UiEvent) map[string]any {
 	if req, ok := normalizeMCPTrustRequest(event.Metadata["mcp_trust_request"]); ok {
 		return map[string]any{"name": "mcp-project-trust", "input": map[string]any{"command": FormatMCPTrustTarget(req), "file_path": ""}}
 	}
+	if req, ok := normalizeSandboxSetupRequest(event.Metadata["sandbox_setup_request"]); ok {
+		return map[string]any{"name": "wsl-sandbox-setup", "input": map[string]any{
+			"command":              sandboxSetupTarget(req, event.Metadata["tool_call"]),
+			"distro":               stringFromAny(req["distro"]),
+			"reason":               stringFromAny(req["reason"]),
+			"can_install":          truthy(req["can_install"]),
+			"allow_local_fallback": truthy(req["allow_local_fallback"]),
+		}}
+	}
 	return map[string]any{"name": event.Type, "input": event.Metadata}
 }
 
@@ -875,6 +895,34 @@ func normalizeMCPTrustRequest(value any) ([]map[string]any, bool) {
 		}
 	}
 	return nil, false
+}
+
+func normalizeSandboxSetupRequest(value any) (map[string]any, bool) {
+	return mapStringAny(value)
+}
+
+func sandboxSetupTarget(request map[string]any, toolCall any) string {
+	command := ""
+	switch call := toolCall.(type) {
+	case coretools.ToolCall:
+		command = stringFromAny(call.Input["command"])
+	case *coretools.ToolCall:
+		if call != nil {
+			command = stringFromAny(call.Input["command"])
+		}
+	case map[string]any:
+		if input, ok := call["input"].(map[string]any); ok {
+			command = stringFromAny(input["command"])
+		}
+	}
+	distro := stringFromAny(request["distro"])
+	if command != "" && distro != "" {
+		return distro + ": " + command
+	}
+	if command != "" {
+		return command
+	}
+	return distro
 }
 
 func mapStringAny(value any) (map[string]any, bool) {

@@ -48,15 +48,17 @@ export function formatPermissionPrompt(payload: any): string {
   if (typeof prompt === "string") return prompt;
   if (prompt && typeof prompt === "object") {
     const request = (prompt as any).skill_shell_request || (prompt as any).input || prompt;
+    const input = request.input || (prompt as any).sandbox_setup_request || {};
     const parts: string[] = [];
     if (request.agent_display || payload?.agent_display) parts.push(`Agent: ${request.agent_display || payload.agent_display}`);
     const toolName = request.tool_name || request.tool || request.name || request.skill || request.skill_name;
     if (toolName) parts.push(`Tool: ${toolName}`);
-    if (request.risk) parts.push(`Risk: ${request.risk}`);
-    if (request.command || request.cmd) parts.push(`Command:\n${request.command || request.cmd}`);
-    if (request.file_path || request.path) parts.push(`Path: ${request.file_path || request.path}`);
-    if (request.cwd || request.workdir) parts.push(`CWD: ${request.cwd || request.workdir}`);
-    if (request.reason || request.description) parts.push(`Reason:\n${request.reason || request.description}`);
+    if (request.risk || payload?.risk) parts.push(`Risk: ${request.risk || payload.risk}`);
+    if (request.distro || input.distro) parts.push(`Distro: ${request.distro || input.distro}`);
+    if (request.command || request.cmd || input.command) parts.push(`Command:\n${request.command || request.cmd || input.command}`);
+    if (request.file_path || request.path || input.file_path || input.path) parts.push(`Path: ${request.file_path || request.path || input.file_path || input.path}`);
+    if (request.cwd || request.workdir || input.cwd || input.workdir) parts.push(`CWD: ${request.cwd || request.workdir || input.cwd || input.workdir}`);
+    if (request.reason || request.description || input.reason) parts.push(`Reason:\n${request.reason || request.description || input.reason}`);
     if (request.summary) parts.push(`Summary:\n${request.summary}`);
     if (parts.length > 0) return parts.join("\n");
     return "该工具请求需要权限确认。";

@@ -177,6 +177,15 @@ func (r *ToolRegistry) GetAPISchemasFiltered(enabledOnly bool, deny map[string]s
 }
 
 func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx ExecutionContext) ToolResult {
+	if execCtx == nil {
+		execCtx = ExecutionContext{}
+	}
+	callExecCtx := make(ExecutionContext, len(execCtx)+1)
+	for key, value := range execCtx {
+		callExecCtx[key] = value
+	}
+	callExecCtx["_tool_call_id"] = call.ID
+
 	canonical, warning := r.ResolveName(call.Name)
 	tool := r.tools[canonical]
 	if tool == nil {
@@ -205,7 +214,7 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 		}
 	}
 
-	if ok, msg := tool.ValidateInput(execCtx, input); !ok {
+	if ok, msg := tool.ValidateInput(callExecCtx, input); !ok {
 		return ToolResult{
 			ToolUseID: call.ID,
 			Content: fmt.Sprintf(
@@ -237,7 +246,7 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 				done <- execResult{err: fmt.Errorf("%v", recovered)}
 			}
 		}()
-		output, err := tool.Execute(timeoutCtx, execCtx, input)
+		output, err := tool.Execute(timeoutCtx, callExecCtx, input)
 		done <- execResult{output: output, err: err}
 	}()
 
@@ -253,6 +262,7 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 			IsError: true,
 		}
 	case result := <-done:
+		mergeExecutionContextSideEffects(execCtx, callExecCtx)
 		if result.err != nil {
 			return ToolResult{
 				ToolUseID: call.ID,
@@ -269,6 +279,17 @@ func (r *ToolRegistry) Execute(ctx context.Context, call ToolCall, execCtx Execu
 			output = fmt.Sprintf("[Deprecation warning: %s]\n\n%s", warning, output)
 		}
 		return ToolResult{ToolUseID: call.ID, Content: output}
+	}
+}
+
+func mergeExecutionContextSideEffects(parent, child ExecutionContext) {
+	if parent == nil || child == nil {
+		return
+	}
+	for _, key := range []string{"_pending_skill_messages", "_pending_messages"} {
+		if value, ok := child[key]; ok {
+			parent[key] = value
+		}
 	}
 }
 

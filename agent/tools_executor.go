@@ -119,6 +119,20 @@ func (e *StreamingToolExecutor) TryStartQueued(tcID string) bool {
 	return true
 }
 
+func (e *StreamingToolExecutor) SetToolDecisionMapValue(mapKey, tcID, value string) {
+	if e == nil || mapKey == "" || tcID == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	decisions, _ := e.Context[mapKey].(map[string]string)
+	if decisions == nil {
+		decisions = map[string]string{}
+		e.Context[mapKey] = decisions
+	}
+	decisions[tcID] = value
+}
+
 func (e *StreamingToolExecutor) DenyTool(tcID string) {
 	msg := "User denied this action."
 	e.mu.Lock()

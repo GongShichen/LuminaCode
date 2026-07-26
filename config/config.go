@@ -38,11 +38,18 @@ type Config struct {
 
 	Yolo bool
 
-	MaxToolOutputChars         int
-	MaxToolResultCharsAbsolute int
-	MaxMessageToolResultsChars int
-	ShellTimeoutSeconds        float64
-	ShellMaxOutputBytes        int
+	MaxToolOutputChars           int
+	MaxToolResultCharsAbsolute   int
+	MaxMessageToolResultsChars   int
+	ShellTimeoutSeconds          float64
+	ShellMaxOutputBytes          int
+	SandboxBackend               string
+	WSLSandboxDistro             string
+	WSLSandboxInstallDir         string
+	WSLSandboxImageURL           string
+	WSLSandboxImagePath          string
+	WSLSandboxImageSHA256        string
+	WSLSandboxAllowLocalFallback bool
 
 	MCPEnabled        bool
 	MCPPingInterval   float64
@@ -148,9 +155,9 @@ func NewConfigForCWD(cwd string) Config {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	homeDir := userHomeDir()
 	paths, pathsErr := apppaths.ResolveCurrent()
 	if pathsErr != nil {
-		homeDir := userHomeDir()
 		paths, _ = apppaths.Resolve(apppaths.ResolveOptions{GOOS: runtime.GOOS, HomeDir: homeDir, Env: map[string]string{}})
 	}
 	projectRoot, projectRootErr := apppaths.DiscoverProjectRoot(cwd, []string{".git"})
@@ -184,11 +191,15 @@ func NewConfigForCWD(cwd string) Config {
 
 		Yolo: false,
 
-		MaxToolOutputChars:         50_000,
-		MaxToolResultCharsAbsolute: 400_000,
-		MaxMessageToolResultsChars: 200_000,
-		ShellTimeoutSeconds:        30.0,
-		ShellMaxOutputBytes:        5 * 1024 * 1024,
+		MaxToolOutputChars:           50_000,
+		MaxToolResultCharsAbsolute:   400_000,
+		MaxMessageToolResultsChars:   200_000,
+		ShellTimeoutSeconds:          30.0,
+		ShellMaxOutputBytes:          5 * 1024 * 1024,
+		SandboxBackend:               "auto",
+		WSLSandboxDistro:             "LuminaSandbox",
+		WSLSandboxInstallDir:         filepath.Join(homeDir, ".lumina", "wsl-sandbox", "LuminaSandbox"),
+		WSLSandboxAllowLocalFallback: true,
 
 		MCPEnabled:        true,
 		MCPPingInterval:   30.0,
@@ -346,6 +357,13 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MaxMessageToolResultsChars = fresh.MaxMessageToolResultsChars
 	updated.ShellTimeoutSeconds = fresh.ShellTimeoutSeconds
 	updated.ShellMaxOutputBytes = fresh.ShellMaxOutputBytes
+	updated.SandboxBackend = fresh.SandboxBackend
+	updated.WSLSandboxDistro = fresh.WSLSandboxDistro
+	updated.WSLSandboxInstallDir = fresh.WSLSandboxInstallDir
+	updated.WSLSandboxImageURL = fresh.WSLSandboxImageURL
+	updated.WSLSandboxImagePath = fresh.WSLSandboxImagePath
+	updated.WSLSandboxImageSHA256 = fresh.WSLSandboxImageSHA256
+	updated.WSLSandboxAllowLocalFallback = fresh.WSLSandboxAllowLocalFallback
 	updated.ContextCompressThreshold = fresh.ContextCompressThreshold
 	updated.PromptCacheTTLSeconds = fresh.PromptCacheTTLSeconds
 	updated.AnthropicCacheEditsEnabled = fresh.AnthropicCacheEditsEnabled
@@ -663,6 +681,13 @@ type luminaDefaults struct {
 	MaxMessageToolResultsChars       *int     `json:"max_message_tool_results_chars"`
 	ShellTimeoutSeconds              *float64 `json:"shell_timeout_seconds"`
 	ShellMaxOutputBytes              *int     `json:"shell_max_output_bytes"`
+	SandboxBackend                   *string  `json:"sandbox_backend"`
+	WSLSandboxDistro                 *string  `json:"wsl_sandbox_distro"`
+	WSLSandboxInstallDir             *string  `json:"wsl_sandbox_install_dir"`
+	WSLSandboxImageURL               *string  `json:"wsl_sandbox_image_url"`
+	WSLSandboxImagePath              *string  `json:"wsl_sandbox_image_path"`
+	WSLSandboxImageSHA256            *string  `json:"wsl_sandbox_image_sha256"`
+	WSLSandboxAllowLocalFallback     *bool    `json:"wsl_sandbox_allow_local_fallback"`
 	MCPEnabled                       *bool    `json:"mcp_enabled"`
 	MCPPingInterval                  *float64 `json:"mcp_ping_interval"`
 	MCPConnectTimeout                *float64 `json:"mcp_connect_timeout"`
@@ -807,6 +832,27 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.ShellMaxOutputBytes != nil {
 		cfg.ShellMaxOutputBytes = *defaults.ShellMaxOutputBytes
+	}
+	if defaults.SandboxBackend != nil {
+		cfg.SandboxBackend = normalizeSandboxBackend(*defaults.SandboxBackend)
+	}
+	if defaults.WSLSandboxDistro != nil {
+		cfg.WSLSandboxDistro = strings.TrimSpace(*defaults.WSLSandboxDistro)
+	}
+	if defaults.WSLSandboxInstallDir != nil {
+		cfg.WSLSandboxInstallDir = expandHome(*defaults.WSLSandboxInstallDir)
+	}
+	if defaults.WSLSandboxImageURL != nil {
+		cfg.WSLSandboxImageURL = strings.TrimSpace(*defaults.WSLSandboxImageURL)
+	}
+	if defaults.WSLSandboxImagePath != nil {
+		cfg.WSLSandboxImagePath = expandHome(*defaults.WSLSandboxImagePath)
+	}
+	if defaults.WSLSandboxImageSHA256 != nil {
+		cfg.WSLSandboxImageSHA256 = strings.ToLower(strings.TrimSpace(*defaults.WSLSandboxImageSHA256))
+	}
+	if defaults.WSLSandboxAllowLocalFallback != nil {
+		cfg.WSLSandboxAllowLocalFallback = *defaults.WSLSandboxAllowLocalFallback
 	}
 	if defaults.MCPEnabled != nil {
 		cfg.MCPEnabled = *defaults.MCPEnabled
@@ -1292,7 +1338,30 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.WebFetchUserAgent = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WEB_FETCH_USER_AGENT")), cfg.WebFetchUserAgent)
 	cfg.SessionMemoryTurnInterval = positiveIntOrDefault(envInt("SESSION_MEM_TURN", cfg.SessionMemoryTurnInterval), cfg.SessionMemoryTurnInterval)
 	cfg.HarnessMode = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_HARNESS_MODE")), cfg.HarnessMode)
+	cfg.SandboxBackend = normalizeSandboxBackend(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_SANDBOX_BACKEND")), cfg.SandboxBackend))
+	cfg.WSLSandboxDistro = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WSL_SANDBOX_DISTRO")), cfg.WSLSandboxDistro)
+	cfg.WSLSandboxInstallDir = expandHome(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WSL_SANDBOX_INSTALL_DIR")), cfg.WSLSandboxInstallDir))
+	cfg.WSLSandboxImageURL = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WSL_SANDBOX_IMAGE_URL")), cfg.WSLSandboxImageURL)
+	cfg.WSLSandboxImagePath = expandHome(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WSL_SANDBOX_IMAGE_PATH")), cfg.WSLSandboxImagePath))
+	cfg.WSLSandboxImageSHA256 = strings.ToLower(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WSL_SANDBOX_IMAGE_SHA256")), cfg.WSLSandboxImageSHA256))
+	cfg.WSLSandboxAllowLocalFallback = envBool("LUMINA_WSL_SANDBOX_ALLOW_LOCAL_FALLBACK", cfg.WSLSandboxAllowLocalFallback)
 	cfg.UIBackend = "prompt_toolkit_fullscreen"
+}
+
+func normalizeSandboxBackend(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "_", "-")))
+	switch normalized {
+	case "", "auto":
+		return "auto"
+	case "none", "off", "disabled":
+		return "none"
+	case "local-bwrap", "bwrap", "bubblewrap":
+		return "local-bwrap"
+	case "wsl-bwrap", "wsl2-bwrap", "wsl":
+		return "wsl-bwrap"
+	default:
+		return "auto"
+	}
 }
 
 func positiveIntOrDefault(value, fallback int) int {

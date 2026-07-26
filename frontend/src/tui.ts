@@ -1102,11 +1102,16 @@ export class LuminaTui {
     this.inputPlaceholder = frame.input_placeholder || "请输入消息并回车。";
     this.applyLocalSubmitLock();
     this.transcriptEntries = (frame.transcript_entries || []).map((entry: any) => ({ kind: entry.kind, text: entry.text || "" }));
-    this.taskLines = (frame.task_activity_entries || []).map((entry: any) => {
+    const diagnostics = [
+      ...(frame.errors || []).map((message: string) => `error: ${message}`),
+      ...(frame.warnings || []).map((message: string) => `warning: ${message}`),
+    ];
+    const taskLines = (frame.task_activity_entries || []).map((entry: any) => {
       const label = entry.worker_label || entry.task_id || "agent";
       const summary = entry.summary || entry.result_text || entry.status || "";
       return `${label}: ${summary}`;
     });
+    this.taskLines = [...diagnostics, ...taskLines];
     this.renderTranscript();
     this.renderTasks();
     this.renderStatus(frame);
@@ -1396,11 +1401,20 @@ export class LuminaTui {
   private async showPermission(payload: any): Promise<void> {
     const source = payload?.agent_display ? `${payload.agent_display} 请求执行` : "需要权限确认";
     const details = formatPermissionPrompt(payload);
-    const choices = [
+    let choices = [
       { label: "允许一次", decision: "once" },
       { label: "总是允许", decision: "always" },
       { label: "拒绝", decision: "deny" },
     ];
+    if (payload?.prompt?.name === "wsl-sandbox-setup") {
+      const canInstall = payload?.prompt?.input?.can_install !== false;
+      choices = canInstall
+        ? [
+            { label: "Install sandbox", decision: "once" },
+            { label: "Run locally", decision: "deny" },
+          ]
+        : [{ label: "Run locally", decision: "deny" }];
+    }
     let selected = 0;
     const render = () => {
       const choiceLine = choices
