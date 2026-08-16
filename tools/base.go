@@ -62,6 +62,47 @@ type Tool interface {
 	ToAPISchema() map[string]any
 }
 
+type ExecutionMode string
+
+const (
+	ExecutionParallel  ExecutionMode = "parallel"
+	ExecutionExclusive ExecutionMode = "exclusive"
+)
+
+type ToolExecutionPolicy struct {
+	Mode               ExecutionMode
+	RequiresPermission bool
+	Risk               string
+	Destructive        bool
+	AbortSiblings      bool
+}
+
+// ResolveExecutionPolicy centralizes the scheduling and permission facts that
+// the runtime needs for a decoded tool call. Unknown or invalid calls are
+// intentionally exclusive: callers must preserve their model order even when
+// they only produce an error result.
+func ResolveExecutionPolicy(tool Tool, input any) ToolExecutionPolicy {
+	policy := ToolExecutionPolicy{
+		Mode:               ExecutionExclusive,
+		RequiresPermission: true,
+		Risk:               "high",
+		Destructive:        true,
+	}
+	if tool == nil {
+		return policy
+	}
+	policy.RequiresPermission = tool.NeedsPermission(input)
+	policy.Destructive = tool.IsDestructive(input)
+	policy.AbortSiblings = tool.SupportsSiblingAbort()
+	if tool.IsConcurrencySafe(input) {
+		policy.Mode = ExecutionParallel
+	}
+	if !policy.Destructive {
+		policy.Risk = "normal"
+	}
+	return policy
+}
+
 type ObservableInputBackfiller interface {
 	BackfillObservableInput(input any, ctx ExecutionContext) any
 }

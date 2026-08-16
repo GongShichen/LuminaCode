@@ -59,6 +59,11 @@ func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 	if !status.OK {
 		t.Fatalf("status failed: %#v", status.Error)
 	}
+	var statusPayload map[string]any
+	decodeResult(t, status.Result, &statusPayload)
+	if statusPayload["protocol_version"] != float64(2) {
+		t.Fatalf("backend must advertise protocol v2, got %#v", statusPayload)
+	}
 	if err := conn.WriteJSON(map[string]any{"id": "2", "method": "session.create", "params": map[string]any{"cwd": root}}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +71,37 @@ func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 	if !created.OK {
 		t.Fatalf("session.create failed: %#v", created.Error)
 	}
+	var snapshot backend.SessionSnapshot
+	decodeResult(t, created.Result, &snapshot)
+	if snapshot.LastSeq < 1 || snapshot.ProjectionVersion != 1 {
+		t.Fatalf("created session must expose journal cursor and projection version: %#v", snapshot)
+	}
+	writeRPC(t, conn, "3", "session.events", map[string]any{"session_id": snapshot.SessionID, "after_seq": 0, "limit": 100})
+	eventsResponse := waitForRPCOK(t, conn, "3")
+	var page backend.EventPage
+	decodeResult(t, eventsResponse.Result, &page)
+	if len(page.Events) == 0 || page.Events[0].Type != "session.created" || page.NextAfterSeq != snapshot.LastSeq {
+		t.Fatalf("unexpected initial event page: %#v", page)
+	}
+	writeRPC(t, conn, "4", "runtime.describe", map[string]any{"session_id": snapshot.SessionID})
+	describe := waitForRPCOK(t, conn, "4")
+	var runtimeDescription map[string]any
+	decodeResult(t, describe.Result, &runtimeDescription)
+	if runtimeDescription["available"] != true || runtimeDescription["session_id"] != snapshot.SessionID || runtimeDescription["scopes"] == nil {
+		t.Fatalf("runtime.describe missing session scope: %#v", runtimeDescription)
+	}
+	command := map[string]any{"session_id": snapshot.SessionID, "command_id": "stable-command", "input": "/help"}
+	writeRPC(t, conn, "5", "session.submit", command)
+	firstSubmit := waitForRPCOK(t, conn, "5")
+	writeRPC(t, conn, "6", "session.submit", command)
+	duplicateSubmit := waitForRPCOK(t, conn, "6")
+	var firstResult, duplicateResult map[string]any
+	decodeResult(t, firstSubmit.Result, &firstResult)
+	decodeResult(t, duplicateSubmit.Result, &duplicateResult)
+	if duplicateResult["duplicate"] != true || duplicateResult["run_id"] != firstResult["run_id"] {
+		t.Fatalf("command idempotency mismatch: first=%#v duplicate=%#v", firstResult, duplicateResult)
+	}
+	waitForSessionDone(t, conn, map[string]bool{snapshot.SessionID: false})
 	cancel()
 	select {
 	case err := <-errCh:

@@ -51,6 +51,9 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
 		session.ID = persisted.ID
 		session.rootDir = root
+		m.mu.Lock()
+		session.persistEnabled = !m.journalPersistence
+		m.mu.Unlock()
 		session.refreshAgentSystemPrompts()
 		session.dialogue = readJSONL[DialogueEntry](filepath.Join(root, "dialogue.jsonl"))
 		session.timeline = readJSONL[TimelineEvent](filepath.Join(root, "timeline.jsonl"))
@@ -80,6 +83,73 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		m.sessions[session.ID] = session
 		m.mu.Unlock()
 		session.persist()
+		snapshots = append(snapshots, session.Snapshot())
+	}
+	return snapshots
+}
+
+// RestoreRuntimeCheckpoints rebuilds Team aggregates exclusively from the
+// parent session journal. Legacy sidecar files are intentionally not read.
+func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpoints []RuntimeCheckpoint) []Snapshot {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return nil
+	}
+	sort.SliceStable(checkpoints, func(i, j int) bool {
+		return checkpoints[i].Snapshot.TeamSessionID < checkpoints[j].Snapshot.TeamSessionID
+	})
+	var snapshots []Snapshot
+	for _, checkpoint := range checkpoints {
+		if checkpoint.ParentSessionID != parentSessionID || strings.TrimSpace(checkpoint.TeamName) == "" || strings.TrimSpace(checkpoint.Snapshot.TeamSessionID) == "" {
+			continue
+		}
+		m.mu.Lock()
+		existing := m.sessions[checkpoint.Snapshot.TeamSessionID]
+		journalPersistence := m.journalPersistence
+		m.mu.Unlock()
+		if existing != nil {
+			snapshots = append(snapshots, existing.Snapshot())
+			continue
+		}
+		cfg := m.Config
+		if strings.TrimSpace(cwd) != "" && cwd != cfg.CWD {
+			cfg = config.NewConfigForCWD(cwd)
+			cfg.TeamDir = m.Config.TeamDir
+			applyPinnedTeamConfig(&cfg, m.Config)
+		}
+		spec, err := NewLoader(cfg).Load(checkpoint.TeamName)
+		if err != nil {
+			continue
+		}
+		session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
+		session.ID = checkpoint.Snapshot.TeamSessionID
+		session.rootDir = teamSessionRoot(cfg, parentSessionID, spec.Name, session.ID)
+		session.persistEnabled = !journalPersistence
+		session.refreshAgentSystemPrompts()
+		session.dialogue = append([]DialogueEntry(nil), checkpoint.Dialogue...)
+		session.timeline = append([]TimelineEvent(nil), checkpoint.Timeline...)
+		session.artifacts = append([]Artifact(nil), checkpoint.Artifacts...)
+		session.loopIteration = checkpoint.Snapshot.LoopIteration
+		session.waitingForUser = false
+		session.gate = cloneGateStatus(checkpoint.Snapshot.GateStatus)
+		session.contract = cloneContract(checkpoint.Snapshot.TeamContract)
+		session.gateVerdicts = cloneGateVerdicts(checkpoint.Snapshot.GateVerdicts)
+		if session.gateVerdicts == nil {
+			session.gateVerdicts = map[string]GateVerdict{}
+		}
+		for _, row := range checkpoint.Snapshot.ActivityRows {
+			row = normalizeRestoredActivity(row)
+			session.activity[row.AgentID] = row
+		}
+		for id, runtime := range session.agents {
+			if state, ok := checkpoint.AgentStates[id]; ok {
+				stateCopy := state
+				runtime.State = &stateCopy
+			}
+		}
+		m.mu.Lock()
+		m.sessions[session.ID] = session
+		m.mu.Unlock()
 		snapshots = append(snapshots, session.Snapshot())
 	}
 	return snapshots

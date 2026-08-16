@@ -220,6 +220,12 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "models" {
 		return runModelsCLI(args[1:])
 	}
+	if len(args) > 0 && args[0] == "runtime" {
+		return runRuntimeCLI(args[1:])
+	}
+	if len(args) > 0 && args[0] == "session" {
+		return runSessionCLI(args[1:])
+	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
@@ -378,6 +384,115 @@ func run(args []string) error {
 		return runPrompt(context.Background(), engine, *prompt, state)
 	}
 	return runREPL(context.Background(), engine, state, store, sessionID)
+}
+
+func runRuntimeCLI(args []string) error {
+	if len(args) == 0 || args[0] != "dump" {
+		return fmt.Errorf("usage: lumina-backend runtime dump --session <session-id>")
+	}
+	flags := flag.NewFlagSet("runtime dump", flag.ContinueOnError)
+	sessionID := flags.String("session", "", "session ID to inspect")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*sessionID) == "" {
+		return fmt.Errorf("runtime dump requires --session")
+	}
+	cfg := config.NewConfig()
+	journalPath := session.RuntimeJournalPath(cfg.SessionDir, *sessionID)
+	if _, err := os.Stat(journalPath); err != nil {
+		return fmt.Errorf("runtime journal not found for session %s: %w", *sessionID, err)
+	}
+	journal, err := session.OpenRuntimeJournal(context.Background(), cfg.SessionDir, *sessionID)
+	if err != nil {
+		return err
+	}
+	defer journal.Close()
+	engine := agent.NewQueryEngine(&cfg)
+	defer engine.Shutdown()
+	assembly, err := agent.NewRuntimeAssembly(*sessionID, journal, engine.CoreEngine.Registry)
+	if err != nil {
+		return err
+	}
+	defer assembly.Close()
+	if err := engine.CoreEngine.AttachRuntime(assembly); err != nil {
+		return err
+	}
+	description := assembly.Describe()
+	head, err := journal.Head(context.Background())
+	if err != nil {
+		return err
+	}
+	tools := make([]map[string]any, 0)
+	for _, tool := range engine.CoreEngine.Registry.ListTools() {
+		policy := coretools.ResolveExecutionPolicy(tool, nil)
+		tools = append(tools, map[string]any{"name": tool.Name(), "mode": policy.Mode, "requires_permission": policy.RequiresPermission, "risk": policy.Risk})
+	}
+	description["journal_path"] = journalPath
+	description["last_seq"] = head
+	description["tools"] = tools
+	return writeJSON(os.Stdout, description)
+}
+
+func runSessionCLI(args []string) error {
+	if len(args) == 0 || args[0] != "migrate" {
+		return fmt.Errorf("usage: lumina-backend session migrate <--check|--all|--status> [--session <id>]")
+	}
+	flags := flag.NewFlagSet("session migrate", flag.ContinueOnError)
+	check := flags.Bool("check", false, "inspect migration status without changing sessions")
+	all := flags.Bool("all", false, "migrate all legacy sessions")
+	status := flags.Bool("status", false, "show migration status")
+	sessionID := flags.String("session", "", "limit operation to one session")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	selected := 0
+	for _, enabled := range []bool{*check, *all, *status} {
+		if enabled {
+			selected++
+		}
+	}
+	if selected != 1 {
+		return fmt.Errorf("exactly one of --check, --all, or --status is required")
+	}
+	cfg := config.NewConfig()
+	store := session.NewInspectionStore(cfg.SessionDir)
+	if *all {
+		store = session.NewStore(cfg.SessionDir)
+	}
+	ids := []string{}
+	if strings.TrimSpace(*sessionID) != "" {
+		ids = append(ids, strings.TrimSpace(*sessionID))
+	} else {
+		for _, meta := range store.ListSessions() {
+			ids = append(ids, meta.SessionID)
+		}
+	}
+	results := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		journalPath := session.RuntimeJournalPath(cfg.SessionDir, id)
+		entry := map[string]any{"session_id": id, "runtime_path": journalPath}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(journalPath), "migration-error.json")); err == nil {
+			entry["status"] = "failed"
+		} else if _, err := os.Stat(journalPath); err == nil {
+			entry["status"] = "v2"
+		} else {
+			entry["status"] = "legacy"
+		}
+		if *all && entry["status"] != "v2" {
+			load, err := store.OpenRuntime(context.Background(), id)
+			if err != nil {
+				entry["status"] = "failed"
+				entry["error"] = err.Error()
+			} else {
+				entry["status"] = "v2"
+				entry["migrated"] = load.Migrated
+				_ = load.Journal.Close()
+			}
+		}
+		results = append(results, entry)
+	}
+	return writeJSON(os.Stdout, map[string]any{"sessions": results})
 }
 
 func runPrompt(ctx context.Context, engine *agent.QueryEngine, prompt string, state *agent.AgentState) error {

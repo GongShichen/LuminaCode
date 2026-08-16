@@ -16,6 +16,7 @@ import (
 	"LuminaCode/api"
 	"LuminaCode/apppaths"
 	"LuminaCode/config"
+	"LuminaCode/harness"
 	"LuminaCode/mcp"
 	"LuminaCode/memory"
 	"LuminaCode/security"
@@ -105,6 +106,8 @@ type CoreExecutionEngine struct {
 	TeamAgentID            string
 	sessionMemory          *sessionmemory.Manager
 	StateObserver          func(*AgentState)
+	RuntimeEvents          *RuntimeEventRecorder
+	Runtime                *RuntimeAssembly
 }
 
 type permissionDecision struct {
@@ -512,22 +515,39 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 	consecutiveAPIErrors := 0
 
 	if e.Config.MCPEnabled && !e.mcpInitialized {
-		e.ensureMCPTools(coretools.ExecutionContext{})
+		if e.Runtime != nil {
+			result, err := e.Runtime.Hooks.MCPPreparing.Run(ctx, MCPPreparingHookContext{SessionID: e.SessionID, ExecutionContext: coretools.ExecutionContext{}})
+			if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+				sendStream(ctx, out, NewStreamEvent("error", "MCP preparation hook failed", map[string]any{"runtime_hook": true}))
+				return
+			}
+		} else {
+			e.ensureMCPTools(coretools.ExecutionContext{})
+		}
 		e.maybePromptMCPTrust(ctx, out)
 		if e.Config.MCPEnabled && !e.mcpInitialized {
-			e.ensureMCPTools(coretools.ExecutionContext{})
+			if e.Runtime != nil {
+				_, _ = e.Runtime.Hooks.MCPPreparing.Run(ctx, MCPPreparingHookContext{SessionID: e.SessionID, ExecutionContext: coretools.ExecutionContext{}})
+			} else {
+				e.ensureMCPTools(coretools.ExecutionContext{})
+			}
 		}
 	}
 
-	e.applyMemoryRuntimeIdentity(state)
-	state.Messages = memory.StripMemoryContextMessages(state.Messages, "")
-	if e.extraction != nil && e.extraction.HasPendingResult() {
-		if result := e.extraction.ConsumeResult(); result != "" && len(state.Messages) > 0 {
-			insertBeforeCurrentUserMessage(state, map[string]any{
-				"role":    "user",
-				"content": []map[string]any{{"type": "text", "text": result}},
-				"isMeta":  true,
-			})
+	if e.Runtime != nil {
+		result, err := e.Runtime.Hooks.MemoryPreparing.Run(ctx, MemoryPreparingHookContext{SessionID: e.SessionID, State: state})
+		if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+			sendStream(ctx, out, NewStreamEvent("error", "memory preparation hook failed", map[string]any{"runtime_hook": true}))
+			return
+		}
+		state = result.Value.State
+	} else {
+		e.applyMemoryRuntimeIdentity(state)
+		state.Messages = memory.StripMemoryContextMessages(state.Messages, "")
+		if e.extraction != nil && e.extraction.HasPendingResult() {
+			if result := e.extraction.ConsumeResult(); result != "" && len(state.Messages) > 0 {
+				insertBeforeCurrentUserMessage(state, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": result}}, "isMeta": true})
+			}
 		}
 	}
 	cancelRecallPrefetch := e.prefetchMemoryRecall(ctx, state)
@@ -551,19 +571,51 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
 			return
 		}
+		if e.RuntimeEvents != nil {
+			if err := e.RuntimeEvents.BeginStep(ctx); err != nil {
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+		}
+		if e.Runtime != nil {
+			result, err := e.Runtime.Hooks.StepPreparing.Run(ctx, StepHookContext{SessionID: e.SessionID, State: state, StepNo: state.TurnCount + 1})
+			if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+				if err == nil {
+					err = fmt.Errorf("step hook event commit failed")
+				}
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_hook": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+			state = result.Value.State
+		}
 
-		e.stripSkillMessages(state, map[string]struct{}{
-			skills.SkillListingSource:  {},
-			skills.SkillRecoverySource: {},
-		})
-		e.maybeCompressContext(ctx, state)
-		e.injectSkillRuntimeAttachments(state)
-		e.injectPendingTaskNotifications(state)
-		inlineRuntime := skills.CollectInlineSkillRuntime(state.Messages)
+		inlineRuntime := skills.InlineSkillRuntime{}
+		if e.Runtime != nil {
+			result, err := e.Runtime.Hooks.SkillPreparing.Run(ctx, SkillPreparingHookContext{SessionID: e.SessionID, State: state})
+			if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+				sendStream(ctx, out, NewStreamEvent("error", "skill preparation hook failed", map[string]any{"runtime_hook": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+			state = result.Value.State
+			inlineRuntime = result.Value.InlineRuntime
+		} else {
+			e.stripSkillMessages(state, map[string]struct{}{skills.SkillListingSource: {}, skills.SkillRecoverySource: {}})
+			e.maybeCompressContext(ctx, state)
+			e.injectSkillRuntimeAttachments(state)
+			e.injectPendingTaskNotifications(state)
+			inlineRuntime = skills.CollectInlineSkillRuntime(state.Messages)
+		}
 		activeRegistry := e.Registry
 		if e.Config.MCPEnabled {
 			mcpCtx := coretools.ExecutionContext{}
-			e.ensureMCPTools(mcpCtx)
+			if e.Runtime != nil {
+				_, _ = e.Runtime.Hooks.MCPPreparing.Run(ctx, MCPPreparingHookContext{SessionID: e.SessionID, ExecutionContext: mcpCtx})
+			} else {
+				e.ensureMCPTools(mcpCtx)
+			}
 		}
 		if inlineRuntime.HasAllowedTools {
 			allow := map[string]struct{}{}
@@ -603,9 +655,19 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"_memory_engine":          e.memoryEngineSnapshot(),
 		}
 		if e.Config.MCPEnabled {
-			e.ensureMCPTools(execCtx)
+			if e.Runtime != nil {
+				result, err := e.Runtime.Hooks.MCPPreparing.Run(ctx, MCPPreparingHookContext{SessionID: e.SessionID, ExecutionContext: execCtx})
+				if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+					sendStream(ctx, out, NewStreamEvent("error", "MCP preparation hook failed", map[string]any{"runtime_hook": true}))
+					return
+				}
+				execCtx = result.Value.ExecutionContext
+			} else {
+				e.ensureMCPTools(execCtx)
+			}
 		}
 		executor := NewStreamingToolExecutor(activeRegistry, e.Config, state, execCtx)
+		executor.Observer = e.RuntimeEvents
 		execCtx["_request_skill_shell_permission"] = func(req skills.SkillShellPermissionRequest) bool {
 			return e.requestSkillShellPermission(ctx, executor, req)
 		}
@@ -623,12 +685,40 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 
 		messages := e.BuildMessages(state)
+		toolSchemas := activeRegistry.GetAPISchemas()
+		if e.Runtime != nil {
+			result, err := e.Runtime.Hooks.ContextBuilding.Run(ctx, ContextBuildHookContext{
+				SessionID: e.SessionID, State: state, Messages: messages, ToolSchemas: toolSchemas,
+			})
+			if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+				if err == nil {
+					err = fmt.Errorf("context hook event commit failed")
+				}
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_hook": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+			messages = result.Value.Messages
+			toolSchemas = result.Value.ToolSchemas
+		}
+		if e.RuntimeEvents != nil {
+			if err := e.RuntimeEvents.RecordCompiledContext(ctx, state.SystemPrompt, messages, toolSchemas); err != nil {
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+			if err := e.RuntimeEvents.RecordModelRequest(ctx, firstNonEmptyString(modelOverride, e.Config.APIModel), len(messages), len(toolSchemas)); err != nil {
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+		}
 		requestOptions := e.consumeCacheEditsForRequest(VisibleToolResultIDs(messages))
 		if len(requestOptions.AnthropicCacheEdits) == 0 {
 			requestOptions = nil
 		}
 		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(e.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
-		for result := range client.StreamChat(streamCtx, state.SystemPrompt, messages, activeRegistry.GetAPISchemas(), requestOptions) {
+		for result := range client.StreamChat(streamCtx, state.SystemPrompt, messages, toolSchemas, requestOptions) {
 			if result.Err != nil {
 				if ctx.Err() != nil || e.isAborted() {
 					e.restoreInFlightCacheEdits()
@@ -733,6 +823,27 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 
 		outputRecovery.ResetRetries()
 		CommitAssistantTurn(state, turn.ThinkingContent, turn.FullText, turn.ToolCalls, turn.MessageID, turn.InputTokens, turn.OutputTokens)
+		if e.Runtime != nil {
+			result, err := e.Runtime.Hooks.ModelResponseReceived.Run(ctx, ModelResponseHookContext{SessionID: e.SessionID, State: state, Turn: turn})
+			if err != nil || e.Runtime.AppendHookEvents(ctx, e.RuntimeEvents, result.Events) != nil {
+				if err == nil {
+					err = fmt.Errorf("model response hook event commit failed")
+				}
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_hook": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+			state = result.Value.State
+		}
+		if e.RuntimeEvents != nil && len(state.Messages) > 0 {
+			if err := e.RuntimeEvents.RecordAssistant(ctx, state.Messages[len(state.Messages)-1], harness.UsageRecordedPayload{
+				InputTokens: turn.InputTokens, OutputTokens: turn.OutputTokens,
+			}); err != nil {
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
+		}
 		if len(turn.ToolCalls) == 0 {
 			e.RecordSessionMemory(ctx, state, false)
 			if e.extraction != nil &&
@@ -765,6 +876,12 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				}
 			},
 			RequestDecision: func(ctx context.Context, event StreamEvent) (string, string) {
+				toolCall, _ := event.Metadata["tool_call"].(coretools.ToolCall)
+				if e.RuntimeEvents != nil && toolCall.ID != "" {
+					if err := e.RuntimeEvents.RecordPermission(ctx, toolCall, true, ""); err != nil {
+						return PermissionDeny, ""
+					}
+				}
 				sendStream(ctx, out, event)
 				e.mu.Lock()
 				e.permissionFuture = make(chan permissionDecision, 1)
@@ -779,6 +896,11 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				}()
 				select {
 				case decision := <-ch:
+					if e.RuntimeEvents != nil && toolCall.ID != "" {
+						if err := e.RuntimeEvents.RecordPermission(ctx, toolCall, false, decision.decision); err != nil {
+							return PermissionDeny, ""
+						}
+					}
 					return decision.decision, decision.toolName
 				case <-ctx.Done():
 					return PermissionDeny, ""
@@ -869,6 +991,12 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 		}
 		tc := coretools.ToolCall{ID: stringFromAny(event["id"]), Name: stringFromAny(event["name"]), Input: input}
 		turn.ToolCalls = append(turn.ToolCalls, tc)
+		if e.RuntimeEvents != nil {
+			if err := e.RuntimeEvents.RecordToolPlanned(context.Background(), tc, len(turn.ToolCalls)-1); err != nil {
+				ev := NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true})
+				return StreamAction{Return: true, Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
+			}
+		}
 		executor.AddTool(tc)
 		ev := NewStreamEvent("tool_call", tc.Name, map[string]any{"id": tc.ID, "input": tc.Input})
 		return StreamAction{Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
@@ -1341,7 +1469,13 @@ func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *Ag
 	}
 	cfg := e.Config
 	cfg.SessionMemoryAgentID = e.sessionMemoryAgentID()
-	if err := e.sessionMemory.Observe(ctx, cfg, e.SessionID, state.Messages, force); err != nil {
+	var err error
+	if e.RuntimeEvents != nil && e.RuntimeEvents.EventStore() != nil {
+		err = e.sessionMemory.ObserveEvents(ctx, cfg, e.SessionID, e.RuntimeEvents.EventStore(), force)
+	} else {
+		err = e.sessionMemory.Observe(ctx, cfg, e.SessionID, state.Messages, force)
+	}
+	if err != nil {
 		slog.Warn("session memory observe failed", "session_id", e.SessionID, "error", err)
 	}
 	if e.StateObserver != nil {

@@ -120,6 +120,37 @@ type longSingleResultTool struct {
 	content string
 }
 
+type orderedProbeTool struct {
+	coretools.BaseTool
+	started chan<- string
+	release <-chan struct{}
+	result  string
+}
+
+func newOrderedProbeTool(name string, safe bool, started chan<- string, release <-chan struct{}) *orderedProbeTool {
+	return &orderedProbeTool{
+		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
+			Name:            name,
+			Description:     "tool ordering probe",
+			InputPrototype:  map[string]any{},
+			ReadOnly:        coretools.BoolPtr(safe),
+			ConcurrencySafe: coretools.BoolPtr(safe),
+			Destructive:     coretools.BoolPtr(!safe),
+		}},
+		started: started,
+		release: release,
+		result:  name,
+	}
+}
+
+func (t *orderedProbeTool) Execute(_ context.Context, _ coretools.ExecutionContext, _ any) (string, error) {
+	t.started <- t.Name()
+	if t.release != nil {
+		<-t.release
+	}
+	return t.result, nil
+}
+
 func newLongSingleResultTool(content string) *longSingleResultTool {
 	return &longSingleResultTool{
 		BaseTool: coretools.BaseTool{Spec: coretools.ToolSpec{
@@ -170,6 +201,71 @@ func TestStreamingToolExecutorReturnsWhenOnlyQueuedToolsCannotStartLikePython(t 
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetRemainingResults hung with only queued tools and no running tasks")
+	}
+}
+
+func TestStreamingToolExecutorQueuedExclusiveIsOrderingBarrier(t *testing.T) {
+	started := make(chan string, 2)
+	releaseWrite := make(chan struct{})
+	write := newOrderedProbeTool("write", false, started, releaseWrite)
+	read := newOrderedProbeTool("read", true, started, nil)
+	executor := agent.NewStreamingToolExecutor(
+		coretools.NewToolRegistry(write, read), config.NewConfig(), nil, coretools.ExecutionContext{},
+	)
+
+	if executor.AddTool(coretools.ToolCall{ID: "write-1", Name: "write", Input: map[string]any{}}) {
+		t.Fatal("exclusive tool must wait for permission")
+	}
+	if executor.AddTool(coretools.ToolCall{ID: "read-1", Name: "read", Input: map[string]any{}}) {
+		t.Fatal("read must not overtake a queued exclusive tool")
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("tool %s started before permission", name)
+	default:
+	}
+	if !executor.TryStartQueued("write-1") {
+		t.Fatal("permission should start the exclusive tool")
+	}
+	if name := <-started; name != "write" {
+		t.Fatalf("first start = %s, want write", name)
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("tool %s crossed the running exclusive barrier", name)
+	default:
+	}
+	close(releaseWrite)
+	if name := <-started; name != "read" {
+		t.Fatalf("second start = %s, want read", name)
+	}
+	results := executor.GetRemainingResults(context.Background())
+	if len(results) != 2 || results[0]["tool_use_id"] != "write-1" || results[1]["tool_use_id"] != "read-1" {
+		t.Fatalf("results must preserve model order: %#v", results)
+	}
+}
+
+func TestStreamingToolExecutorBuffersParallelResultsInModelOrder(t *testing.T) {
+	started := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	first := newOrderedProbeTool("first", true, started, releaseFirst)
+	second := newOrderedProbeTool("second", true, started, nil)
+	executor := agent.NewStreamingToolExecutor(
+		coretools.NewToolRegistry(first, second), config.NewConfig(), nil, coretools.ExecutionContext{},
+	)
+
+	executor.AddTool(coretools.ToolCall{ID: "first-1", Name: "first", Input: map[string]any{}})
+	executor.AddTool(coretools.ToolCall{ID: "second-1", Name: "second", Input: map[string]any{}})
+	<-started
+	<-started
+	time.Sleep(10 * time.Millisecond)
+	if results := executor.GetCompletedResults(); len(results) != 0 {
+		t.Fatalf("later result must remain buffered behind the first call: %#v", results)
+	}
+	close(releaseFirst)
+	results := executor.GetRemainingResults(context.Background())
+	if len(results) != 2 || results[0]["tool_use_id"] != "first-1" || results[1]["tool_use_id"] != "second-1" {
+		t.Fatalf("parallel results must preserve model order: %#v", results)
 	}
 }
 
@@ -372,9 +468,9 @@ func TestStreamingToolExecutorPreservesSiblingAbortResult(t *testing.T) {
 		t.Fatal("expected failing sibling tool to start immediately")
 	}
 
-	waitForCompletedTool(t, executor, "fail-1")
+	results := waitForCompletedTool(t, executor, "fail-1")
 	executor.AbortSiblings("fail-1")
-	results := executor.GetRemainingResults(context.Background())
+	results = append(results, executor.GetRemainingResults(context.Background())...)
 
 	var abortContent string
 	for _, result := range results {
@@ -389,13 +485,16 @@ func TestStreamingToolExecutorPreservesSiblingAbortResult(t *testing.T) {
 	}
 }
 
-func waitForCompletedTool(t *testing.T, executor *agent.StreamingToolExecutor, toolID string) {
+func waitForCompletedTool(t *testing.T, executor *agent.StreamingToolExecutor, toolID string) []map[string]any {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
+	var collected []map[string]any
 	for {
-		for _, result := range executor.GetCompletedResults() {
+		batch := executor.GetCompletedResults()
+		collected = append(collected, batch...)
+		for _, result := range batch {
 			if result["tool_use_id"] == toolID {
-				return
+				return collected
 			}
 		}
 		select {

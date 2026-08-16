@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -43,6 +44,13 @@ func NewStore(sessionDir string) *Store {
 	return store
 }
 
+// NewInspectionStore opens the session index without creating directories or
+// applying legacy layout migrations. It is intended for read-only status and
+// preflight commands.
+func NewInspectionStore(sessionDir string) *Store {
+	return &Store{dir: sessionDir}
+}
+
 func (s *Store) Save(sessionID string, messages []map[string]any, turnCount int) error {
 	s.migrateLegacySession(sessionID)
 	if err := atomicWriteJSONL(s.sessionPath(sessionID), messages); err != nil {
@@ -71,6 +79,9 @@ func (s *Store) SaveState(sessionID string, state *agent.AgentState) error {
 }
 
 func (s *Store) Load(sessionID string) []map[string]any {
+	if state, _, _, ok := s.loadRuntimeCompatibilityState(sessionID); ok && state != nil {
+		return state.Messages
+	}
 	file, err := os.Open(s.sessionReadPath(sessionID))
 	if err != nil {
 		return s.loadSQLiteMessages(sessionID)
@@ -145,7 +156,17 @@ func (s *Store) SaveSnapshotWithRecovery(sessionID string, state *agent.AgentSta
 	return s.SaveStateWithRecovery(sessionID, state, recovery, tasks)
 }
 
+// UpdateMetaProjection maintains the small, rebuildable session-list index.
+// Runtime state is sourced from runtime.sqlite rather than this cache.
+func (s *Store) UpdateMetaProjection(sessionID string, messageCount, turnCount int) error {
+	_, err := s.upsertMeta(sessionID, messageCount, turnCount, nil)
+	return err
+}
+
 func (s *Store) LoadState(sessionID string) *agent.AgentState {
+	if state, _, _, ok := s.loadRuntimeCompatibilityState(sessionID); ok {
+		return state
+	}
 	data := loadJSONMap(s.stateReadPath(sessionID))
 	if data == nil {
 		return nil
@@ -182,6 +203,9 @@ func (s *Store) LoadState(sessionID string) *agent.AgentState {
 }
 
 func (s *Store) LoadSkillRecovery(sessionID string) map[string]any {
+	if _, recovery, _, ok := s.loadRuntimeCompatibilityState(sessionID); ok {
+		return recovery
+	}
 	stateData, recoveryData, commitData := s.loadGenerationTriplet(sessionID, s.skillRecoveryReadPath(sessionID))
 	if stateData == nil || recoveryData == nil || commitData == nil || intFromAny(recoveryData["version"]) != 1 {
 		return nil
@@ -190,6 +214,9 @@ func (s *Store) LoadSkillRecovery(sessionID string) map[string]any {
 }
 
 func (s *Store) LoadTaskRuntimeSnapshot(sessionID string) []map[string]any {
+	if _, _, tasks, ok := s.loadRuntimeCompatibilityState(sessionID); ok {
+		return tasks
+	}
 	stateData, taskData, commitData := s.loadGenerationTriplet(sessionID, s.taskRuntimeReadPath(sessionID))
 	if stateData == nil || taskData == nil || commitData == nil || intFromAny(taskData["version"]) != 1 {
 		return nil
@@ -205,6 +232,22 @@ func (s *Store) LoadTaskRuntimeSnapshot(sessionID string) []map[string]any {
 		}
 	}
 	return tasks
+}
+
+func (s *Store) loadRuntimeCompatibilityState(sessionID string) (*agent.AgentState, map[string]any, []map[string]any, bool) {
+	if _, err := os.Stat(RuntimeJournalPath(s.dir, sessionID)); err != nil {
+		return nil, nil, nil, false
+	}
+	journal, err := OpenRuntimeJournal(context.Background(), s.dir, sessionID)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	defer journal.Close()
+	state, recovery, tasks, err := LoadRuntimeState(context.Background(), journal)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	return state, recovery, tasks, true
 }
 
 func (s *Store) ListSessions() []Meta {

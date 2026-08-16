@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"LuminaCode/agent"
 	"LuminaCode/apppaths"
 	"LuminaCode/config"
+	"LuminaCode/harness"
 	"LuminaCode/memory"
 	luminateam "LuminaCode/team"
 
@@ -33,6 +35,65 @@ type DaemonOptions struct {
 	EndpointPath      string
 	IdleCheckInterval time.Duration
 	IdleEmptyChecks   int
+}
+
+func teamSessionIDFromPayload(payload any) string {
+	if snapshot, ok := payload.(luminateam.Snapshot); ok {
+		return snapshot.TeamSessionID
+	}
+	if snapshot, ok := payload.(*luminateam.Snapshot); ok && snapshot != nil {
+		return snapshot.TeamSessionID
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	var values map[string]any
+	if json.Unmarshal(raw, &values) != nil {
+		return ""
+	}
+	for _, key := range []string{"team_session_id", "session_id", "id"} {
+		if value, _ := values[key].(string); strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func durableTeamEventType(eventType string) string {
+	switch eventType {
+	case "team.started":
+		return harness.EventTeamCreated
+	case "team.completed", "team.interrupted_by_user":
+		return harness.EventTeamStatusChanged
+	case "team.frame.snapshot":
+		return harness.EventTeamSnapshotUpdated
+	case "team.dialogue.appended":
+		return harness.EventTeamDialogueAppended
+	case "team.loop.iteration":
+		return harness.EventTeamLoopIteration
+	case "team.loop.recovery":
+		return harness.EventTeamLoopRecovery
+	case "team.agent.message":
+		return harness.EventTeamAgentMessage
+	case "team.agent.started", "team.agent.status":
+		return harness.EventTeamAgentStatusChanged
+	case "team.artifact.created":
+		return harness.EventTeamArtifactRegistered
+	case "permission_requested":
+		return harness.EventToolPermissionRequested
+	default:
+		return harness.EventTeamSnapshotUpdated
+	}
+}
+
+func shouldCheckpointTeamEvent(eventType string) bool {
+	switch eventType {
+	case "team.agent.message", "permission_requested":
+		return false
+	default:
+		return strings.HasPrefix(eventType, "team.")
+	}
 }
 
 type DaemonServer struct {
@@ -206,6 +267,21 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 	}
 	server.manager = NewSessionManager(opts.Config, server.broadcast)
 	server.teamManager = luminateam.NewManager(opts.Config, func(parentSessionID, eventType string, payload any) {
+		if controller, err := server.manager.Get(parentSessionID); err == nil {
+			if teamSessionID := teamSessionIDFromPayload(payload); teamSessionID != "" {
+				if err := controller.AppendTeamEvent(context.Background(), teamSessionID, durableTeamEventType(eventType), payload); err != nil {
+					slog.Warn("append team runtime event", "session_id", parentSessionID, "team_session_id", teamSessionID, "error", err)
+				}
+				if shouldCheckpointTeamEvent(eventType) {
+					if teamSession, getErr := server.teamManager.Get(teamSessionID); getErr == nil {
+						checkpoint := teamSession.ExportRuntimeCheckpoint()
+						if appendErr := controller.AppendTeamEvent(context.Background(), teamSessionID, harness.EventTeamRuntimeCheckpointed, checkpoint); appendErr != nil {
+							slog.Warn("append team runtime checkpoint", "session_id", parentSessionID, "team_session_id", teamSessionID, "error", appendErr)
+						}
+					}
+				}
+			}
+		}
 		server.broadcast(PushEvent{
 			Type:      "event",
 			SessionID: parentSessionID,
@@ -216,6 +292,7 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 			},
 		})
 	}, nil)
+	server.teamManager.UseJournalPersistence(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/ws", server.handleWS)
 	mux.HandleFunc("/v1/a2a/ws", server.handleA2AWS)
@@ -502,15 +579,17 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 	switch req.Method {
 	case "backend.status":
 		return map[string]any{
-			"pid":                 os.Getpid(),
-			"model":               s.opts.Config.APIModel,
-			"cwd":                 s.opts.Config.CWD,
-			"sessions":            s.manager.Count(),
-			"websocket_clients":   s.clientCountExcluding(nil),
-			"active_connections":  s.activeConnectionCount(),
-			"idle_check_interval": s.opts.IdleCheckInterval.String(),
-			"idle_empty_checks":   s.opts.IdleEmptyChecks,
-			"started":             true,
+			"protocol_version":     2,
+			"event_schema_version": 1,
+			"pid":                  os.Getpid(),
+			"model":                s.opts.Config.APIModel,
+			"cwd":                  s.opts.Config.CWD,
+			"sessions":             s.manager.Count(),
+			"websocket_clients":    s.clientCountExcluding(nil),
+			"active_connections":   s.activeConnectionCount(),
+			"idle_check_interval":  s.opts.IdleCheckInterval.String(),
+			"idle_empty_checks":    s.opts.IdleEmptyChecks,
+			"started":              true,
 		}, nil
 	case "backend.shutdown":
 		go func() {
@@ -546,7 +625,24 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		client.setSessionID(controller.ID())
 		snapshot := controller.Snapshot()
-		snapshot.Teams = s.teamManager.RestorePersistedForParent(controller.ID(), p.CWD)
+		checkpoints, checkpointErr := controller.TeamRuntimeCheckpoints(context.Background())
+		if checkpointErr != nil {
+			return nil, toRPCError("session_resume_failed", checkpointErr)
+		}
+		if len(checkpoints) > 0 {
+			snapshot.Teams = s.teamManager.RestoreRuntimeCheckpoints(controller.ID(), p.CWD, checkpoints)
+		} else {
+			// One-time compatibility import. The first subsequent Team mutation
+			// writes a lossless journal checkpoint; no new sidecar is created.
+			snapshot.Teams = s.teamManager.RestorePersistedForParent(controller.ID(), p.CWD)
+			for _, restored := range snapshot.Teams {
+				if teamSession, getErr := s.teamManager.Get(restored.TeamSessionID); getErr == nil {
+					if appendErr := controller.AppendTeamEvent(context.Background(), restored.TeamSessionID, harness.EventTeamRuntimeCheckpointed, teamSession.ExportRuntimeCheckpoint()); appendErr != nil {
+						slog.Warn("import legacy team checkpoint", "session_id", controller.ID(), "team_session_id", restored.TeamSessionID, "error", appendErr)
+					}
+				}
+			}
+		}
 		return snapshot, nil
 	case "session.list":
 		return s.manager.List(), nil
@@ -557,10 +653,33 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		client.setSessionID(controller.ID())
 		return controller.Snapshot(), nil
+	case "session.events":
+		var p struct {
+			SessionID string `json:"session_id"`
+			AfterSeq  int64  `json:"after_seq"`
+			Limit     int    `json:"limit"`
+		}
+		decodeParams(req.Params, &p)
+		controller, err := s.manager.Get(p.SessionID)
+		if err != nil {
+			return nil, toRPCError("session_not_found", err)
+		}
+		page, err := controller.Events(ctx, p.AfterSeq, p.Limit)
+		if err != nil {
+			return nil, toRPCError("session_events_failed", err)
+		}
+		return page, nil
+	case "runtime.describe":
+		controller, rpcErr := s.controllerFromParams(req.Params)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return controller.RuntimeDescription(), nil
 	case "session.submit":
 		var p struct {
 			SessionID string `json:"session_id"`
 			Input     string `json:"input"`
+			CommandID string `json:"command_id"`
 		}
 		decodeParams(req.Params, &p)
 		controller, err := s.manager.Get(p.SessionID)
@@ -568,14 +687,15 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			return nil, toRPCError("session_not_found", err)
 		}
 		client.setSessionID(controller.ID())
-		if err := controller.Submit(ctx, p.Input); err != nil {
+		result, err := controller.SubmitCommand(ctx, p.CommandID, p.Input)
+		if err != nil {
 			code := "session_submit_failed"
 			if err.Error() == "session_busy" {
 				code = "session_busy"
 			}
 			return nil, toRPCError(code, err)
 		}
-		return map[string]any{"accepted": true}, nil
+		return result, nil
 	case "session.exit":
 		var p struct {
 			SessionID string `json:"session_id"`

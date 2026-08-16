@@ -18,6 +18,7 @@ import (
 
 	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/harness"
 	"LuminaCode/llmclient"
 
 	_ "modernc.org/sqlite"
@@ -77,6 +78,55 @@ func (m *Manager) Observe(ctx context.Context, cfg config.Config, sessionID stri
 	maxTurn := store.maxUserTurn(ctx)
 	lastCommitted := store.metaInt(ctx, "last_committed_user_turn")
 	_ = store.Close()
+	return m.enqueue(cfg, sessionID, maxTurn, lastCommitted, force)
+}
+
+func (m *Manager) ObserveEvents(ctx context.Context, cfg config.Config, sessionID string, eventStore harness.EventStore, force bool) error {
+	if m == nil || !cfg.SessionMemoryEnabled || strings.TrimSpace(sessionID) == "" || eventStore == nil {
+		return nil
+	}
+	consumer, ok := eventStore.(harness.ConsumerStore)
+	if !ok {
+		return fmt.Errorf("runtime event store does not support consumer offsets")
+	}
+	offset, err := consumer.ConsumerOffset(ctx, "session_memory")
+	if err != nil {
+		return err
+	}
+	store, err := Open(ctx, cfg, sessionID, nil)
+	if err != nil {
+		return err
+	}
+	last := offset
+	for {
+		events, loadErr := eventStore.Load(ctx, last, 500)
+		if loadErr != nil {
+			_ = store.Close()
+			return loadErr
+		}
+		if err := store.IngestEvents(ctx, events); err != nil {
+			_ = store.Close()
+			return err
+		}
+		if len(events) > 0 {
+			last = events[len(events)-1].Seq
+		}
+		if len(events) < 500 {
+			break
+		}
+	}
+	maxTurn := store.maxUserTurn(ctx)
+	lastCommitted := store.metaInt(ctx, "last_committed_user_turn")
+	_ = store.Close()
+	if last > offset {
+		if err := consumer.SaveConsumerOffset(ctx, "session_memory", last); err != nil {
+			return err
+		}
+	}
+	return m.enqueue(cfg, sessionID, maxTurn, lastCommitted, force)
+}
+
+func (m *Manager) enqueue(cfg config.Config, sessionID string, maxTurn, lastCommitted int, force bool) error {
 
 	m.mu.Lock()
 	w := m.workers[sessionID]
@@ -261,6 +311,14 @@ func (s *Store) init(ctx context.Context) error {
 			return err
 		}
 	}
+	// Existing databases predate event-source deduplication. SQLite has no
+	// ADD COLUMN IF NOT EXISTS, so duplicate-column errors are intentionally
+	// ignored and the index creation below is authoritative.
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN source_event_id TEXT`)
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_event
+		ON messages(source_event_id) WHERE source_event_id IS NOT NULL`); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `CREATE VIRTUAL TABLE IF NOT EXISTS commit_fts USING fts5(commit_id UNINDEXED, title, summary, tags)`); err == nil {
 		_, _ = s.db.ExecContext(ctx, `INSERT OR REPLACE INTO schema_meta(key, value) VALUES('fts_available', 'true')`)
 	} else {
@@ -307,6 +365,58 @@ func (s *Store) IngestMessages(ctx context.Context, messages []map[string]any) e
 		now := unixNow()
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO messages(turn_count, user_turn_count, role, content_json, text_preview, message_hash, created_at, last_accessed_at)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, userTurn, userTurn, role, string(contentJSON), preview, hash, now, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) IngestEvents(ctx context.Context, events []harness.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	userTurn := s.maxUserTurn(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, event := range events {
+		if event.Type != harness.EventMessageUserAppended && event.Type != harness.EventMessageAssistantAppended {
+			continue
+		}
+		var payload harness.MessageAppendedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return err
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(payload.Message, &msg); err != nil {
+			return err
+		}
+		if isTransientMessage(msg) || isCompactionHandoffMessage(msg) {
+			continue
+		}
+		if payload.UserTurn > 0 {
+			userTurn = payload.UserTurn
+		} else if taggedTurn := sessionUserTurn(msg); taggedTurn > 0 {
+			userTurn = taggedTurn
+		} else if isRealUserRequest(msg) {
+			userTurn++
+		}
+		if userTurn == 0 {
+			continue
+		}
+		role := stringValue(msg["role"])
+		contentJSON, err := json.Marshal(msg["content"])
+		if err != nil {
+			return err
+		}
+		hash := messageHash(userTurn, role, contentJSON)
+		preview := textPreview(msg, 1200)
+		now := unixNow()
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO messages(
+			turn_count, user_turn_count, role, content_json, text_preview, message_hash, source_event_id, created_at, last_accessed_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, userTurn, userTurn, role, string(contentJSON), preview, hash, event.ID, now, now); err != nil {
 			return err
 		}
 	}

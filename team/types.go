@@ -2,6 +2,8 @@ package team
 
 import (
 	"time"
+
+	"LuminaCode/agent"
 )
 
 type TeamSpec struct {
@@ -209,4 +211,18 @@ type TimelineEvent struct {
 	Type      string `json:"type"`
 	CreatedAt string `json:"created_at"`
 	Payload   any    `json:"payload"`
+}
+
+// RuntimeCheckpoint is the lossless Team aggregate state stored in the parent
+// session journal. UI snapshots remain small projections; this checkpoint is
+// sufficient to resume member agents without consulting Team sidecar files.
+type RuntimeCheckpoint struct {
+	Version         int                         `json:"version"`
+	ParentSessionID string                      `json:"parent_session_id"`
+	TeamName        string                      `json:"team_name"`
+	Snapshot        Snapshot                    `json:"snapshot"`
+	Dialogue        []DialogueEntry             `json:"dialogue"`
+	Timeline        []TimelineEvent             `json:"timeline"`
+	Artifacts       []Artifact                  `json:"artifacts"`
+	AgentStates     map[string]agent.AgentState `json:"agent_states"`
 }

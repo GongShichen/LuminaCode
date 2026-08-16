@@ -61,6 +61,7 @@ type StreamingToolExecutor struct {
 	safeSemaphore  *semaphore.Weighted
 	activity       chan struct{}
 	progress       chan map[string]any
+	Observer       ToolEventObserver
 }
 
 func NewStreamingToolExecutor(registry *coretools.ToolRegistry, cfg config.Config, state *AgentState, execCtx coretools.ExecutionContext, maxConcurrentSafe ...int) *StreamingToolExecutor {
@@ -93,7 +94,7 @@ func (e *StreamingToolExecutor) AddTool(tc coretools.ToolCall) bool {
 	slot := &ToolSlot{TC: tc, State: ToolStateQueued, abort: make(chan struct{}), done: make(chan struct{})}
 	e.slots[tc.ID] = slot
 	e.toolOrder = append(e.toolOrder, tc.ID)
-	canStart := e.canStartImmediatelyLocked(tc, false)
+	canStart := e.canStartImmediatelyLocked(tc.ID, false)
 	e.mu.Unlock()
 	if canStart {
 		e.launch(tc.ID)
@@ -110,7 +111,7 @@ func (e *StreamingToolExecutor) TryStartQueued(tcID string) bool {
 		return false
 	}
 	slot.PermissionGranted = true
-	canStart := e.canStartImmediatelyLocked(slot.TC, true)
+	canStart := e.canStartImmediatelyLocked(tcID, true)
 	e.mu.Unlock()
 	if !canStart {
 		return false
@@ -136,13 +137,29 @@ func (e *StreamingToolExecutor) SetToolDecisionMapValue(mapKey, tcID, value stri
 func (e *StreamingToolExecutor) DenyTool(tcID string) {
 	msg := "User denied this action."
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	slot := e.slots[tcID]
+	if slot == nil {
+		e.mu.Unlock()
+		return
+	}
+	result := map[string]any{"type": "tool_result", "tool_use_id": tcID, "content": msg}
+	call := slot.TC
+	e.mu.Unlock()
+	if e.Observer != nil {
+		if err := e.Observer.ToolDenied(e.cancelCtx, call, result); err != nil {
+			msg = "Runtime journal failed before permission denial was committed: " + err.Error()
+			result = map[string]any{"type": "tool_result", "tool_use_id": tcID, "content": msg}
+			e.cancelAll()
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	slot = e.slots[tcID]
 	if slot == nil {
 		return
 	}
 	slot.State = ToolStateCompleted
-	slot.Result = map[string]any{"type": "tool_result", "tool_use_id": tcID, "content": msg}
+	slot.Result = result
 	slot.IsError = false
 	e.signalActivity()
 }
@@ -170,12 +187,19 @@ func (e *StreamingToolExecutor) GetCompletedResults() []map[string]any {
 		if slot == nil {
 			continue
 		}
+		if slot.State == ToolStateYielded {
+			continue
+		}
 		if slot.State == ToolStateCompleted || slot.State == ToolStateAborted {
 			slot.State = ToolStateYielded
 			if slot.Result != nil {
 				results = append(results, slot.Result)
 			}
+			continue
 		}
+		// Results are model-visible in call order. A later parallel call may
+		// finish first, but its result remains buffered behind this slot.
+		break
 	}
 	return results
 }
@@ -330,7 +354,7 @@ func (e *StreamingToolExecutor) maybeDrain() {
 	}
 	for _, tid := range e.toolOrder {
 		slot := e.slots[tid]
-		if slot != nil && slot.State == ToolStateQueued && e.isSafeLocked(slot.TC) && e.canStartImmediatelyLocked(slot.TC, false) {
+		if slot != nil && slot.State == ToolStateQueued && e.isSafeLocked(slot.TC) && e.canStartImmediatelyLocked(tid, false) {
 			toLaunch = append(toLaunch, tid)
 		}
 	}
@@ -339,7 +363,7 @@ func (e *StreamingToolExecutor) maybeDrain() {
 		if slot == nil || slot.State != ToolStateQueued || e.isSafeLocked(slot.TC) || !slot.PermissionGranted {
 			continue
 		}
-		if e.canStartImmediatelyLocked(slot.TC, true) {
+		if e.canStartImmediatelyLocked(tid, true) {
 			toLaunch = append(toLaunch, tid)
 			break
 		}
@@ -350,11 +374,39 @@ func (e *StreamingToolExecutor) maybeDrain() {
 	}
 }
 
-func (e *StreamingToolExecutor) canStartImmediatelyLocked(tc coretools.ToolCall, allowNonSafe bool) bool {
-	if e.Cancelled() || e.nonSafeRunning > 0 {
+func (e *StreamingToolExecutor) canStartImmediatelyLocked(tcID string, allowNonSafe bool) bool {
+	if e.Cancelled() {
 		return false
 	}
-	if !e.isSafeLocked(tc) && !allowNonSafe {
+	slot := e.slots[tcID]
+	if slot == nil || slot.State != ToolStateQueued {
+		return false
+	}
+	isSafe := e.isSafeLocked(slot.TC)
+	if !isSafe && !allowNonSafe {
+		return false
+	}
+	for _, priorID := range e.toolOrder {
+		if priorID == tcID {
+			break
+		}
+		prior := e.slots[priorID]
+		if prior == nil {
+			continue
+		}
+		priorTerminal := prior.State == ToolStateCompleted || prior.State == ToolStateAborted || prior.State == ToolStateYielded
+		if !isSafe && !priorTerminal {
+			// An exclusive call starts only after every preceding call has
+			// finished, including calls in a parallel pool.
+			return false
+		}
+		if isSafe && !e.isSafeLocked(prior.TC) && !priorTerminal {
+			// A queued permission request is already an exclusive barrier.
+			// Later safe calls must not overtake it.
+			return false
+		}
+	}
+	if e.nonSafeRunning > 0 {
 		return false
 	}
 	return true
@@ -380,7 +432,33 @@ func (e *StreamingToolExecutor) launch(tcID string) {
 		return
 	}
 	isSafe := e.isSafeLocked(slot.TC)
+	call := slot.TC
+	// Reserve the slot before the durable start callback. This prevents another
+	// drain pass from launching the same queued call while the journal append is
+	// in flight; tool code itself still cannot run until that append succeeds.
 	slot.State = ToolStateExecuting
+	e.mu.Unlock()
+	if e.Observer != nil {
+		if err := e.Observer.BeforeToolStart(e.cancelCtx, call); err != nil {
+			e.mu.Lock()
+			if current := e.slots[tcID]; current != nil && current.State == ToolStateExecuting {
+				current.State = ToolStateCompleted
+				current.IsError = true
+				current.Result = map[string]any{"type": "tool_result", "tool_use_id": tcID, "content": "Runtime journal failed before tool execution: " + err.Error()}
+				close(current.done)
+			}
+			e.mu.Unlock()
+			e.cancelAll()
+			e.signalActivity()
+			return
+		}
+	}
+	e.mu.Lock()
+	slot = e.slots[tcID]
+	if slot == nil || slot.State != ToolStateExecuting {
+		e.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithCancel(e.cancelCtx)
 	slot.cancel = cancel
 	if !isSafe {
@@ -402,16 +480,29 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 		}
 		e.mu.Lock()
 		slot := e.slots[tcID]
+		var call coretools.ToolCall
+		var result map[string]any
+		var isError bool
+		finalState := ToolStateCompleted
 		if slot != nil {
 			if slot.State != ToolStateAborted {
 				slot.State = ToolStateCompleted
 			}
+			call = slot.TC
+			result = slot.Result
+			isError = slot.IsError
+			finalState = slot.State
 			close(slot.done)
 		}
 		if !isSafe {
 			e.nonSafeRunning--
 		}
 		e.mu.Unlock()
+		if e.Observer != nil && call.ID != "" {
+			if err := e.Observer.ToolFinished(ctx, call, result, isError, finalState); err != nil {
+				e.cancelAll()
+			}
+		}
 		e.maybeDrain()
 		e.signalActivity()
 	}()
@@ -475,6 +566,14 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 		e.mu.Unlock()
 	}
 	e.finishResult(tcID, truncated, truncated, result.IsError)
+	if result.IsError {
+		if tool := e.Registry.Get(tc.Name); tool != nil && tool.SupportsSiblingAbort() {
+			// Abort-capable parallel groups must react to a later failure before
+			// ordered result delivery. Waiting for the failed result to be yielded
+			// can deadlock behind an earlier sibling that is waiting for abort.
+			e.AbortSiblings(tcID)
+		}
+	}
 
 	if result.IsError && !isSafe {
 		e.mu.Lock()

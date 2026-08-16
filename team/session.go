@@ -36,12 +36,19 @@ type Manager struct {
 	emit          PushFunc
 	askPermission PermissionFunc
 
-	mu       sync.Mutex
-	sessions map[string]*Session
+	mu                 sync.Mutex
+	sessions           map[string]*Session
+	journalPersistence bool
 }
 
 func NewManager(cfg config.Config, emit PushFunc, ask PermissionFunc) *Manager {
 	return &Manager{Config: cfg, emit: emit, askPermission: ask, sessions: map[string]*Session{}}
+}
+
+func (m *Manager) UseJournalPersistence(enabled bool) {
+	m.mu.Lock()
+	m.journalPersistence = enabled
+	m.mu.Unlock()
 }
 
 func (m *Manager) List() []TeamListItem {
@@ -72,6 +79,7 @@ func (m *Manager) StartWithConfig(parentSessionID, teamName, cwd string, base co
 	}
 	session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
 	m.mu.Lock()
+	session.persistEnabled = !m.journalPersistence
 	m.sessions[session.ID] = session
 	m.mu.Unlock()
 	session.persist()
@@ -173,9 +181,10 @@ type Session struct {
 	Config          config.Config
 	Spec            TeamSpec
 
-	emitFn        PushFunc
-	askPermission PermissionFunc
-	rootDir       string
+	emitFn         PushFunc
+	askPermission  PermissionFunc
+	rootDir        string
+	persistEnabled bool
 
 	mu             sync.Mutex
 	agents         map[string]*AgentRuntime
@@ -225,14 +234,7 @@ type TeamTask struct {
 
 func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit PushFunc, ask PermissionFunc) *Session {
 	id := "team-" + uuid.NewString()
-	root := ""
-	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
-		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
-	if useProjectData {
-		root = filepath.Join(cfg.ProjectPaths.TeamsDir, spec.Name, id)
-	} else {
-		root = filepath.Join(cfg.SessionDir, parentSessionID, "teams", id)
-	}
+	root := teamSessionRoot(cfg, parentSessionID, spec.Name, id)
 	session := &Session{
 		ID:              id,
 		ParentSessionID: parentSessionID,
@@ -241,6 +243,7 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 		emitFn:          emit,
 		askPermission:   ask,
 		rootDir:         root,
+		persistEnabled:  true,
 		agents:          map[string]*AgentRuntime{},
 		activity:        map[string]ActivityRow{},
 		gate:            GateStatus{},
@@ -259,6 +262,15 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 		}
 	}
 	return session
+}
+
+func teamSessionRoot(cfg config.Config, parentSessionID, teamName, sessionID string) string {
+	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
+		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
+	if useProjectData {
+		return filepath.Join(cfg.ProjectPaths.TeamsDir, teamName, sessionID)
+	}
+	return filepath.Join(cfg.SessionDir, parentSessionID, "teams", sessionID)
 }
 
 func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
@@ -2919,6 +2931,29 @@ func (s *Session) Snapshot() Snapshot {
 	}
 }
 
+func (s *Session) ExportRuntimeCheckpoint() RuntimeCheckpoint {
+	snapshot := s.Snapshot()
+	s.mu.Lock()
+	dialogue := append([]DialogueEntry(nil), s.dialogue...)
+	timeline := append([]TimelineEvent(nil), s.timeline...)
+	artifacts := append([]Artifact(nil), s.artifacts...)
+	agents := make(map[string]*AgentRuntime, len(s.agents))
+	for id, runtime := range s.agents {
+		agents[id] = runtime
+	}
+	s.mu.Unlock()
+	states := make(map[string]agent.AgentState, len(agents))
+	for id, runtime := range agents {
+		if runtime != nil {
+			states[id] = persistableAgentState(runtime.State)
+		}
+	}
+	return RuntimeCheckpoint{
+		Version: 1, ParentSessionID: s.ParentSessionID, TeamName: s.Spec.Name,
+		Snapshot: snapshot, Dialogue: dialogue, Timeline: timeline, Artifacts: artifacts, AgentStates: states,
+	}
+}
+
 func cloneContract(in *AcceptanceContract) *AcceptanceContract {
 	if in == nil {
 		return nil
@@ -3556,7 +3591,7 @@ func firstLineFromFile(path string) string {
 }
 
 func (s *Session) persist() {
-	if strings.TrimSpace(s.rootDir) == "" {
+	if !s.persistEnabled || strings.TrimSpace(s.rootDir) == "" {
 		return
 	}
 	s.persistMu.Lock()

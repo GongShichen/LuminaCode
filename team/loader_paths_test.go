@@ -63,3 +63,35 @@ func writeTeamFixture(t *testing.T, root, name, description string) {
 		}
 	}
 }
+
+func TestJournalCheckpointRestoresTeamWithoutSidecars(t *testing.T) {
+	root := t.TempDir()
+	teamDir := filepath.Join(root, "teams")
+	writeTeamFixture(t, teamDir, "checkpoint-team", "checkpoint")
+	cfg := config.NewConfigForCWD(filepath.Join(root, "work"))
+	cfg.TeamDir = teamDir
+	cfg.SessionDir = filepath.Join(root, "sessions")
+	manager := NewManager(cfg, nil, nil)
+	manager.UseJournalPersistence(true)
+	session, err := manager.Start("parent", "checkpoint-team", cfg.CWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	session.dialogue = append(session.dialogue, DialogueEntry{FromAgent: "leader", Content: "durable"})
+	session.loopIteration = 3
+	session.mu.Unlock()
+	checkpoint := session.ExportRuntimeCheckpoint()
+	if _, err := os.Stat(filepath.Join(session.rootDir, "team.json")); !os.IsNotExist(err) {
+		t.Fatalf("journal mode wrote a team sidecar: %v", err)
+	}
+	restoredManager := NewManager(cfg, nil, nil)
+	restoredManager.UseJournalPersistence(true)
+	snapshots := restoredManager.RestoreRuntimeCheckpoints("parent", cfg.CWD, []RuntimeCheckpoint{checkpoint})
+	if len(snapshots) != 1 || snapshots[0].LoopIteration != 3 || len(snapshots[0].Dialogue) != 1 || snapshots[0].Dialogue[0].Content != "durable" {
+		t.Fatalf("unexpected restored checkpoint: %#v", snapshots)
+	}
+	if _, err := restoredManager.Get(checkpoint.Snapshot.TeamSessionID); err != nil {
+		t.Fatal(err)
+	}
+}

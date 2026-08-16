@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"LuminaCode/agent"
@@ -87,11 +88,19 @@ type RuntimePreparer interface {
 const uiAnimationInterval = 120 * time.Millisecond
 
 type TaskEventSink struct {
-	queue chan TaskUiEvent
+	queue    chan TaskUiEvent
+	mu       sync.RWMutex
+	observer func(agent.TaskUIEvent)
 }
 
 func NewTaskEventSink() *TaskEventSink {
 	return &TaskEventSink{queue: make(chan TaskUiEvent, 128)}
+}
+
+func (s *TaskEventSink) SetObserver(observer func(agent.TaskUIEvent)) {
+	s.mu.Lock()
+	s.observer = observer
+	s.mu.Unlock()
 }
 
 func (s *TaskEventSink) Emit(event TaskUiEvent) {
@@ -102,6 +111,12 @@ func (s *TaskEventSink) Emit(event TaskUiEvent) {
 }
 
 func (s *TaskEventSink) EmitTaskEvent(event agent.TaskUIEvent) {
+	s.mu.RLock()
+	observer := s.observer
+	s.mu.RUnlock()
+	if observer != nil {
+		observer(event)
+	}
 	s.Emit(TaskUiEvent{
 		Type:       event.Type,
 		TaskID:     event.TaskID,
