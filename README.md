@@ -15,6 +15,8 @@ Agent Teams.
 - Runs file, shell, web, MCP, memory, and task tools with permission controls.
 - Keeps resumable sessions with transcript, state, tasks, tool results, skill
   recovery, and session memory.
+- Records runtime activity as ordered, replayable events with crash recovery and
+  idempotent submit commands.
 - Supports OpenAI-compatible and Anthropic-compatible streaming APIs.
 - Keeps visible chat separate from tool payloads, tool results, and runtime
   records.
@@ -37,6 +39,36 @@ Interactive sessions use localhost WebSocket:
 The backend listens on `127.0.0.1`, requires an auth token, supports multiple
 sessions, and serializes submits within each session. Headless paths are handled
 by `lumina-backend`.
+
+### Durable Runtime Journal
+
+Each interactive session has one authoritative SQLite journal:
+
+```text
+<AppRoot>/data/sessions/active/{session-id}/runtime.sqlite
+```
+
+The journal uses WAL mode and records session, run, step, message, model, tool,
+task, Team, memory, usage, warning, and checkpoint events. Events have a global
+sequence and a per-stream sequence; optimistic stream checks prevent conflicting
+writes. Large payloads can be stored in a content-addressed blob table, while
+rebuildable projections and consumer offsets track replay progress.
+
+Runtime behavior is assembled through typed capabilities and deterministic
+hooks. Memory preparation, skill context, MCP registration, context compilation,
+model responses, permissions, tools, and sub-agents share the same session
+scope without being coupled to the TUI.
+
+The WebSocket protocol publishes durable v2 events with their journal sequence.
+If the TUI detects a gap, it calls `session.events` and reduces the missing
+events before applying the live event. Submit commands carry an idempotency key,
+so reconnect retries return the original result instead of starting duplicate
+runs.
+
+On resume, open runs, steps, and tools are closed with explicit interrupted
+events. Task state is rebuilt from lifecycle events, and Team child streams use
+lossless runtime checkpoints. Older JSON/JSONL session files and Team sidecars
+are imported once with a backup; new sessions do not create those sidecars.
 
 ## Long-Term Memory
 
@@ -171,11 +203,10 @@ Runtime summary:
 - Stop policy: user interrupt or task complete.
 - Failures become recovery inputs for the next loop.
 - Ordinary Agent context and Team Agent contexts remain isolated.
-
-```text
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/agents/{agent_id}/
-```
+- Team dialogue, activity, artifacts, gates, and member state are checkpointed
+  in child streams inside the parent session's `runtime.sqlite` journal.
+- Existing file-based Team runtime data remains readable as a one-time migration
+  source; new Team sessions do not write per-Team runtime directories.
 
 ### Built-in Teams
 
@@ -408,7 +439,7 @@ Project runtime data:
 
 - `project.json`
 - `trust/mcp.json`
-- `teams/`
+- `teams/` (legacy Team runtime data, imported when encountered)
 
 Project-authored resources:
 
@@ -422,14 +453,15 @@ sessions use `<AppRoot>/data/sessions/archive`:
 {session_dir}/{session_id}/
 ```
 
-- `transcript.jsonl`
-- `transcript.md`
-- `meta.json`
-- `state.json`
-- `tasks.json`
-- `skill-recovery.json`
-- `skill-recovery.commit.json`
-- `session.sqlite`
+- `runtime.sqlite`: authoritative event journal and runtime checkpoints
+- `meta.json`: small, rebuildable session-list projection
+- `migration-v2.json`: migration report, when a legacy session was imported
+- `.migration-backup/v1/`: preserved legacy source files, when imported
+
+`runtime.sqlite-wal` and `runtime.sqlite-shm` can exist while the database is
+open. Legacy `transcript.jsonl`, `state.json`, `tasks.json`,
+`skill-recovery*.json`, and `session.sqlite` files are migration inputs rather
+than the source of truth once `runtime.sqlite` exists.
 
 Large background outputs:
 
@@ -449,6 +481,15 @@ lumina [flags]
 lumina-backend -p "Summarize this repository"
 lumina-backend --list
 lumina-backend daemon --host 127.0.0.1 --port 0
+```
+
+Inspect the runtime assembly and event journal:
+
+```sh
+lumina-backend runtime dump --session <session-id>
+lumina-backend session migrate --check [--session <session-id>]
+lumina-backend session migrate --all [--session <session-id>]
+lumina-backend session migrate --status [--session <session-id>]
 ```
 
 Common flags:
@@ -586,14 +627,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `cli/`: slash command classification and completion helpers
 - `config/`: configuration loading, environment overrides, and path resolution
 - `frontend/`: TypeScript terminal frontend
+- `harness/`: durable event contracts, scopes, hooks, projections, and stores
 - `mcp/`: MCP config, trust, and dynamic tool registration
 - `memory/`: auto-memory storage and recall
 - `security/`: command and path safety checks
-- `session/`: session persistence, migration, and recovery
+- `session/`: SQLite runtime journal, session migration, projections, and crash
+  recovery
 - `sessionmemory/`: per-session memory commit log and history tools
 - `skills/`: skill loading, prompt processing, discovery, and execution
 - `team/`: Agent Team configuration, runtime loop, A2A dialogue, gates, and
-  persistence
+  journal checkpoints
 - `tools/`: built-in tools
 - `ui/`: shared runtime frame model and legacy renderer tests
 - `test/`: parity and regression tests

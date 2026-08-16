@@ -9,6 +9,7 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 - 加载项目、用户和内置 skills。
 - 调用文件、Shell、Web、MCP、记忆和任务工具，并带权限控制。
 - 保存可恢复 session：transcript、state、tasks、tool results、skill recovery 和 session memory。
+- 将 runtime 活动记录为有序、可重放事件，并支持崩溃恢复和幂等 submit。
 - 支持 OpenAI-compatible 和 Anthropic-compatible 流式 API。
 - 将可见对话与工具 payload、tool result、runtime 记录分离。
 - 支持 sub-agent、Agent Team、headless 和 benchmark harness。
@@ -27,6 +28,33 @@ LuminaCode 是一个本地运行的通用 Agent。它由 Go 后端和 TypeScript
 ```
 
 后端只监听 `127.0.0.1`，连接必须携带 auth token；支持多个 session，同一个 session 内串行 submit。Headless 路径由 `lumina-backend` 处理。
+
+### 持久化 Runtime Journal
+
+每个交互 session 使用一个权威 SQLite journal：
+
+```text
+<AppRoot>/data/sessions/active/{session-id}/runtime.sqlite
+```
+
+Journal 使用 WAL 模式，记录 session、run、step、message、model、tool、task、
+Team、memory、usage、warning 和 checkpoint event。事件同时具有全局序号和
+stream 内序号，并通过乐观并发检查避免冲突写入。大型 payload 可进入
+content-addressed blob 表；可重建 projection 和 consumer offset 用于跟踪
+重放进度。
+
+Runtime 通过 typed capability 和确定性 hook 组装。Memory preparation、skill
+context、MCP 注册、context compilation、model response、权限、工具和 sub-agent
+共享同一个 session scope，不依赖 TUI 才能工作。
+
+WebSocket protocol v2 会推送带 journal sequence 的 durable event。TUI 发现
+序号缺口时，会先调用 `session.events` 拉取并 reduce 缺失事件，再处理实时事件。
+Submit command 带幂等 key，因此断线重试会返回原结果，不会启动重复 run。
+
+恢复 session 时，尚未结束的 run、step 和 tool 会追加明确的 interrupted event。
+Task 状态由 lifecycle event 重建，Team child stream 使用无损 runtime
+checkpoint。旧 JSON/JSONL session 文件和 Team sidecar 会在备份后一次性导入；
+新 session 不再生成这些 sidecar。
 
 ## 长期记忆
 
@@ -146,11 +174,10 @@ Runtime 要点：
 - 停止条件：用户打断或任务完成。
 - 失败会进入下一轮恢复，而不是静默成功。
 - 普通 Agent 上下文和 Team Agent 上下文隔离。
-
-```text
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/agents/{agent_id}/
-```
+- Team 对话、activity、artifact、gate 和成员状态以 checkpoint 形式写入父
+  session `runtime.sqlite` 内的 child stream。
+- 已有文件式 Team runtime 数据仍可作为一次性迁移来源；新 Team session 不再
+  写入独立 runtime 目录。
 
 ### 内置 Team
 
@@ -368,7 +395,7 @@ AppRoot 分为五个 ownership layer：
 
 - `project.json`
 - `trust/mcp.json`
-- `teams/`
+- `teams/`（旧 Team runtime 数据，遇到时执行导入）
 
 项目内用户资源：
 
@@ -382,14 +409,14 @@ active session 默认位于 `<AppRoot>/data/sessions/active`，archive 位于
 {session_dir}/{session_id}/
 ```
 
-- `transcript.jsonl`
-- `transcript.md`
-- `meta.json`
-- `state.json`
-- `tasks.json`
-- `skill-recovery.json`
-- `skill-recovery.commit.json`
-- `session.sqlite`
+- `runtime.sqlite`：权威 event journal 和 runtime checkpoint
+- `meta.json`：体积较小、可重建的 session list projection
+- `migration-v2.json`：旧 session 导入时生成的迁移报告
+- `.migration-backup/v1/`：旧 session 导入时保留的源文件备份
+
+数据库打开期间可能存在 `runtime.sqlite-wal` 和 `runtime.sqlite-shm`。一旦
+`runtime.sqlite` 存在，旧 `transcript.jsonl`、`state.json`、`tasks.json`、
+`skill-recovery*.json` 和 `session.sqlite` 只作为迁移输入，不再是状态真源。
 
 大型后台输出：
 
@@ -409,6 +436,15 @@ lumina [flags]
 lumina-backend -p "分析一下这个项目"
 lumina-backend --list
 lumina-backend daemon --host 127.0.0.1 --port 0
+```
+
+检查 runtime assembly、event journal 和迁移状态：
+
+```sh
+lumina-backend runtime dump --session <session-id>
+lumina-backend session migrate --check [--session <session-id>]
+lumina-backend session migrate --all [--session <session-id>]
+lumina-backend session migrate --status [--session <session-id>]
 ```
 
 常用参数：
@@ -539,13 +575,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `cli/`：slash 命令分类和补全辅助逻辑。
 - `config/`：配置加载、环境变量覆盖和路径解析。
 - `frontend/`：TypeScript 终端前端。
+- `harness/`：持久 event contract、scope、hook、projection 和 store。
 - `mcp/`：MCP 配置、信任和动态工具注册。
 - `memory/`：自动记忆存储和召回。
 - `security/`：命令和路径安全检查。
-- `session/`：会话保存、迁移和恢复。
+- `session/`：SQLite runtime journal、session 迁移、projection 和崩溃恢复。
 - `sessionmemory/`：per-session memory commit log 和历史查询工具。
 - `skills/`：skill 加载、解析、发现和执行。
-- `team/`：Agent Team 配置、runtime loop、A2A 对话、gate 和持久化。
+- `team/`：Agent Team 配置、runtime loop、A2A 对话、gate 和 journal checkpoint。
 - `tools/`：内置工具。
 - `ui/`：共享 runtime frame model 和旧 renderer 回归测试。
 - `test/`：回归测试和 parity 测试。
