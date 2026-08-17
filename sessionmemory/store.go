@@ -259,6 +259,11 @@ func Open(ctx context.Context, cfg config.Config, sessionID string, complete Sum
 	if err != nil {
 		return nil, err
 	}
+	// A session file is intentionally small and write-heavy. A single pooled
+	// connection plus SQLite's busy timeout lets background commits coexist
+	// with status/list readers without dropping a commit on a transient lock.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &Store{db: db, cfg: cfg, sessionID: sessionID, path: path, complete: complete}
 	if err := store.init(ctx); err != nil {
 		_ = db.Close()
@@ -296,6 +301,7 @@ func SyncAndMaybeCommit(ctx context.Context, cfg config.Config, sessionID string
 
 func (s *Store) init(ctx context.Context) error {
 	stmts := []string{
+		`PRAGMA busy_timeout=5000`,
 		`PRAGMA journal_mode=WAL`,
 		`CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS session_info(session_id TEXT PRIMARY KEY, created_at REAL, updated_at REAL, cwd TEXT, model TEXT)`,
