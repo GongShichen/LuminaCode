@@ -19,7 +19,7 @@ type permissionWaiter struct {
 
 type WSRendererBridge struct {
 	sessionID string
-	emit      func(PushEvent)
+	emit      EventEmitter
 	nextSeq   func() int64
 
 	mu          sync.Mutex
@@ -27,7 +27,7 @@ type WSRendererBridge struct {
 	selections  map[string]chan *string
 }
 
-func NewWSRendererBridge(sessionID string, emit func(PushEvent), nextSeq func() int64) *WSRendererBridge {
+func NewWSRendererBridge(sessionID string, emit EventEmitter, nextSeq func() int64) *WSRendererBridge {
 	return &WSRendererBridge{
 		sessionID:   sessionID,
 		emit:        emit,

@@ -25,19 +25,28 @@ type QueryEngine struct {
 	skillPermissionCh chan bool
 }
 
-func NewQueryEngine(cfg *config.Config) *QueryEngine {
-	if cfg == nil {
-		c := config.GetConfig()
-		cfg = &c
-	}
+func NewQueryEngine(cfg config.Config, core *CoreExecutionEngine) *QueryEngine {
 	return &QueryEngine{
-		Config:     *cfg,
-		CoreEngine: NewCoreExecutionEngine(cfg),
+		Config:     cfg,
+		CoreEngine: core,
 	}
 }
 
-func CreateQueryEngine(cfg *config.Config) *QueryEngine {
-	return NewQueryEngine(cfg)
+type QueryEngineFactory interface {
+	Create(config.Config) *QueryEngine
+}
+
+type DefaultQueryEngineFactory struct {
+	memoryFactory MemoryFabricFactory
+}
+
+func NewQueryEngineFactory(memoryFactory MemoryFabricFactory) *DefaultQueryEngineFactory {
+	return &DefaultQueryEngineFactory{memoryFactory: memoryFactory}
+}
+
+func (f *DefaultQueryEngineFactory) Create(cfg config.Config) *QueryEngine {
+	core := NewCoreExecutionEngine(cfg, f.memoryFactory)
+	return NewQueryEngine(cfg, core)
 }
 
 func (q *QueryEngine) Abort() { q.CoreEngine.Abort() }

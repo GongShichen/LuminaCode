@@ -231,9 +231,9 @@ type RunnerOptions struct {
 	LongMemEvalSmokeSize    int
 	LongMemEvalQuestionType string
 	LongMemEvalAnswerRunner LongMemEvalAnswerRunner
+	MemoryFactory           agent.MemoryFabricFactory
 	HarnessCmd              string
 	SWEBenchHarnessCmd      string
 	PreparedEnv             bool
 	Now                     func() time.Time
-	longMemEvalFabricOpener longMemEvalFabricOpener
 }

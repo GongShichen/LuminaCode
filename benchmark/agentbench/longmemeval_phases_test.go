@@ -305,6 +305,7 @@ func TestLongMemEvalFabricPrepareBuildsRawSnapshotWithoutSemanticAPI(t *testing.
 	cfg := config.NewConfig()
 	cfg.MemoryBackend = "fabric"
 	cfg.MemoryRemoteProcessing = "off"
+	cfg.MemoryEmbeddingModel = "bge-m3"
 	fixtureOpener := func(ctx context.Context, cfg config.Config, startWorkers bool,
 		observer memory.APIUsageObserver) (*memory.Fabric, error) {
 		fabricOptions := memory.DefaultFabricOptions(cfg.MemoryPath)
@@ -316,7 +317,7 @@ func TestLongMemEvalFabricPrepareBuildsRawSnapshotWithoutSemanticAPI(t *testing.
 	}
 	options := normalizeLongMemEvalOptions(RunnerOptions{WorkDir: filepath.Join(root, "work"),
 		OutputDir: filepath.Join(root, "reports"), LongMemEvalIndexDir: filepath.Join(root, "index"), Config: cfg,
-		longMemEvalFabricOpener: fixtureOpener})
+		MemoryFactory: memoryFabricFactoryFunc(fixtureOpener)})
 	caseData := longMemEvalCase{QuestionID: "q1", Question: "gold question must not be indexed", Answer: "gold answer",
 		HaystackSessionIDs: []string{"s1"}, HaystackDates: []string{"2026/07/20 09:00"},
 		HaystackSessions: [][]map[string]any{{

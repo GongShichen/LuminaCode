@@ -71,7 +71,8 @@ func TestJournalCheckpointRestoresTeamWithoutSidecars(t *testing.T) {
 	cfg := config.NewConfigForCWD(filepath.Join(root, "work"))
 	cfg.TeamDir = teamDir
 	cfg.SessionDir = filepath.Join(root, "sessions")
-	manager := NewManager(cfg, nil, nil)
+	engineFactory := &countingQueryEngineFactory{inner: newTestQueryEngineFactory()}
+	manager := NewManager(cfg, engineFactory, nil, nil)
 	manager.UseJournalPersistence(true)
 	session, err := manager.Start("parent", "checkpoint-team", cfg.CWD)
 	if err != nil {
@@ -85,7 +86,7 @@ func TestJournalCheckpointRestoresTeamWithoutSidecars(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(session.rootDir, "team.json")); !os.IsNotExist(err) {
 		t.Fatalf("journal mode wrote a team sidecar: %v", err)
 	}
-	restoredManager := NewManager(cfg, nil, nil)
+	restoredManager := NewManager(cfg, engineFactory, nil, nil)
 	restoredManager.UseJournalPersistence(true)
 	snapshots := restoredManager.RestoreRuntimeCheckpoints("parent", cfg.CWD, []RuntimeCheckpoint{checkpoint})
 	if len(snapshots) != 1 || snapshots[0].LoopIteration != 3 || len(snapshots[0].Dialogue) != 1 || snapshots[0].Dialogue[0].Content != "durable" {
@@ -93,5 +94,8 @@ func TestJournalCheckpointRestoresTeamWithoutSidecars(t *testing.T) {
 	}
 	if _, err := restoredManager.Get(checkpoint.Snapshot.TeamSessionID); err != nil {
 		t.Fatal(err)
+	}
+	if got := engineFactory.count.Load(); got != 2 {
+		t.Fatalf("factory calls across start and restore=%d, want 2", got)
 	}
 }

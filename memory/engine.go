@@ -503,6 +503,12 @@ type RetrievalChannelEncoder interface {
 	EncodeChannels(context.Context, []string, RetrievalEncodingKind) ([]RetrievalEncoding, error)
 }
 
+type RetrievalReranker interface {
+	Model() string
+	Revision() string
+	Rerank(context.Context, string, []string) ([]float64, error)
+}
+
 type SearchRequest struct {
 	Space              string    `json:"space"`
 	Query              string    `json:"query"`
@@ -553,6 +559,8 @@ type SearchDiagnostics struct {
 	ContextExpansionContexts int                         `json:"context_expansion_contexts,omitempty"`
 	ContextExpandedEvents    int                         `json:"context_expanded_events,omitempty"`
 	ContextExpandedSpans     int                         `json:"context_expanded_spans,omitempty"`
+	RerankerCandidates       int                         `json:"reranker_candidates,omitempty"`
+	RerankerModelRevision    string                      `json:"reranker_model_revision,omitempty"`
 	SelectedSourceEvents     []string                    `json:"selected_source_events,omitempty"`
 	SelectedContextIDs       []string                    `json:"selected_context_ids,omitempty"`
 	CandidateSourceEvents    []string                    `json:"candidate_source_events,omitempty"`

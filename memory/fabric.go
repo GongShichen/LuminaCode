@@ -33,6 +33,7 @@ type FabricOptions struct {
 	Adjudicator          ConflictAdjudicator
 	Vectorizer           Vectorizer
 	RetrievalEncoder     RetrievalEncoder
+	Reranker             RetrievalReranker
 	RetrievalSidecarPath string
 	RemoteProcessing     RemoteProcessingPolicy
 	// CompileBatchTokens is the hard estimated token budget for the complete

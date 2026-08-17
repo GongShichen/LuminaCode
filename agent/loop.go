@@ -92,6 +92,7 @@ type CoreExecutionEngine struct {
 	memoryEngine           memory.Engine
 	memoryEngineErr        error
 	memoryEngineRuntimeKey string
+	memoryFactory          MemoryFabricFactory
 	skillRegistry          *skills.SkillRegistry
 	skillDiscovery         *skills.SkillDiscovery
 	skillPersistence       *skills.SkillPersistence
@@ -115,42 +116,35 @@ type permissionDecision struct {
 	toolName string
 }
 
-func NewCoreExecutionEngine(cfg *config.Config) *CoreExecutionEngine {
-	return newCoreExecutionEngine(cfg, nil, false)
+func NewCoreExecutionEngine(cfg config.Config, memoryFactory MemoryFabricFactory) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, memoryFactory, nil, false)
 }
 
 // NewCoreExecutionEngineWithMemoryEngine creates an execution engine with an
 // already-open memory engine. Ownership of memoryEngine transfers to the core
 // engine, which closes it during shutdown.
-func NewCoreExecutionEngineWithMemoryEngine(cfg *config.Config, memoryEngine memory.Engine) *CoreExecutionEngine {
-	return newCoreExecutionEngine(cfg, memoryEngine, true)
+func NewCoreExecutionEngineWithMemoryEngine(cfg config.Config, memoryFactory MemoryFabricFactory, memoryEngine memory.Engine) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, memoryFactory, memoryEngine, true)
 }
 
-func newCoreExecutionEngine(cfg *config.Config, memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
-	if cfg == nil {
-		c := config.GetConfig()
-		cfg = &c
-	}
+func newCoreExecutionEngine(cfg config.Config, memoryFactory MemoryFabricFactory, memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
 	e := &CoreExecutionEngine{
-		Config:        *cfg,
+		Config:        cfg,
 		Registry:      coretools.NewToolRegistry(),
 		TaskRuntime:   NewAgentTaskRuntime(),
 		sessionMemory: sessionmemory.NewManager(),
+		memoryFactory: memoryFactory,
 	}
 	e.RegisterDefaultTools()
 	e.extraction = NewExtractionController(e.Config)
 	if injected {
 		e.memoryEngine = memoryEngine
 		e.memoryEngineRuntimeKey = fabricMemoryRuntimeKey(e.Config)
-		e.extraction.Engine = memoryEngine
+		e.extraction.SetEngine(memoryEngine)
 	} else {
 		e.configureMemoryEngine(context.Background(), e.Config)
 	}
 	return e
-}
-
-func CreateCoreEngine(cfg *config.Config) *CoreExecutionEngine {
-	return NewCoreExecutionEngine(cfg)
 }
 
 func (e *CoreExecutionEngine) RefreshRuntimeConfig(cfg config.Config) {

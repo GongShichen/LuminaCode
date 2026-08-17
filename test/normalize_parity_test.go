@@ -142,7 +142,7 @@ func TestNormalizeMessagesMovesToolResultsImmediatelyAfterToolUseForAnthropic(t 
 func TestBuildMessagesStripsMetadataAndAppliesClaudeRollingCache(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.APIModel = "claude-sonnet-4-6"
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	for i := 0; i < 12; i++ {
 		state.Messages = append(state.Messages, map[string]any{
@@ -169,7 +169,7 @@ func TestBuildMessagesStripsMetadataAndAppliesClaudeRollingCache(t *testing.T) {
 	}
 
 	cfg.APIModel = "gpt-5"
-	nonClaude := agent.NewCoreExecutionEngine(&cfg)
+	nonClaude := newTestCoreExecutionEngine(cfg)
 	state.CacheBreakPoints = mapset.NewSet[int](4)
 	_ = nonClaude.BuildMessages(&state)
 	if state.CacheBreakPoints.Cardinality() != 0 {

@@ -123,6 +123,15 @@ type Config struct {
 	MemoryEmbeddingExecutionTimeout  float64
 	MemoryBGEEnabled                 bool
 	MemoryBGEModelDir                string
+	MemoryBGEProvider                string
+	MemoryBGEAPIKey                  string
+	MemoryBGEBaseURL                 string
+	MemoryBGEModel                   string
+	MemoryRerankerEnabled            bool
+	MemoryRerankerProvider           string
+	MemoryRerankerAPIKey             string
+	MemoryRerankerBaseURL            string
+	MemoryRerankerModel              string
 	MemoryConfigErrors               []string
 
 	SkillsEnabled       bool
@@ -267,6 +276,11 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryEmbeddingExecutionTimeout:  8,
 		MemoryBGEEnabled:                 true,
 		MemoryBGEModelDir:                paths.MemoryModelDir,
+		MemoryBGEProvider:                "local",
+		MemoryBGEModel:                   "BAAI/bge-m3",
+		MemoryRerankerEnabled:            false,
+		MemoryRerankerProvider:           "off",
+		MemoryRerankerModel:              "BAAI/bge-reranker-v2-m3",
 
 		SkillsEnabled:       true,
 		SkillsDir:           filepath.Join(apppaths.ProjectLocalDirName, apppaths.ProjectSkillsDirName),
@@ -296,9 +310,9 @@ func NewConfigForCWD(cwd string) Config {
 	if projectRootErr != nil {
 		cfg.PathErrors = append(cfg.PathErrors, projectRootErr.Error())
 	}
-	applyLuminaDefaults(&cfg, paths.SettingsFile, cwd, resourceDir)
+	applyLuminaDefaults(&cfg, paths.SettingsFile, cwd, resourceDir, true)
 	if projectDefaults := findProjectDefaults(cwd); projectDefaults != "" && filepath.Clean(projectDefaults) != filepath.Clean(paths.SettingsFile) {
-		applyLuminaDefaults(&cfg, projectDefaults, cwd, resourceDir)
+		applyLuminaDefaults(&cfg, projectDefaults, cwd, resourceDir, false)
 	}
 	if err := refreshProjectPaths(&cfg, cwd); err != nil {
 		cfg.PathErrors = append(cfg.PathErrors, err.Error())
@@ -313,13 +327,55 @@ func normalizeMemoryModelConfig(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	// BGE-M3 is the single managed memory model. Legacy enable/model fields are
-	// normalized so an older settings file cannot select a different vector
-	// space or silently disable local memory encoding.
+	// BGE-M3 remains the single local memory model. A remote provider is an
+	// explicit settings.json choice and carries a distinct vector-space identity.
 	cfg.MemoryBGEEnabled = true
 	cfg.MemoryEmbeddingEnabled = true
-	cfg.MemoryEmbeddingModel = "bge-m3"
-	cfg.MemoryEmbeddingModelDir = cfg.MemoryBGEModelDir
+	cfg.MemoryBGEProvider = strings.ToLower(strings.TrimSpace(cfg.MemoryBGEProvider))
+	if cfg.MemoryBGEProvider == "" {
+		cfg.MemoryBGEProvider = "local"
+	}
+	switch cfg.MemoryBGEProvider {
+	case "local":
+		cfg.MemoryEmbeddingModel = "bge-m3"
+		cfg.MemoryEmbeddingModelDir = cfg.MemoryBGEModelDir
+	case "openai_compatible":
+		cfg.MemoryEmbeddingModel = strings.TrimSpace(cfg.MemoryBGEModel)
+		cfg.MemoryEmbeddingModelDir = ""
+		requireRemoteMemoryModelConfig(cfg, "memory_bge", cfg.MemoryBGEAPIKey,
+			cfg.MemoryBGEBaseURL, cfg.MemoryBGEModel)
+	default:
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
+			"memory_bge_provider must be local or openai_compatible")
+	}
+	cfg.MemoryRerankerProvider = strings.ToLower(strings.TrimSpace(cfg.MemoryRerankerProvider))
+	if cfg.MemoryRerankerProvider == "" {
+		cfg.MemoryRerankerProvider = "off"
+	}
+	switch cfg.MemoryRerankerProvider {
+	case "off":
+		cfg.MemoryRerankerEnabled = false
+	case "openai_compatible":
+	default:
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
+			"memory_reranker_provider must be off or openai_compatible")
+	}
+	if cfg.MemoryRerankerEnabled && cfg.MemoryRerankerProvider == "openai_compatible" {
+		requireRemoteMemoryModelConfig(cfg, "memory_reranker", cfg.MemoryRerankerAPIKey,
+			cfg.MemoryRerankerBaseURL, cfg.MemoryRerankerModel)
+	}
+}
+
+func requireRemoteMemoryModelConfig(cfg *Config, prefix, apiKey, baseURL, model string) {
+	if strings.TrimSpace(apiKey) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_api_key is required")
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_base_url is required")
+	}
+	if strings.TrimSpace(model) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_model is required")
+	}
 }
 
 func ReloadDynamicConfig(current Config) Config {
@@ -420,6 +476,15 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryEmbeddingExecutionTimeout = fresh.MemoryEmbeddingExecutionTimeout
 	updated.MemoryBGEEnabled = fresh.MemoryBGEEnabled
 	updated.MemoryBGEModelDir = fresh.MemoryBGEModelDir
+	updated.MemoryBGEProvider = fresh.MemoryBGEProvider
+	updated.MemoryBGEAPIKey = fresh.MemoryBGEAPIKey
+	updated.MemoryBGEBaseURL = fresh.MemoryBGEBaseURL
+	updated.MemoryBGEModel = fresh.MemoryBGEModel
+	updated.MemoryRerankerEnabled = fresh.MemoryRerankerEnabled
+	updated.MemoryRerankerProvider = fresh.MemoryRerankerProvider
+	updated.MemoryRerankerAPIKey = fresh.MemoryRerankerAPIKey
+	updated.MemoryRerankerBaseURL = fresh.MemoryRerankerBaseURL
+	updated.MemoryRerankerModel = fresh.MemoryRerankerModel
 	updated.MemoryConfigErrors = append([]string(nil), fresh.MemoryConfigErrors...)
 	updated.WebSearchEnabled = fresh.WebSearchEnabled
 	updated.WebSearchProvider = fresh.WebSearchProvider
@@ -748,6 +813,15 @@ type luminaDefaults struct {
 	MemoryEmbeddingExecutionTimeout  *float64 `json:"memory_embedding_execution_timeout_seconds"`
 	MemoryBGEEnabled                 *bool    `json:"memory_bge_enabled"`
 	MemoryBGEModelDir                *string  `json:"memory_bge_model_dir"`
+	MemoryBGEProvider                *string  `json:"memory_bge_provider"`
+	MemoryBGEAPIKey                  *string  `json:"memory_bge_api_key"`
+	MemoryBGEBaseURL                 *string  `json:"memory_bge_base_url"`
+	MemoryBGEModel                   *string  `json:"memory_bge_model"`
+	MemoryRerankerEnabled            *bool    `json:"memory_reranker_enabled"`
+	MemoryRerankerProvider           *string  `json:"memory_reranker_provider"`
+	MemoryRerankerAPIKey             *string  `json:"memory_reranker_api_key"`
+	MemoryRerankerBaseURL            *string  `json:"memory_reranker_base_url"`
+	MemoryRerankerModel              *string  `json:"memory_reranker_model"`
 	SkillsEnabled                    *bool    `json:"skills_enabled"`
 	SkillsDir                        *string  `json:"skills_dir"`
 	UserSkillsDir                    *string  `json:"user_skills_dir"`
@@ -776,7 +850,8 @@ func DefaultJSONKeys() []string {
 	return keys
 }
 
-func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir string) {
+func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir string,
+	includeMemoryModelEndpoints bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -1037,6 +1112,35 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.MemoryBGEModelDir != nil && strings.TrimSpace(*defaults.MemoryBGEModelDir) != "" {
 		cfg.MemoryBGEModelDir = expandHome(*defaults.MemoryBGEModelDir)
+	}
+	if includeMemoryModelEndpoints {
+		if defaults.MemoryBGEProvider != nil {
+			cfg.MemoryBGEProvider = strings.TrimSpace(*defaults.MemoryBGEProvider)
+		}
+		if defaults.MemoryBGEAPIKey != nil {
+			cfg.MemoryBGEAPIKey = *defaults.MemoryBGEAPIKey
+		}
+		if defaults.MemoryBGEBaseURL != nil {
+			cfg.MemoryBGEBaseURL = strings.TrimSpace(*defaults.MemoryBGEBaseURL)
+		}
+		if defaults.MemoryBGEModel != nil {
+			cfg.MemoryBGEModel = strings.TrimSpace(*defaults.MemoryBGEModel)
+		}
+		if defaults.MemoryRerankerEnabled != nil {
+			cfg.MemoryRerankerEnabled = *defaults.MemoryRerankerEnabled
+		}
+		if defaults.MemoryRerankerProvider != nil {
+			cfg.MemoryRerankerProvider = strings.TrimSpace(*defaults.MemoryRerankerProvider)
+		}
+		if defaults.MemoryRerankerAPIKey != nil {
+			cfg.MemoryRerankerAPIKey = *defaults.MemoryRerankerAPIKey
+		}
+		if defaults.MemoryRerankerBaseURL != nil {
+			cfg.MemoryRerankerBaseURL = strings.TrimSpace(*defaults.MemoryRerankerBaseURL)
+		}
+		if defaults.MemoryRerankerModel != nil {
+			cfg.MemoryRerankerModel = strings.TrimSpace(*defaults.MemoryRerankerModel)
+		}
 	}
 	if cfg.MemoryContextTargetTokens > cfg.MemoryContextMaxTokens {
 		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,

@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -97,16 +96,16 @@ func shouldCheckpointTeamEvent(eventType string) bool {
 }
 
 type DaemonServer struct {
-	opts        DaemonOptions
-	token       string
-	manager     *SessionManager
-	teamManager *luminateam.Manager
-	httpSrv     *http.Server
-	upgrader    websocket.Upgrader
+	opts          DaemonOptions
+	token         string
+	manager       *SessionManager
+	teamManager   *luminateam.Manager
+	eventHub      *EventHub
+	shutdown      *ShutdownSignal
+	memoryFactory agent.MemoryFabricFactory
+	upgrader      websocket.Upgrader
 
-	mu      sync.Mutex
-	clients map[*wsClient]struct{}
-
+	mu                sync.Mutex
 	activeConnections int
 	emptyIdleChecks   int
 }
@@ -139,20 +138,9 @@ func RunDaemonCLI(args []string) error {
 		if err := cfg.ValidateMemoryConfig(); err != nil {
 			return err
 		}
-	}
-	if cfg.LongTermMemoryEnabled {
-		fabric, err := agent.OpenConfiguredMemoryFabric(context.Background(), cfg, false)
-		if err != nil {
-			return fmt.Errorf("open Memory Fabric: %w", err)
+		if _, err := initializeDaemonMemoryPreflight(context.Background(), cfg); err != nil {
+			return err
 		}
-		if fabric == nil {
-			return errors.New("Memory Fabric is required when long-term memory is enabled")
-		}
-		if _, err := fabric.Doctor(context.Background()); err != nil {
-			_ = fabric.Close()
-			return fmt.Errorf("check Memory Fabric: %w", err)
-		}
-		_ = fabric.Close()
 	}
 	return Serve(context.Background(), DaemonOptions{
 		Host:         *host,
@@ -236,95 +224,12 @@ func RunShutdownCLI(args []string) error {
 }
 
 func Serve(ctx context.Context, opts DaemonOptions) error {
-	if strings.TrimSpace(opts.Host) == "" {
-		opts.Host = "127.0.0.1"
-	}
-	if opts.EndpointPath == "" {
-		opts.EndpointPath = DefaultEndpointPath()
-	}
-	if opts.IdleCheckInterval <= 0 {
-		opts.IdleCheckInterval = 10 * time.Minute
-	}
-	if opts.IdleEmptyChecks <= 0 {
-		opts.IdleEmptyChecks = 2
-	}
-	token, err := randomToken()
+	app, cleanup, err := InitializeDaemonApp(ctx, opts)
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", opts.Host, opts.Port))
-	if err != nil {
-		return err
-	}
-	actualPort := listener.Addr().(*net.TCPAddr).Port
-	server := &DaemonServer{
-		opts:    opts,
-		token:   token,
-		clients: map[*wsClient]struct{}{},
-		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
-			return r.Host == r.URL.Host || strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:")
-		}},
-	}
-	server.manager = NewSessionManager(opts.Config, server.broadcast)
-	server.teamManager = luminateam.NewManager(opts.Config, func(parentSessionID, eventType string, payload any) {
-		if controller, err := server.manager.Get(parentSessionID); err == nil {
-			if teamSessionID := teamSessionIDFromPayload(payload); teamSessionID != "" {
-				if err := controller.AppendTeamEvent(context.Background(), teamSessionID, durableTeamEventType(eventType), payload); err != nil {
-					slog.Warn("append team runtime event", "session_id", parentSessionID, "team_session_id", teamSessionID, "error", err)
-				}
-				if shouldCheckpointTeamEvent(eventType) {
-					if teamSession, getErr := server.teamManager.Get(teamSessionID); getErr == nil {
-						checkpoint := teamSession.ExportRuntimeCheckpoint()
-						if appendErr := controller.AppendTeamEvent(context.Background(), teamSessionID, harness.EventTeamRuntimeCheckpointed, checkpoint); appendErr != nil {
-							slog.Warn("append team runtime checkpoint", "session_id", parentSessionID, "team_session_id", teamSessionID, "error", appendErr)
-						}
-					}
-				}
-			}
-		}
-		server.broadcast(PushEvent{
-			Type:      "event",
-			SessionID: parentSessionID,
-			Seq:       time.Now().UnixNano(),
-			Event: map[string]any{
-				"type":    eventType,
-				"payload": payload,
-			},
-		})
-	}, nil)
-	server.teamManager.UseJournalPersistence(true)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/ws", server.handleWS)
-	mux.HandleFunc("/v1/a2a/ws", server.handleA2AWS)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-	server.httpSrv = &http.Server{Handler: mux}
-	endpoint := EndpointInfo{
-		PID:       os.Getpid(),
-		Host:      opts.Host,
-		Port:      actualPort,
-		AuthToken: token,
-		StartedAt: nowRFC3339(),
-		URL:       fmt.Sprintf("ws://%s:%d/v1/ws", opts.Host, actualPort),
-	}
-	if err := writeEndpoint(opts.EndpointPath, endpoint); err != nil {
-		_ = listener.Close()
-		return err
-	}
-	server.startManagedServices()
-	defer server.shutdownManagedResources()
-	go func() {
-		<-ctx.Done()
-		_ = server.httpSrv.Shutdown(context.Background())
-	}()
-	go server.startIdleHeartbeat(ctx)
-	fmt.Fprintf(os.Stderr, "lumina-backend daemon listening on %s:%d\n", opts.Host, actualPort)
-	err = server.httpSrv.Serve(listener)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
+	defer cleanup()
+	return app.Run(ctx)
 }
 
 func (s *DaemonServer) startManagedServices() {
@@ -335,14 +240,7 @@ func (s *DaemonServer) startManagedServices() {
 	}
 }
 
-func (s *DaemonServer) shutdownManagedResources() {
-	_ = os.Remove(s.opts.EndpointPath)
-	if s.manager != nil {
-		s.manager.Shutdown()
-	}
-	if s.teamManager != nil {
-		s.teamManager.Shutdown()
-	}
+func (s *DaemonServer) stopManagedServices() {
 	if path := s.searxNGScriptPath(); path != "" {
 		if output, err := runManagedScript(path, "stop", s.opts.Config); err != nil {
 			fmt.Fprintf(os.Stderr, "lumina-backend warning: failed to stop managed SearxNG: %v\n%s\n", err, output)
@@ -423,21 +321,19 @@ func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	unregister := s.registerConnection()
 	defer unregister()
 	client := &wsClient{conn: conn}
-	s.mu.Lock()
-	s.clients[client] = struct{}{}
-	s.mu.Unlock()
+	if !s.eventHub.Register(client) {
+		_ = conn.Close()
+		return
+	}
 	defer func() {
 		exitRequested := client.exitWasRequested()
-		s.mu.Lock()
-		delete(s.clients, client)
-		remainingClients := len(s.clients)
-		s.mu.Unlock()
-		_ = conn.Close()
+		remainingClients := s.eventHub.Unregister(client)
+		client.close()
 		if exitRequested && remainingClients == 0 {
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				if s.clientCountExcluding(nil) == 0 {
-					_ = s.httpSrv.Shutdown(context.Background())
+					s.shutdown.Request()
 				}
 			}()
 		}
@@ -503,16 +399,7 @@ func (c *wsClient) exitWasRequested() bool {
 }
 
 func (s *DaemonServer) clientCountExcluding(excluded *wsClient) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	count := 0
-	for client := range s.clients {
-		if client == excluded {
-			continue
-		}
-		count++
-	}
-	return count
+	return s.eventHub.CountExcluding(excluded)
 }
 
 func (s *DaemonServer) registerConnection() func() {
@@ -560,7 +447,7 @@ func (s *DaemonServer) startIdleHeartbeat(ctx context.Context) {
 			s.mu.Unlock()
 			if emptyChecks >= limit {
 				fmt.Fprintf(os.Stderr, "lumina-backend idle heartbeat: no websocket connections for %d consecutive checks; shutting down\n", emptyChecks)
-				_ = s.httpSrv.Shutdown(context.Background())
+				s.shutdown.Request()
 				return
 			}
 		}
@@ -594,7 +481,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 	case "backend.shutdown":
 		go func() {
 			time.Sleep(50 * time.Millisecond)
-			_ = s.httpSrv.Shutdown(context.Background())
+			s.shutdown.Request()
 		}()
 		return map[string]any{"shutting_down": true}, nil
 	case "session.create":
@@ -1140,7 +1027,7 @@ func (s *DaemonServer) openMemoryFabric(ctx context.Context, sessionID string) (
 	if !cfg.UsesMemoryFabric() {
 		return nil, cfg, errors.New("Memory Fabric is required")
 	}
-	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
+	fabric, err := s.memoryFactory.Open(ctx, cfg, false)
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -1192,20 +1079,18 @@ func toRPCError(code string, err error) *RPCError {
 	return &RPCError{Code: code, Message: err.Error()}
 }
 
-func (s *DaemonServer) broadcast(event PushEvent) {
-	s.mu.Lock()
-	clients := make([]*wsClient, 0, len(s.clients))
-	for client := range s.clients {
-		clients = append(clients, client)
-	}
-	s.mu.Unlock()
-	for _, client := range clients {
-		client.write(event)
-	}
-}
-
 func (c *wsClient) write(value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_ = c.conn.WriteJSON(value)
+	if c.conn != nil {
+		_ = c.conn.WriteJSON(value)
+	}
+}
+
+func (c *wsClient) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
 }

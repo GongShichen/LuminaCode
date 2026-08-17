@@ -48,7 +48,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		if err != nil {
 			continue
 		}
-		session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
+		session := NewSession(parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 		session.ID = persisted.ID
 		session.rootDir = root
 		m.mu.Lock()
@@ -121,7 +121,7 @@ func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpo
 		if err != nil {
 			continue
 		}
-		session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
+		session := NewSession(parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 		session.ID = checkpoint.Snapshot.TeamSessionID
 		session.rootDir = teamSessionRoot(cfg, parentSessionID, spec.Name, session.ID)
 		session.persistEnabled = !journalPersistence

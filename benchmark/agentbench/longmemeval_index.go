@@ -111,9 +111,6 @@ type longMemEvalPrepareTimingRecord struct {
 
 var longMemEvalPrepareTimingMu sync.Mutex
 
-type longMemEvalFabricOpener func(context.Context, config.Config, bool,
-	memory.APIUsageObserver) (*memory.Fabric, error)
-
 func recordLongMemEvalPrepareTiming(options RunnerOptions, caseID, stage string, started time.Time, err error) {
 	record := longMemEvalPrepareTimingRecord{Phase: LongMemEvalPhasePrepare, CaseID: caseID, Stage: stage,
 		DurationSeconds: time.Since(started).Seconds(), RecordedAt: time.Now().UTC().Format(time.RFC3339Nano)}
@@ -138,9 +135,6 @@ func normalizeLongMemEvalOptions(options RunnerOptions) RunnerOptions {
 	options.LongMemEvalIndexDir = absoluteLongMemEvalPath(options.LongMemEvalIndexDir)
 	options.LongMemEvalIndexSource = absoluteLongMemEvalPath(options.LongMemEvalIndexSource)
 	options.LongMemEvalPredictions = absoluteLongMemEvalPath(options.LongMemEvalPredictions)
-	if options.longMemEvalFabricOpener == nil {
-		options.longMemEvalFabricOpener = agent.OpenConfiguredMemoryFabricWithUsageObserver
-	}
 	return options
 }
 
@@ -168,10 +162,16 @@ func validateLongMemEvalPhaseOptions(options RunnerOptions) error {
 	}
 	switch options.LongMemEvalPhase {
 	case LongMemEvalPhasePrepare:
+		if options.MemoryFactory == nil {
+			return errors.New("longmemeval prepare requires a memory fabric factory")
+		}
 		if strings.TrimSpace(options.LongMemEvalPredictions) != "" {
 			return errors.New("longmemeval prepare phase does not accept -longmemeval-predictions")
 		}
 	case LongMemEvalPhaseAnswer:
+		if options.LongMemEvalAnswerRunner == nil {
+			return errors.New("longmemeval answer requires an injected answer runner")
+		}
 		if strings.TrimSpace(options.LongMemEvalRunID) == "" {
 			return errors.New("longmemeval answer phase requires -longmemeval-run-id")
 		}
@@ -572,7 +572,7 @@ func prepareLongMemEvalIndexCase(ctx context.Context, options RunnerOptions, dat
 	}
 	recordLongMemEvalPrepareTiming(options, id, "recover_jobs", stageStarted, nil)
 	stageStarted = time.Now()
-	fabric, err := options.longMemEvalFabricOpener(ctx, cfg, false, longMemEvalUsageObserver(options, id))
+	fabric, err := options.MemoryFactory.OpenWithUsageObserver(ctx, cfg, false, longMemEvalUsageObserver(options, id))
 	recordLongMemEvalPrepareTiming(options, id, "open", stageStarted, err)
 	if err != nil {
 		return manifest, err

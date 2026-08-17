@@ -43,6 +43,92 @@ func TestAppRootV2ConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleMemoryModelSettings(t *testing.T) {
+	root := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("LUMINA_APP_ROOT", root)
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	writeConfigFixture(t, filepath.Join(root, "config", "settings.json"), `{
+		"memory_remote_processing":"allow",
+		"memory_bge_provider":"openai_compatible",
+		"memory_bge_api_key":"embedding-key",
+		"memory_bge_base_url":"https://models.example/v1",
+		"memory_bge_model":"BAAI/bge-m3",
+		"memory_reranker_enabled":true,
+		"memory_reranker_provider":"openai_compatible",
+		"memory_reranker_api_key":"reranker-key",
+		"memory_reranker_base_url":"https://rerank.example/v1",
+		"memory_reranker_model":"BAAI/bge-reranker-v2-m3"
+	}`)
+	cfg := NewConfigForCWD(project)
+	if len(cfg.MemoryConfigErrors) != 0 {
+		t.Fatalf("valid remote memory settings were rejected: %v", cfg.MemoryConfigErrors)
+	}
+	if cfg.MemoryBGEProvider != "openai_compatible" || cfg.MemoryBGEAPIKey != "embedding-key" ||
+		cfg.MemoryBGEBaseURL != "https://models.example/v1" || cfg.MemoryBGEModel != "BAAI/bge-m3" ||
+		!cfg.MemoryRerankerEnabled || cfg.MemoryRerankerAPIKey != "reranker-key" ||
+		cfg.MemoryRerankerBaseURL != "https://rerank.example/v1" ||
+		cfg.MemoryRerankerModel != "BAAI/bge-reranker-v2-m3" {
+		t.Fatalf("remote memory settings were not loaded: %+v", cfg)
+	}
+	if cfg.MemoryEmbeddingModel != "BAAI/bge-m3" || cfg.MemoryEmbeddingModelDir != "" {
+		t.Fatalf("legacy embedding view was not normalized for remote BGE: model=%q dir=%q",
+			cfg.MemoryEmbeddingModel, cfg.MemoryEmbeddingModelDir)
+	}
+}
+
+func TestProjectDefaultsCannotOverrideMemoryModelEndpoints(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LUMINA_APP_ROOT", root)
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	writeConfigFixture(t, filepath.Join(root, "config", "settings.json"), `{
+		"memory_bge_provider":"openai_compatible",
+		"memory_bge_api_key":"user-key",
+		"memory_bge_base_url":"https://user.example/v1",
+		"memory_bge_model":"user-model",
+		"memory_reranker_enabled":true,
+		"memory_reranker_provider":"openai_compatible",
+		"memory_reranker_api_key":"user-rerank-key",
+		"memory_reranker_base_url":"https://user-rerank.example/v1",
+		"memory_reranker_model":"user-reranker"
+	}`)
+	writeConfigFixture(t, apppaths.ProjectDefaultsFile(project), `{
+		"memory_bge_provider":"local",
+		"memory_bge_api_key":"project-key",
+		"memory_reranker_enabled":false,
+		"memory_reranker_provider":"off"
+	}`)
+	cfg := NewConfigForCWD(project)
+	if cfg.MemoryBGEProvider != "openai_compatible" || cfg.MemoryBGEAPIKey != "user-key" ||
+		cfg.MemoryBGEBaseURL != "https://user.example/v1" || cfg.MemoryBGEModel != "user-model" ||
+		!cfg.MemoryRerankerEnabled || cfg.MemoryRerankerProvider != "openai_compatible" ||
+		cfg.MemoryRerankerAPIKey != "user-rerank-key" ||
+		cfg.MemoryRerankerBaseURL != "https://user-rerank.example/v1" ||
+		cfg.MemoryRerankerModel != "user-reranker" {
+		t.Fatalf("project defaults overrode settings.json memory endpoints: %+v", cfg)
+	}
+}
+
+func TestRemoteMemoryModelsRequireCompleteEndpointSettings(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LUMINA_APP_ROOT", root)
+	t.Setenv("LUMINA_RESOURCE_ROOT", "")
+	writeConfigFixture(t, filepath.Join(root, "config", "settings.json"), `{
+		"memory_bge_provider":"openai_compatible",
+		"memory_bge_api_key":"",
+		"memory_bge_base_url":"",
+		"memory_bge_model":""
+	}`)
+	cfg := NewConfigForCWD(t.TempDir())
+	if len(cfg.MemoryConfigErrors) != 3 {
+		t.Fatalf("incomplete remote model errors=%v", cfg.MemoryConfigErrors)
+	}
+}
+
 func TestAppPathsRemainStableWhenResourcesAreOverridden(t *testing.T) {
 	root := t.TempDir()
 	resources := filepath.Join(t.TempDir(), "resources")

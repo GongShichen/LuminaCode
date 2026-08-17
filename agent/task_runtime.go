@@ -332,9 +332,10 @@ func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, 
 		cfg: cfg, registry: registry, definition: definition, parentState: &workerState,
 		agentType: agentType, modelOverride: modelOverride, extraContext: workerExtraContext,
 	}
+	result := *record
 	rt.mu.Unlock()
 	go rt.runWorker(childCtx, taskID, prompt)
-	return record
+	return &result
 }
 
 func (rt *AgentTaskRuntime) SendMessage(taskID, scopeID, prompt string) any {

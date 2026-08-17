@@ -78,6 +78,15 @@
   "memory_embedding_execution_timeout_seconds": 8,
   "memory_bge_enabled": true,
   "memory_bge_model_dir": "",
+  "memory_bge_provider": "local",
+  "memory_bge_api_key": "",
+  "memory_bge_base_url": "",
+  "memory_bge_model": "",
+  "memory_reranker_enabled": false,
+  "memory_reranker_provider": "off",
+  "memory_reranker_api_key": "",
+  "memory_reranker_base_url": "",
+  "memory_reranker_model": "",
   "skills_enabled": true,
   "project_root_markers": [
     ".git"

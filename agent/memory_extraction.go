@@ -64,9 +64,21 @@ func NewExtractionController(cfg config.Config, extractionConfig ...ExtractionCo
 	return &ExtractionController{Config: cfg, ExtractionConfig: ec}
 }
 
+func (c *ExtractionController) SetEngine(engine memory.Engine) {
+	c.mu.Lock()
+	c.Engine = engine
+	c.mu.Unlock()
+}
+
+func (c *ExtractionController) engineSnapshot() memory.Engine {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Engine
+}
+
 func (c *ExtractionController) ShouldExtract(state *AgentState) bool {
 	return state != nil && c.Config.LongTermMemoryEnabled && isFabricMemoryBackend(c.Config) &&
-		c.Engine != nil && state.MemoryExtractionCursor < len(state.Messages)
+		c.engineSnapshot() != nil && state.MemoryExtractionCursor < len(state.Messages)
 }
 
 func (c *ExtractionController) Schedule(_ context.Context, state *AgentState, _ string) bool {
@@ -210,7 +222,7 @@ func (c *ExtractionController) ExtractNow(ctx context.Context, state *AgentState
 	if !c.Config.LongTermMemoryEnabled || !isFabricMemoryBackend(c.Config) {
 		return "", errors.New("Memory Fabric is required for semantic extraction")
 	}
-	if c.Engine == nil {
+	if c.engineSnapshot() == nil {
 		return "", errors.New("memory fabric engine is unavailable")
 	}
 	payload := c.incrementalFabricContext(state)
@@ -239,7 +251,8 @@ func (c *ExtractionController) IngestMessages(ctx context.Context, state *AgentS
 }
 
 func (c *ExtractionController) ingestFabricEvents(ctx context.Context, payload *extractionContext) (int, error) {
-	if c.Engine == nil {
+	engine := c.engineSnapshot()
+	if engine == nil {
 		return 0, errors.New("memory fabric engine is unavailable")
 	}
 	events := c.fabricEvents(payload)
@@ -247,7 +260,7 @@ func (c *ExtractionController) ingestFabricEvents(ctx context.Context, payload *
 		c.advanceFabricCursor(payload)
 		return 0, nil
 	}
-	result, err := c.Engine.AppendEvents(ctx, events,
+	result, err := engine.AppendEvents(ctx, events,
 		memory.IngestOptions{SemanticPolicy: memory.SemanticDurableOnly})
 	if result.Durable {
 		c.advanceFabricCursor(payload)
@@ -262,7 +275,8 @@ func (c *ExtractionController) ingestFabricEvents(ctx context.Context, payload *
 }
 
 func (c *ExtractionController) runFabricExtraction(ctx context.Context, payload *extractionContext) (string, error) {
-	if c.Engine == nil {
+	engine := c.engineSnapshot()
+	if engine == nil {
 		return "", errors.New("memory fabric engine is unavailable")
 	}
 	events := c.fabricEvents(payload)
@@ -276,7 +290,7 @@ func (c *ExtractionController) runFabricExtraction(ctx context.Context, payload 
 	if len(sourceIDs) > 0 {
 		policy = memory.SemanticDurableOnly
 	}
-	ingested, ingestErr := c.Engine.AppendEvents(ctx, events, memory.IngestOptions{SemanticPolicy: policy})
+	ingested, ingestErr := engine.AppendEvents(ctx, events, memory.IngestOptions{SemanticPolicy: policy})
 	if !ingested.Durable {
 		if ingestErr != nil {
 			return "", ingestErr
@@ -288,7 +302,7 @@ func (c *ExtractionController) runFabricExtraction(ctx context.Context, payload 
 	semanticStatus := ingested.SemanticStatus
 	var semanticErr error
 	if len(sourceIDs) > 0 {
-		committed, err := c.Engine.Remember(ctx, memory.MemoryRequest{
+		committed, err := engine.Remember(ctx, memory.MemoryRequest{
 			Space: fabricMemorySpace(c.Config), ContextID: payload.SessionID, SourceEventIDs: sourceIDs,
 			Mode: mode, RequireSemantic: true,
 			Instructions: "The user explicitly requested durable semantic memory; preserve scope and correction intent.",

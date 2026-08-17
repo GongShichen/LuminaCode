@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"LuminaCode/agent"
 	"LuminaCode/config"
 )
 
@@ -338,7 +337,7 @@ func TestQueryEngineRefreshRuntimeConfigUpdatesCoreEngine(t *testing.T) {
 	t.Cleanup(func() { config.SetConfig(previous) })
 
 	cfg := config.NewConfigForCWD(workDir)
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	defer engine.Shutdown()
 	if err := os.WriteFile(defaultsPath, []byte(`{
   "api_key": "key-two",

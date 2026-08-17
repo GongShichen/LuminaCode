@@ -13,7 +13,7 @@ func TestTeamSummaryReturnsExpectedFields(t *testing.T) {
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestTeamSummaryFromManagerSession(t *testing.T) {
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)

@@ -24,7 +24,7 @@ type localRetrievalMemoryProbeRunner struct{}
 
 func (localRetrievalMemoryProbeRunner) RunAnswer(ctx context.Context, cfg config.Config, question,
 	sessionID string, queryTime time.Time) AgentRunResult {
-	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
+	fabric, err := agent.NewConfiguredMemoryFabricFactory().Open(ctx, cfg, false)
 	if err != nil {
 		return AgentRunResult{ErrorType: err.Error()}
 	}

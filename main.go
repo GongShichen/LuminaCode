@@ -60,14 +60,12 @@ func runMemoryCLI(args []string) error {
 		return fmt.Errorf("Memory Fabric is required")
 	}
 	ctx := context.Background()
-	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
+	runtime, cleanup, err := initializeMemoryCommandRuntime(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	if fabric == nil {
-		return fmt.Errorf("Memory Fabric is unavailable")
-	}
-	defer fabric.Close()
+	defer cleanup()
+	fabric := runtime.Fabric
 	space := agent.MemoryFabricSpace(cfg)
 	switch args[0] {
 	case "search":
@@ -312,19 +310,14 @@ func run(args []string) error {
 		if err := cfg.ValidateMemoryConfig(); err != nil {
 			return err
 		}
-		fabric, err := agent.OpenConfiguredMemoryFabric(context.Background(), cfg, false)
-		if err != nil {
-			return fmt.Errorf("open Memory Fabric: %w", err)
+		if _, err := initializeMemoryPreflight(context.Background(), cfg); err != nil {
+			return err
 		}
-		if fabric == nil {
-			return fmt.Errorf("Memory Fabric is required")
-		}
-		_ = fabric.Close()
 	}
 
-	store := session.NewStore(cfg.SessionDir)
 	if *listFlag {
-		printSessions(store)
+		runtime := initializeSessionStoreRuntime(SessionStoreOptions{Config: cfg, Mutable: true})
+		printSessions(runtime.Store)
 		return nil
 	}
 	if *storageFlag || *cleanupFlag {
@@ -356,7 +349,13 @@ func run(args []string) error {
 		fmt.Printf("[debug] CWD:     %s\n", cfg.CWD)
 	}
 
-	engine := agent.NewQueryEngine(&cfg)
+	runtime, cleanup, err := initializePromptRuntime(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	engine := runtime.Engine
+	store := runtime.Store
 	sessionID := ""
 	var state *agent.AgentState
 	if *resume != "" {
@@ -403,21 +402,16 @@ func runRuntimeCLI(args []string) error {
 	if _, err := os.Stat(journalPath); err != nil {
 		return fmt.Errorf("runtime journal not found for session %s: %w", *sessionID, err)
 	}
-	journal, err := session.OpenRuntimeJournal(context.Background(), cfg.SessionDir, *sessionID)
+	runtime, cleanup, err := initializeRuntimeInspectionRuntime(context.Background(), RuntimeInspectionOptions{
+		Config: cfg, SessionID: *sessionID,
+	})
 	if err != nil {
 		return err
 	}
-	defer journal.Close()
-	engine := agent.NewQueryEngine(&cfg)
-	defer engine.Shutdown()
-	assembly, err := agent.NewRuntimeAssembly(*sessionID, journal, engine.CoreEngine.Registry)
-	if err != nil {
-		return err
-	}
-	defer assembly.Close()
-	if err := engine.CoreEngine.AttachRuntime(assembly); err != nil {
-		return err
-	}
+	defer cleanup()
+	journal := runtime.Journal
+	engine := runtime.Engine
+	assembly := runtime.Assembly
 	description := assembly.Describe()
 	head, err := journal.Head(context.Background())
 	if err != nil {
@@ -456,10 +450,8 @@ func runSessionCLI(args []string) error {
 		return fmt.Errorf("exactly one of --check, --all, or --status is required")
 	}
 	cfg := config.NewConfig()
-	store := session.NewInspectionStore(cfg.SessionDir)
-	if *all {
-		store = session.NewStore(cfg.SessionDir)
-	}
+	runtime := initializeSessionStoreRuntime(SessionStoreOptions{Config: cfg, Mutable: *all})
+	store := runtime.Store
 	ids := []string{}
 	if strings.TrimSpace(*sessionID) != "" {
 		ids = append(ids, strings.TrimSpace(*sessionID))
@@ -496,7 +488,6 @@ func runSessionCLI(args []string) error {
 }
 
 func runPrompt(ctx context.Context, engine *agent.QueryEngine, prompt string, state *agent.AgentState) error {
-	defer engine.Shutdown()
 	if state == nil {
 		s := agent.NewAgentState()
 		state = &s
@@ -580,7 +571,6 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 	backend := luminaui.NewRendererBackend(engine.Config.UIBackend, os.Stdin, os.Stdout, os.Stderr)
 	configureBackendForEngine(backend, engine)
 	uiRuntime := luminaui.NewUiRuntime(engine, backend)
-	defer engine.Shutdown()
 	defer func() {
 		if uiRuntime != nil {
 			uiRuntime.Shutdown()

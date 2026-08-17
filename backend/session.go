@@ -11,10 +11,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"LuminaCode/agent"
-	"LuminaCode/apppaths"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/config"
 	"LuminaCode/harness"
@@ -30,17 +28,17 @@ import (
 type SessionManager struct {
 	baseConfig config.Config
 	store      *session.Store
-	emit       func(PushEvent)
+	factory    *SessionRuntimeFactory
 
 	mu       sync.Mutex
 	sessions map[string]*SessionController
 }
 
-func NewSessionManager(cfg config.Config, emit func(PushEvent)) *SessionManager {
+func NewSessionManager(cfg config.Config, store *session.Store, factory *SessionRuntimeFactory) *SessionManager {
 	manager := &SessionManager{
 		baseConfig: cfg,
-		store:      session.NewStore(cfg.SessionDir),
-		emit:       emit,
+		store:      store,
+		factory:    factory,
 		sessions:   map[string]*SessionController{},
 	}
 	// Upgrade every discoverable legacy session eagerly. Failures are isolated
@@ -136,54 +134,13 @@ func (m *SessionManager) Shutdown() {
 }
 
 func (m *SessionManager) createWithState(sessionID, cwd string, state *agent.AgentState) (*SessionController, error) {
-	cfg := m.baseConfig
-	if strings.TrimSpace(cwd) != "" && cwd != cfg.CWD {
-		cfg = config.NewConfigForCWD(cwd)
-		applyPinnedDaemonConfig(&cfg, m.baseConfig)
-	}
-	if err := apppaths.EnsureProjectManifest(cfg.ProjectPaths, time.Now()); err != nil {
-		return nil, err
-	}
-	runtimeLoad, err := m.store.OpenRuntime(context.Background(), sessionID)
+	controller, err := m.factory.Create(context.Background(), sessionID, cwd, state)
 	if err != nil {
-		return nil, err
-	}
-	if state == nil {
-		state = runtimeLoad.State
-	}
-	engine := agent.NewQueryEngine(&cfg)
-	if recovery := runtimeLoad.SkillRecovery; recovery != nil && engine.CoreEngine != nil {
-		engine.CoreEngine.ImportSkillRecoverySnapshot(recovery)
-		engine.CoreEngine.MarkSkillHistoryCompacted("main")
-	}
-	if tasks := runtimeLoad.Tasks; len(tasks) > 0 && engine.CoreEngine != nil && engine.CoreEngine.TaskRuntime != nil {
-		engine.CoreEngine.TaskRuntime.ImportSnapshot(tasks)
-	}
-	if engine.CoreEngine != nil {
-		assembly, assemblyErr := agent.NewRuntimeAssembly(sessionID, runtimeLoad.Journal, engine.CoreEngine.Registry)
-		if assemblyErr != nil {
-			_ = runtimeLoad.Journal.Close()
-			return nil, assemblyErr
-		}
-		if attachErr := engine.CoreEngine.AttachRuntime(assembly); attachErr != nil {
-			_ = runtimeLoad.Journal.Close()
-			return nil, attachErr
-		}
-	}
-	controller := NewSessionController(sessionID, cfg, engine, state, m.store, runtimeLoad.Journal, m.emit)
-	messageCount, turnCount := 0, 0
-	if state != nil {
-		messageCount = len(state.Messages)
-		turnCount = state.TurnCount
-	}
-	if err := m.store.UpdateMetaProjection(sessionID, messageCount, turnCount); err != nil {
-		_ = runtimeLoad.Journal.Close()
 		return nil, err
 	}
 	m.mu.Lock()
 	m.sessions[sessionID] = controller
 	m.mu.Unlock()
-	controller.Mount()
 	return controller, nil
 }
 
@@ -234,7 +191,7 @@ type SessionController struct {
 	seq  atomic.Int64
 }
 
-func NewSessionController(sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState, store *session.Store, journal *session.RuntimeJournal, emit func(PushEvent)) *SessionController {
+func NewSessionController(sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState, store *session.Store, journal *session.RuntimeJournal, emit EventEmitter) *SessionController {
 	controller := &SessionController{
 		id:      sessionID,
 		cfg:     cfg,

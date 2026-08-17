@@ -52,6 +52,8 @@ type PushEvent struct {
 	Event           any    `json:"event,omitempty"`
 }
 
+type EventEmitter func(PushEvent)
+
 type SessionSnapshot struct {
 	SessionID         string                `json:"session_id"`
 	Frame             luminaui.RenderFrame  `json:"frame"`

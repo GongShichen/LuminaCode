@@ -9,3 +9,4 @@ memory/localmodel/metalrunner/.swiftpm/
 __pycache__/
 *.pyc
 .ua/.trash-*
+aml/

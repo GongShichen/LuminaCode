@@ -190,7 +190,7 @@ func TestHeadlessAgentRetriesInitialEOFInsideAPIClient(t *testing.T) {
 	cfg.SkillsEnabled = false
 	cfg.LongTermMemoryEnabled = false
 	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model", "api_max_tokens", "mcp_enabled", "skills_enabled", "long_term_memory_enabled")
-	result := agentbench.HeadlessAgentRunner{}.Run(context.Background(), cfg, "hello", "headless-eof")
+	result := agentbench.NewHeadlessAgentRunner(newTestQueryEngineFactory()).Run(context.Background(), cfg, "hello", "headless-eof")
 	if calls.Load() != 2 {
 		t.Fatalf("expected transport retry inside API client, calls=%d", calls.Load())
 	}
@@ -220,7 +220,7 @@ func TestHeadlessAgentDoesNotTreatRecoveredOuterRetryAsFinalError(t *testing.T) 
 	cfg.SkillsEnabled = false
 	cfg.LongTermMemoryEnabled = false
 	config.PinFields(&cfg, "api_key", "api_base_url", "api_type", "api_model", "api_max_tokens", "mcp_enabled", "skills_enabled", "long_term_memory_enabled")
-	result := agentbench.HeadlessAgentRunner{}.Run(context.Background(), cfg, "hello", "headless-outer-retry")
+	result := agentbench.NewHeadlessAgentRunner(newTestQueryEngineFactory()).Run(context.Background(), cfg, "hello", "headless-outer-retry")
 	if calls.Load() != 2 {
 		t.Fatalf("expected outer agent retry, calls=%d", calls.Load())
 	}

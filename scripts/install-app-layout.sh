@@ -66,6 +66,7 @@ cp "$REPO_ROOT/setup-searxng.sh" "$APP_NEW/scripts/setup-searxng.sh"
 cp "$REPO_ROOT/scripts/app-paths.sh" "$APP_NEW/scripts/app-paths.sh"
 cp "$REPO_ROOT/scripts/setup-arxiv-mcp.sh" "$APP_NEW/scripts/setup-arxiv-mcp.sh"
 cp "$REPO_ROOT/scripts/setup-memory-models.sh" "$APP_NEW/scripts/setup-memory-models.sh"
+cp "$REPO_ROOT/scripts/configure-memory-models.mjs" "$APP_NEW/scripts/configure-memory-models.mjs"
 cp "$REPO_ROOT/scripts/install-preflight.sh" "$APP_NEW/scripts/install-preflight.sh"
 cp "$REPO_ROOT/scripts/install.sh" "$APP_NEW/scripts/install.sh"
 cp "$REPO_ROOT/scripts/memory-models.lock" "$APP_NEW/scripts/memory-models.lock"
@@ -75,7 +76,7 @@ rm -f "$APP_NEW/frontend/package-lock.json"
 
 find "$APP_NEW" -type d -exec chmod 0755 '{}' ';'
 find "$APP_NEW" -type f -exec chmod 0644 '{}' ';'
-chmod 0755 "$APP_NEW/scripts/app-paths.sh" "$APP_NEW/scripts/setup-searxng.sh" "$APP_NEW/scripts/setup-arxiv-mcp.sh" "$APP_NEW/scripts/setup-memory-models.sh" "$APP_NEW/scripts/install-preflight.sh" "$APP_NEW/scripts/install.sh"
+chmod 0755 "$APP_NEW/scripts/app-paths.sh" "$APP_NEW/scripts/setup-searxng.sh" "$APP_NEW/scripts/setup-arxiv-mcp.sh" "$APP_NEW/scripts/setup-memory-models.sh" "$APP_NEW/scripts/configure-memory-models.mjs" "$APP_NEW/scripts/install-preflight.sh" "$APP_NEW/scripts/install.sh"
 
 LUMINA_APP_ROOT="$APP_ROOT" "$BACKEND_BIN" shutdown >/dev/null 2>&1 || true
 LUMINA_APP_ROOT="$APP_ROOT" "$BACKEND_BIN" layout migrate \

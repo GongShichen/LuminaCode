@@ -10,13 +10,14 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf de
 PURGE ?= 0
 SKIP_MANAGED_COMPONENTS ?= 0
 SKIP_MEMORY_MODELS ?= 0
+MEMORY_USE_API ?=
 NO_PATH_UPDATE ?= 0
 BUILD_PATH := $(BUILD_DIR)/$(APP_NAME)
 BACKEND_BUILD_PATH := $(BUILD_DIR)/$(BACKEND_NAME)
 INSTALL_PATH := $(INSTALL_DIR)/$(APP_NAME)
 BACKEND_INSTALL_PATH := $(INSTALL_DIR)/$(BACKEND_NAME)
 
-.PHONY: help build install _install-preflight _install-build _install-deploy uninstall purge doctor clean
+.PHONY: help build generate wire-check install _install-preflight _install-build _install-deploy uninstall purge doctor clean
 
 help:
 	@printf '%s\n' \
@@ -24,6 +25,8 @@ help:
 		'' \
 		'Targets:' \
 		'  make build      Build the frontend launcher and Go backend' \
+		'  make generate   Regenerate compile-time dependency wiring' \
+		'  make wire-check Validate providers and committed generated wiring' \
 		'  make install    Install or atomically upgrade AppRoot' \
 		'  make doctor     Inspect the resolved AppRoot and managed components' \
 		'  make uninstall  Remove app/cache/state; preserve config/data/layout.json' \
@@ -33,8 +36,16 @@ help:
 		'Overrides:' \
 		'  make install INSTALL_DIR=/usr/local/bin' \
 		'  make install APP_ROOT=/opt/lumina' \
+		'  make install MEMORY_USE_API=1  Skip the local BGE download and add empty remote API fields to settings.json' \
 		'  make install NO_PATH_UPDATE=1' \
 		'  make uninstall PURGE=1'
+
+generate:
+	$(GO) tool wire gen ./...
+
+wire-check:
+	$(GO) tool wire check ./...
+	$(GO) tool wire diff ./...
 
 build:
 	@mkdir -p "$(BUILD_DIR)"
@@ -72,11 +83,17 @@ _install-preflight:
 	@LUMINA_APP_ROOT="$(APP_ROOT)" \
 		SKIP_MANAGED_COMPONENTS="$(SKIP_MANAGED_COMPONENTS)" \
 		SKIP_MEMORY_MODELS="$(SKIP_MEMORY_MODELS)" \
-		scripts/install-preflight.sh
+		scripts/install-preflight.sh "$(MEMORY_USE_API)"
 
 _install-build:
-	@$(MAKE) build
-	@sh scripts/build-bge-metal.sh
+	@set -eu; \
+	provider="$$(node scripts/configure-memory-models.mjs provider --app-root "$(APP_ROOT)" --use-api "$(MEMORY_USE_API)")"; \
+	if [ "$$provider" = "openai_compatible" ]; then \
+		$(MAKE) build CGO_ENABLED=0; \
+	else \
+		$(MAKE) build; \
+		sh scripts/build-bge-metal.sh; \
+	fi
 
 _install-deploy:
 	@set -eu; \
@@ -94,7 +111,10 @@ _install-deploy:
 	fi; \
 	chmod 0755 scripts/install-app-layout.sh; \
 	chmod 0755 scripts/setup-memory-models.sh; \
+	provider="$$(node scripts/configure-memory-models.mjs provider --app-root "$(APP_ROOT)" --use-api "$(MEMORY_USE_API)")"; \
+	node scripts/configure-memory-models.mjs write --app-root "$(APP_ROOT)" --use-api "$(MEMORY_USE_API)"; \
 	if [ "$(SKIP_MANAGED_COMPONENTS)" = "1" ]; then models_status=skipped; \
+	elif [ "$$provider" = "openai_compatible" ]; then models_status=remote-api; \
 	elif [ "$(SKIP_MEMORY_MODELS)" = "1" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(CURDIR)/$(BACKEND_BUILD_PATH)" LUMINA_BGE_METAL_BIN="$(CURDIR)/tmp/lumina-bge-metal" scripts/setup-memory-models.sh doctor; models_status=verified-preinstalled; \
 	else LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$(CURDIR)/$(BACKEND_BUILD_PATH)" LUMINA_BGE_METAL_BIN="$(CURDIR)/tmp/lumina-bge-metal" scripts/setup-memory-models.sh install; models_status=installed; fi; \
 	NPM="$(NPM)" scripts/install-app-layout.sh "$(APP_ROOT)" "$(CURDIR)/$(BACKEND_BUILD_PATH)" "$(VERSION)"; \
@@ -128,7 +148,11 @@ doctor:
 	if [ ! -x "$$backend" ]; then echo "lumina-backend is not installed or built"; exit 1; fi; \
 	LUMINA_APP_ROOT="$(APP_ROOT)" "$$backend" layout doctor; \
 	if [ -x "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" "$(APP_ROOT)/app/scripts/setup-arxiv-mcp.sh" status; fi; \
-	if [ -x "$(APP_ROOT)/app/scripts/setup-memory-models.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$$backend" "$(APP_ROOT)/app/scripts/setup-memory-models.sh" doctor; fi
+	config_script="$(APP_ROOT)/app/scripts/configure-memory-models.mjs"; \
+	if [ ! -f "$$config_script" ]; then config_script="$(CURDIR)/scripts/configure-memory-models.mjs"; fi; \
+	provider="$$(node "$$config_script" provider --app-root "$(APP_ROOT)")"; \
+	if [ "$$provider" = "openai_compatible" ]; then node "$$config_script" validate --app-root "$(APP_ROOT)"; \
+	elif [ -x "$(APP_ROOT)/app/scripts/setup-memory-models.sh" ]; then LUMINA_APP_ROOT="$(APP_ROOT)" LUMINA_BACKEND_BIN="$$backend" "$(APP_ROOT)/app/scripts/setup-memory-models.sh" doctor; fi
 
 uninstall:
 	@set -eu; \

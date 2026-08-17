@@ -17,7 +17,7 @@ type recordingEventStore struct {
 
 func TestRuntimeAssemblyAttachesIntegrationHooksAndCapabilities(t *testing.T) {
 	cfg := config.NewConfigForCWD(t.TempDir())
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	defer engine.Shutdown()
 	assembly, err := agent.NewRuntimeAssembly("session-1", nil, engine.CoreEngine.Registry)
 	if err != nil {

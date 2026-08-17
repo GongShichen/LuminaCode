@@ -157,7 +157,7 @@ func TestLeaderOnlyTeamCanCompleteWithoutQAGates(t *testing.T) {
 	if _, err := luminateam.NewLoader(cfg).CreateTemplate("Solo Team"); err != nil {
 		t.Fatal(err)
 	}
-	session, err := luminateam.NewManager(cfg, nil, nil).Start("parent-session", "solo-team", workdir)
+	session, err := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "solo-team", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestTeamModeDisablesOrdinarySubagentTools(t *testing.T) {
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +354,7 @@ func TestTeamLeaderMustRecordContractBeforeImplementationDispatch(t *testing.T) 
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +393,7 @@ func TestTeamAgentsInheritAndSyncYoloMode(t *testing.T) {
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
 	cfg.Yolo = true
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +419,7 @@ func TestTeamCompleteAcceptsExistingFileArtifacts(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -460,7 +460,7 @@ func TestTeamCompleteAcceptsArtifactsUnderNamedProjectRoot(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -495,7 +495,7 @@ func TestTeamCompleteRequiresStructuredGateVerdicts(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -518,7 +518,7 @@ func TestTeamCompleteRejectsMissingQAEvidence(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -546,7 +546,7 @@ func TestTeamCompleteRejectsBlockingReviewerFinding(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -573,7 +573,7 @@ func TestProductTeamRejectsNonblockingReviewerNotesWithoutDeferral(t *testing.T)
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestProductTeamAllowsNonblockingReviewerNotesWithDeferral(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -646,7 +646,7 @@ func TestTeamContractUpdateCannotRemoveRequiredChecks(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -689,7 +689,7 @@ func TestTeamQAGateVerdictsMergeEvidence(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -729,7 +729,7 @@ func TestTeamCompletionRejectsQABlockingFinding(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -764,7 +764,7 @@ func TestTeamQAGateVerdictRefreshClearsResolvedFindings(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func TestTeamGateVerdictLatestStatusWins(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	session, err := manager.Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
@@ -886,7 +886,7 @@ func TestTeamAgentsCanSeeExpandedRoleSkills(t *testing.T) {
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := luminateam.NewManager(cfg, nil, nil).Start("parent-session", "product-development", root)
+	session, err := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,7 +920,7 @@ func TestTeamA2ABasicMethodsAndSnapshot(t *testing.T) {
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
 	var events []string
-	manager := luminateam.NewManager(cfg, func(_ string, eventType string, _ any) {
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), func(_ string, eventType string, _ any) {
 		events = append(events, eventType)
 	}, nil)
 	session, err := manager.Start("parent-session", "product-development", root)
@@ -982,7 +982,7 @@ func TestTeamRestorePersistedSessionForResume(t *testing.T) {
 		"id": "art-1", "name": "ipc-contract-backend", "owner": "backend", "summary": "IPC contract", "path": filepath.Join(teamRoot, "artifacts", "art-1.md"), "created_at": "2026-07-06T00:00:00Z",
 	}})
 
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	snapshots := manager.RestorePersistedForParent(parent, root)
 	if len(snapshots) != 1 {
 		t.Fatalf("restored snapshots = %d, want 1", len(snapshots))

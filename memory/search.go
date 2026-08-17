@@ -148,6 +148,9 @@ func (f *Fabric) Search(ctx context.Context, request SearchRequest) (SearchResul
 			hybridDiagnostics.latency["selection"] = time.Since(selectionStarted)
 		}
 		result.Route = append(result.Route, "bge-m3-hybrid", "event-dense-sparse", "ppr", "submodular-evidence")
+		if hybridDiagnostics.rerankerCandidates > 0 {
+			result.Route = append(result.Route, "remote-reranker")
+		}
 		applySidecarDiagnostics(&result.Diagnostics, hybridDiagnostics, f.options.RetrievalEncoder.Revision())
 	}
 	if !bgeEnabled && len(evidence) == 0 {

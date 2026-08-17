@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,6 +168,77 @@ func TestMakeInstallAndUninstallManageMemoryModels(t *testing.T) {
 	}
 	if _, err := os.Stat(modelDir); !os.IsNotExist(err) {
 		t.Fatalf("model directory still exists after uninstall: %s", modelDir)
+	}
+}
+
+func TestMakeInstallCanSelectRemoteMemoryWithoutDownloadingModels(t *testing.T) {
+	repoRoot := repositoryRoot(t)
+	makefile := readRepositoryFile(t, repoRoot, "Makefile")
+	preflight := readRepositoryFile(t, repoRoot, "scripts/install-preflight.sh")
+	layout := readRepositoryFile(t, repoRoot, "scripts/install-app-layout.sh")
+	windows := readRepositoryFile(t, repoRoot, "scripts/install-windows.ps1")
+	for name, content := range map[string]string{
+		"Makefile MEMORY_USE_API":        makefile,
+		"POSIX preflight provider":       preflight,
+		"installed configuration helper": layout,
+		"Windows MemoryUseApi":           windows,
+	} {
+		if !strings.Contains(content, map[string]string{
+			"Makefile MEMORY_USE_API":        "MEMORY_USE_API",
+			"POSIX preflight provider":       "openai_compatible",
+			"installed configuration helper": "configure-memory-models.mjs",
+			"Windows MemoryUseApi":           "MemoryUseApi",
+		}[name]) {
+			t.Fatalf("%s support is missing", name)
+		}
+	}
+	if !strings.Contains(makefile, "models_status=remote-api") ||
+		!strings.Contains(makefile, "build CGO_ENABLED=0") {
+		t.Fatal("remote memory install does not skip native model build/publication")
+	}
+
+	appRoot := t.TempDir()
+	settingsDir := filepath.Join(appRoot, "config")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+		"api_model":"keep-me",
+		"memory_reranker_enabled":true,
+		"memory_reranker_model":"retired-local-model"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("node", filepath.Join(repoRoot, "scripts", "configure-memory-models.mjs"),
+		"write", "--app-root", appRoot, "--use-api", "1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("configure remote memory settings: %v\n%s", err, output)
+	}
+	content, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(content, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["api_model"] != "keep-me" || settings["memory_bge_provider"] != "openai_compatible" ||
+		settings["memory_reranker_provider"] != "openai_compatible" || settings["memory_reranker_enabled"] != false {
+		t.Fatalf("remote memory settings were not merged safely: %#v", settings)
+	}
+	for _, key := range []string{"memory_bge_api_key", "memory_bge_base_url", "memory_bge_model",
+		"memory_reranker_api_key", "memory_reranker_base_url", "memory_reranker_model"} {
+		if value, ok := settings[key]; !ok || value != "" {
+			t.Fatalf("%s should be present and empty, got %#v", key, value)
+		}
+	}
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("settings permissions=%v, want 0600", info.Mode().Perm())
 	}
 }
 

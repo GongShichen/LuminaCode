@@ -33,6 +33,7 @@ type PermissionFunc func(parentSessionID string, payload map[string]any) string
 
 type Manager struct {
 	Config        config.Config
+	engineFactory agent.QueryEngineFactory
 	emit          PushFunc
 	askPermission PermissionFunc
 
@@ -41,8 +42,8 @@ type Manager struct {
 	journalPersistence bool
 }
 
-func NewManager(cfg config.Config, emit PushFunc, ask PermissionFunc) *Manager {
-	return &Manager{Config: cfg, emit: emit, askPermission: ask, sessions: map[string]*Session{}}
+func NewManager(cfg config.Config, engineFactory agent.QueryEngineFactory, emit PushFunc, ask PermissionFunc) *Manager {
+	return &Manager{Config: cfg, engineFactory: engineFactory, emit: emit, askPermission: ask, sessions: map[string]*Session{}}
 }
 
 func (m *Manager) UseJournalPersistence(enabled bool) {
@@ -77,7 +78,7 @@ func (m *Manager) StartWithConfig(parentSessionID, teamName, cwd string, base co
 		}
 		applyPinnedTeamConfig(&cfg, base)
 	}
-	session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
+	session := NewSession(parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 	m.mu.Lock()
 	session.persistEnabled = !m.journalPersistence
 	m.sessions[session.ID] = session
@@ -181,6 +182,7 @@ type Session struct {
 	Config          config.Config
 	Spec            TeamSpec
 
+	engineFactory  agent.QueryEngineFactory
 	emitFn         PushFunc
 	askPermission  PermissionFunc
 	rootDir        string
@@ -232,7 +234,7 @@ type TeamTask struct {
 	done              chan TeamTask
 }
 
-func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit PushFunc, ask PermissionFunc) *Session {
+func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, engineFactory agent.QueryEngineFactory, emit PushFunc, ask PermissionFunc) *Session {
 	id := "team-" + uuid.NewString()
 	root := teamSessionRoot(cfg, parentSessionID, spec.Name, id)
 	session := &Session{
@@ -240,6 +242,7 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 		ParentSessionID: parentSessionID,
 		Config:          cfg,
 		Spec:            spec,
+		engineFactory:   engineFactory,
 		emitFn:          emit,
 		askPermission:   ask,
 		rootDir:         root,
@@ -293,7 +296,7 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	} else {
 		cfg.MaxParentTurns = spec.MaxTurnsPerTask
 	}
-	engine := agent.NewQueryEngine(&cfg)
+	engine := s.engineFactory.Create(cfg)
 	engine.CoreEngine.AgentID = spec.Name
 	engine.CoreEngine.AgentType = spec.Name
 	engine.CoreEngine.TeamName = s.Spec.Name

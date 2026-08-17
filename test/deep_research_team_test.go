@@ -54,7 +54,7 @@ func TestDeepResearchToolAllowlistExcludesShellAndSubagents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := team.NewSession("parent", cfg, spec, nil, nil)
+	session := team.NewSession("parent", cfg, spec, newTestQueryEngineFactory(), nil, nil)
 	names := map[string]struct{}{}
 	for _, name := range session.AgentToolNames("source-reader") {
 		names[name] = struct{}{}

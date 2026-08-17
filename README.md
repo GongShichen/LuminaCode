@@ -375,6 +375,37 @@ hot-read at the next turn.
 compression threshold. LuminaCode does not force provider-side completion
 `max_tokens`. Runtime config is hot-read before each agent turn.
 
+### Remote Memory Models
+
+BGE-M3 embeddings and an optional reranker can use independent remote
+OpenAI-compatible credentials in `<AppRoot>/config/settings.json`:
+
+```json
+{
+  "memory_bge_provider": "openai_compatible",
+  "memory_bge_api_key": "...",
+  "memory_bge_base_url": "https://models.example.com/v1",
+  "memory_bge_model": "BAAI/bge-m3",
+  "memory_reranker_enabled": true,
+  "memory_reranker_provider": "openai_compatible",
+  "memory_reranker_api_key": "...",
+  "memory_reranker_base_url": "https://models.example.com/v1",
+  "memory_reranker_model": "BAAI/bge-reranker-v2-m3"
+}
+```
+
+The embedding service must implement `POST /v1/embeddings` and return
+1024-dimensional float embeddings. The reranker uses an OpenAI-compatible
+rerank extension with `query`, `documents`, and `top_n`; both `/rerank` and
+`/reranks` responses may use `results[].relevance_score` or `data[].score`.
+Alibaba Model Studio `compatible-mode/v1` base URLs are normalized to its
+documented `compatible-api/v1/reranks` endpoint.
+Changing the embedding endpoint or model changes the retrieval fingerprint, so
+derived vectors are rebuilt instead of mixing embedding spaces. API keys are
+never included in that fingerprint or diagnostics.
+These memory-model fields are read only from the user `settings.json`; project
+defaults and environment variables cannot override them.
+
 ## Project Instructions
 
 Read order:
@@ -525,14 +556,25 @@ macOS/Linux:
 make install
 ```
 
+To use remote memory models and skip the local model download:
+
+```sh
+make install MEMORY_USE_API=1
+```
+
+This writes all remote memory fields to `settings.json` with empty credential
+and model values. Fill them after installation. The default local install is
+selected with `MEMORY_USE_API=0`; upgrades reuse the provider already recorded
+in settings when this argument is omitted.
+
 The default install first checks the host hardware, required toolchain, free
 space, and usable execution provider. It then downloads a revision- and
 SHA-256-pinned BGE-M3 profile from ModelScope: MLX INT8 with the managed Metal
 runtime on Apple Silicon, ONNX INT8 for CPU, or ONNX FP16 for a supported
 managed accelerator runtime. It replaces the installed application only after
 the model, tokenizer, linear heads, native runtime, and inference probe pass.
-BGE-M3 is the sole local model for memory writes and retrieval; installation
-fails without a valid model and does not fall back to another embedding space.
+In local mode, installation fails without a valid BGE-M3 model and does not
+fall back to another embedding space.
 `LUMINA_MEMORY_EMBEDDING_DEVICE` selects a device explicitly, while
 `LUMINA_MEMORY_MODEL_VARIANT=metal-int8|cpu-int8|accelerator-fp16` pins a
 packaging profile.
@@ -550,6 +592,9 @@ Windows:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
+
+Pass `-MemoryUseApi` on Windows to select the same remote-memory installation
+mode.
 
 Doctor:
 
@@ -595,6 +640,24 @@ Test:
 go test ./...
 npm --prefix frontend test
 ```
+
+Compile-time dependency wiring is generated with the repository-pinned Wire
+`v0.7.0` tool:
+
+```sh
+make generate
+make wire-check
+# equivalent generation command: go tool wire gen ./...
+```
+
+Commit every `wire.go` injector together with its generated `wire_gen.go`. Run
+`make generate` after changing providers or injector signatures, and run
+`make wire-check` before submitting changes. No global Wire installation is
+required. Because the [upstream Wire repository is archived](https://github.com/google/wire),
+the version remains pinned and CI treats both `wire check` and `wire diff` as
+required consistency checks. Wire owns static application roots; session-,
+team-, and agent-scoped objects whose IDs or working directories are known only
+at runtime are created through the injected factories.
 
 Build:
 

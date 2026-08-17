@@ -333,6 +333,36 @@ Key、错误参数和模型配置错误不会被掩盖；主模型已经输出�
 
 `--max-tokens` 是本地上下文窗口长度，用于统计和 80% 压缩阈值。API 请求不会强制携带供应商侧 completion `max_tokens`。runtime 配置会在每轮 Agent 请求前热读取。
 
+### 远程记忆模型
+
+BGE-M3 embedding 和可选 reranker 可以在 `<AppRoot>/config/settings.json`
+中分别配置 OpenAI-compatible 远程服务：
+
+```json
+{
+  "memory_bge_provider": "openai_compatible",
+  "memory_bge_api_key": "...",
+  "memory_bge_base_url": "https://models.example.com/v1",
+  "memory_bge_model": "BAAI/bge-m3",
+  "memory_reranker_enabled": true,
+  "memory_reranker_provider": "openai_compatible",
+  "memory_reranker_api_key": "...",
+  "memory_reranker_base_url": "https://models.example.com/v1",
+  "memory_reranker_model": "BAAI/bge-reranker-v2-m3"
+}
+```
+
+Embedding 服务需要实现 `POST /v1/embeddings` 并返回 1024 维 float
+向量。Reranker 使用包含 `query`、`documents` 和 `top_n` 的
+OpenAI-compatible rerank 扩展，兼容 `/rerank` 与 `/reranks` 响应中的
+`results[].relevance_score` 或 `data[].score`。阿里云百炼的
+`compatible-mode/v1` Base URL 会自动规范化到其文档指定的
+`compatible-api/v1/reranks`。切换 embedding endpoint
+或 model 会改变检索指纹并重建派生向量，不会混用不同向量空间；API Key
+不会进入指纹或诊断信息。
+这些记忆模型字段只从用户 `settings.json` 读取，项目 defaults 和环境变量不能
+覆盖。
+
 ## 项目说明文件
 
 读取顺序：
@@ -477,12 +507,22 @@ macOS/Linux：
 make install
 ```
 
+使用远程记忆模型并跳过本地模型下载：
+
+```sh
+make install MEMORY_USE_API=1
+```
+
+安装器会把全部远程记忆字段写入 `settings.json`，credential 和 model
+保持为空，安装后由用户填写。`MEMORY_USE_API=0` 选择本地安装；升级时若省略
+该参数，会复用 settings 中已经记录的 provider。
+
 默认安装会先检查本机软硬件、必需工具链、可用空间和推理设备，再从
 ModelScope 下载固定 revision 和 SHA-256 的 BGE-M3 画像：Apple Silicon 使用
 MLX INT8 与受管 Metal runtime，CPU 使用 ONNX INT8，受支持的受管加速器使用
 ONNX FP16。模型、tokenizer、linear heads、原生 runtime 和推理探针全部通过后
-才替换已安装应用。BGE-M3 是记忆写入和检索的唯一一个本地模型；模型无效时
-安装直接失败，不会回退到另一个向量空间。可用
+才替换已安装应用。本地模式下模型无效时安装直接失败，不会回退到另一个向量
+空间。可用
 `LUMINA_MEMORY_EMBEDDING_DEVICE` 显式选择设备，或用
 `LUMINA_MEMORY_MODEL_VARIANT=metal-int8|cpu-int8|accelerator-fp16`
 固定打包画像。
@@ -499,6 +539,8 @@ Windows：
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
+
+Windows 使用 `-MemoryUseApi` 选择相同的远程记忆安装模式。
 
 Doctor：
 
@@ -543,6 +585,21 @@ make purge
 go test ./...
 npm --prefix frontend test
 ```
+
+编译期依赖装配使用仓库固定的 Wire `v0.7.0` 工具生成：
+
+```sh
+make generate
+make wire-check
+# 等价的生成命令：go tool wire gen ./...
+```
+
+每个 `wire.go` Injector 和对应的 `wire_gen.go` 生成文件都需要提交。修改
+Provider 或 Injector 签名后执行 `make generate`，提交前执行
+`make wire-check`；开发机无需全局安装 Wire。由于 [Wire 上游仓库已归档](https://github.com/google/wire)，
+项目保持版本固定，CI 将 `wire check` 和 `wire diff` 作为必须通过的生成一致性
+检查。Wire 只管理静态应用入口，Session、Team 和 Agent 等只能在运行时获知
+ID 或工作目录的对象由注入的 Factory 创建。
 
 构建：
 

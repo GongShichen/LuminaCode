@@ -71,7 +71,7 @@ func TestInvalidMaxTokensAPIErrorIsNotPromptTooLong(t *testing.T) {
 
 func TestAgentErrorEventPreservesAPIStatusMetadata(t *testing.T) {
 	cfg := config.NewConfig()
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	turn := &agent.ModelTurn{}
 	action := engine.HandleStreamEvent(map[string]any{
@@ -200,7 +200,7 @@ func TestCoreQueryLoopOutputTokenEscalationOmitsRequestMaxTokens(t *testing.T) {
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	cfg.LongTermMemoryEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
@@ -311,7 +311,7 @@ func TestCoreQueryLoopTruncatedToolUseExecutesBeforeNextModelTurnLikePython(t *t
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	cfg.LongTermMemoryEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "read file"}}}}
@@ -431,7 +431,7 @@ func TestCoreQueryLoopFatalStreamErrorEventDoesNotRetryLikePython(t *testing.T) 
 	cfg.APIMaxTokens = 256
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
@@ -469,7 +469,7 @@ func TestCoreQueryLoopNonFatalStreamErrorWithoutToolCallsRetriesUntilSuccessLike
 	cfg.APIMaxTokens = 256
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
@@ -509,7 +509,7 @@ func TestCoreQueryLoopParentTurnLimitUsesConfigValueLikePython(t *testing.T) {
 	cfg.MaxParentTurns = 1
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "loop"}}}}
@@ -579,7 +579,7 @@ func TestPTLReactiveCompactUsesContextPipeline(t *testing.T) {
 
 func TestCheckPermissionChainValidatesBeforeCommandRule(t *testing.T) {
 	cfg := config.NewConfig()
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.PermissionState.ConfirmCommandPrefix("go test")
 	needsPermission := engine.CheckPermissionChain(coretools.ToolCall{
@@ -797,7 +797,7 @@ func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *tes
 	cfg.APIMaxTokens = 1000
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{
@@ -854,7 +854,7 @@ func TestCoreQueryLoopProjectsL3RegionsForRequestWithoutRewritingStateLikePython
 	cfg.APIMaxTokens = 1000
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 
@@ -929,7 +929,7 @@ func TestCoreQueryLoopInjectsPendingTaskNotificationsLikePython(t *testing.T) {
 	cfg.SkillsEnabled = false
 	cfg.LongTermMemoryEnabled = false
 
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	workerState := agent.NewAgentState()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	record := engine.TaskRuntime.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &workerState, "desc", "worker prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
@@ -1130,7 +1130,7 @@ func TestPermissionStateCommandRulesRoundTripAndLegacyKey(t *testing.T) {
 
 func TestShellCommandPrefixConfirmationSkipsOnlySafeCommands(t *testing.T) {
 	cfg := config.NewConfig()
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.PermissionState.ConfirmCommandPrefix("go test")
 	tool := engine.Registry.Get("run_shell")
@@ -1194,7 +1194,7 @@ func TestQueryLoopStripsLegacyMemoryIndexContextBeforeRequest(t *testing.T) {
 	cfg.MemoryPath = filepath.Join(dir, "memory-fabric")
 	cfg.APIKey = ""
 	cfg.APIBaseURL = ""
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	t.Cleanup(engine.Shutdown)
 	state := agent.NewAgentState()
 	state.Messages = []map[string]any{
@@ -1255,7 +1255,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	cfg.APIBaseURL = server.URL
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "use skill"}}}}
@@ -1294,7 +1294,7 @@ func TestRuntimeCacheEditLifecycleMatchesPython(t *testing.T) {
 	cfg := config.GetConfig()
 	cfg.APIModel = "claude-sonnet-4"
 	cfg.AnthropicCacheEditsEnabled = true
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	engine.QueueCacheEdits([]agentContext.CacheEdit{
 		agentContext.NewCacheEdit("stale-1", nil),
 		agentContext.NewCacheEdit("missing", nil),
@@ -1335,7 +1335,7 @@ func TestRuntimeCacheEditLifecycleMatchesPython(t *testing.T) {
 	}
 
 	cfg.APIModel = "gpt-5"
-	engine = agent.NewCoreExecutionEngine(&cfg)
+	engine = newTestCoreExecutionEngine(cfg)
 	engine.QueueCacheEdits([]agentContext.CacheEdit{agentContext.NewCacheEdit("stale-2", nil)})
 	options = engine.ConsumeCacheEditsForRequest(map[string]struct{}{"stale-2": {}})
 	if len(options.AnthropicCacheEdits) != 0 || len(engine.CacheEditStateSnapshot().Pending) != 0 {
