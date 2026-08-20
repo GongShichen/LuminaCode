@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { backendBin, ensureBackend, parseLaunchOptions, runBackendPassthrough, shouldPassthrough } from "./backend";
+import { backendBin, ensureBackendConnection, parseLaunchOptions, runBackendPassthrough, shouldPassthrough } from "./backend";
 import { RpcClient } from "./rpc";
 import { LuminaTui } from "./tui";
 
@@ -9,8 +9,8 @@ async function main(): Promise<void> {
     runBackendPassthrough(args);
     return;
   }
-  const ws = await ensureBackend();
-  const rpc = new RpcClient(ws);
+  const connection = await ensureBackendConnection();
+  const rpc = new RpcClient(connection.ws, connection.reconnect);
   await rpc.call("backend.status");
   const tui = new LuminaTui(rpc, parseLaunchOptions(args));
   await tui.start();

@@ -11,6 +11,7 @@ import (
 
 	"LuminaCode/agent"
 	luminaapi "LuminaCode/api"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -79,7 +80,9 @@ func (r *dedicatedLongMemEvalAnswerRunner) RunAnswer(ctx context.Context, cfg co
 	if r == nil || r.memoryFactory == nil {
 		return AgentRunResult{ErrorType: "answer_memory_open_error: memory fabric factory is required"}
 	}
-	fabric, err := r.memoryFactory.Open(ctx, cfg, false)
+	fabric, err := r.memoryFactory.Open(ctx, cfg, agent.MemoryOpenOptions{
+		Identity: cluster.RuntimeIdentity{TenantID: "local", SessionID: sessionID},
+	})
 	if err != nil {
 		return AgentRunResult{ErrorType: "answer_memory_open_error: " + err.Error()}
 	}

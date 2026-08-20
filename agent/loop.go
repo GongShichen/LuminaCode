@@ -15,6 +15,7 @@ import (
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
 	"LuminaCode/apppaths"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/harness"
 	"LuminaCode/mcp"
@@ -93,6 +94,7 @@ type CoreExecutionEngine struct {
 	memoryEngineErr        error
 	memoryEngineRuntimeKey string
 	memoryFactory          MemoryFabricFactory
+	runtimeIdentity        cluster.RuntimeIdentity
 	skillRegistry          *skills.SkillRegistry
 	skillDiscovery         *skills.SkillDiscovery
 	skillPersistence       *skills.SkillPersistence
@@ -116,24 +118,27 @@ type permissionDecision struct {
 	toolName string
 }
 
-func NewCoreExecutionEngine(cfg config.Config, memoryFactory MemoryFabricFactory) *CoreExecutionEngine {
-	return newCoreExecutionEngine(cfg, memoryFactory, nil, false)
+func NewCoreExecutionEngine(cfg config.Config, identity cluster.RuntimeIdentity, memoryFactory MemoryFabricFactory) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, identity, memoryFactory, nil, false)
 }
 
 // NewCoreExecutionEngineWithMemoryEngine creates an execution engine with an
 // already-open memory engine. Ownership of memoryEngine transfers to the core
 // engine, which closes it during shutdown.
-func NewCoreExecutionEngineWithMemoryEngine(cfg config.Config, memoryFactory MemoryFabricFactory, memoryEngine memory.Engine) *CoreExecutionEngine {
-	return newCoreExecutionEngine(cfg, memoryFactory, memoryEngine, true)
+func NewCoreExecutionEngineWithMemoryEngine(cfg config.Config, identity cluster.RuntimeIdentity,
+	memoryFactory MemoryFabricFactory, memoryEngine memory.Engine) *CoreExecutionEngine {
+	return newCoreExecutionEngine(cfg, identity, memoryFactory, memoryEngine, true)
 }
 
-func newCoreExecutionEngine(cfg config.Config, memoryFactory MemoryFabricFactory, memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
+func newCoreExecutionEngine(cfg config.Config, identity cluster.RuntimeIdentity, memoryFactory MemoryFabricFactory,
+	memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
 	e := &CoreExecutionEngine{
-		Config:        cfg,
-		Registry:      coretools.NewToolRegistry(),
-		TaskRuntime:   NewAgentTaskRuntime(),
-		sessionMemory: sessionmemory.NewManager(),
-		memoryFactory: memoryFactory,
+		Config:          cfg,
+		Registry:        coretools.NewToolRegistry(),
+		TaskRuntime:     NewAgentTaskRuntime(),
+		sessionMemory:   sessionmemory.NewManager(),
+		memoryFactory:   memoryFactory,
+		runtimeIdentity: identity,
 	}
 	e.RegisterDefaultTools()
 	e.extraction = NewExtractionController(e.Config)

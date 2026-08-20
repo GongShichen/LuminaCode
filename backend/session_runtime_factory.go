@@ -7,6 +7,7 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/apppaths"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/session"
 )
@@ -15,22 +16,23 @@ import (
 // identity and working directory are only known after an RPC request.
 type SessionRuntimeFactory struct {
 	baseConfig    config.Config
-	store         *session.Store
+	repository    session.SessionRepository
 	engineFactory agent.QueryEngineFactory
 	emit          EventEmitter
-	assemble      func(string, *session.RuntimeJournal, *agent.QueryEngine) (*agent.RuntimeAssembly, error)
+	assemble      func(string, session.RuntimeStore, *agent.QueryEngine) (*agent.RuntimeAssembly, error)
 }
 
-func NewSessionRuntimeFactory(cfg config.Config, store *session.Store, engineFactory agent.QueryEngineFactory, emit EventEmitter) *SessionRuntimeFactory {
+func NewSessionRuntimeFactory(cfg config.Config, repository session.SessionRepository, engineFactory agent.QueryEngineFactory, emit EventEmitter) *SessionRuntimeFactory {
 	return &SessionRuntimeFactory{
-		baseConfig: cfg, store: store, engineFactory: engineFactory, emit: emit,
-		assemble: func(sessionID string, journal *session.RuntimeJournal, engine *agent.QueryEngine) (*agent.RuntimeAssembly, error) {
+		baseConfig: cfg, repository: repository, engineFactory: engineFactory, emit: emit,
+		assemble: func(sessionID string, journal session.RuntimeStore, engine *agent.QueryEngine) (*agent.RuntimeAssembly, error) {
 			return agent.NewRuntimeAssembly(sessionID, journal, engine.CoreEngine.Registry)
 		},
 	}
 }
 
-func (f *SessionRuntimeFactory) Create(ctx context.Context, sessionID, cwd string, state *agent.AgentState) (*SessionController, error) {
+func (f *SessionRuntimeFactory) Create(ctx context.Context, identity cluster.RuntimeIdentity, sessionID, cwd string, state *agent.AgentState,
+	createIfMissing bool) (*SessionController, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -42,12 +44,17 @@ func (f *SessionRuntimeFactory) Create(ctx context.Context, sessionID, cwd strin
 	if err := apppaths.EnsureProjectManifest(cfg.ProjectPaths, time.Now()); err != nil {
 		return nil, err
 	}
-	runtimeLoad, err := f.store.OpenRuntime(ctx, sessionID)
+	tenantID := strings.TrimSpace(identity.TenantID)
+	if tenantID == "" {
+		tenantID = session.LocalTenantID
+	}
+	runtimeLoad, err := f.repository.OpenRuntime(ctx, tenantID, sessionID,
+		session.RuntimeOpenOptions{CreateIfMissing: createIfMissing, FenceToken: identity.FenceToken, CWD: cfg.CWD})
 	if err != nil {
 		return nil, err
 	}
 	journal := runtimeLoad.Journal
-	engine := f.engineFactory.Create(cfg)
+	engine := f.engineFactory.Create(cfg, identity)
 	cleanup := func() {
 		if engine != nil {
 			if engine.CoreEngine != nil && engine.CoreEngine.Runtime != nil {
@@ -81,13 +88,13 @@ func (f *SessionRuntimeFactory) Create(ctx context.Context, sessionID, cwd strin
 			return nil, attachErr
 		}
 	}
-	controller := NewSessionController(sessionID, cfg, engine, state, f.store, journal, f.emit)
+	controller := NewSessionController(identity, sessionID, cfg, engine, state, f.repository, journal, f.emit)
 	messageCount, turnCount := 0, 0
 	if state != nil {
 		messageCount = len(state.Messages)
 		turnCount = state.TurnCount
 	}
-	if err := f.store.UpdateMetaProjection(sessionID, messageCount, turnCount); err != nil {
+	if err := f.repository.UpdateMetaProjection(ctx, tenantID, sessionID, identity.FenceToken, messageCount, turnCount); err != nil {
 		cleanup()
 		return nil, err
 	}

@@ -35,11 +35,11 @@ func initializePromptRuntime(cfg config.Config) (*PromptRuntime, func(), error) 
 
 func initializeMemoryCommandRuntime(ctx context.Context, cfg config.Config) (*MemoryCommandRuntime, func(), error) {
 	configuredMemoryFabricFactory := agent.NewConfiguredMemoryFabricFactory()
-	fabric, cleanup, err := provideMemoryCommandFabric(ctx, cfg, configuredMemoryFabricFactory)
+	fabricEngine, cleanup, err := provideMemoryCommandFabric(ctx, cfg, configuredMemoryFabricFactory)
 	if err != nil {
 		return nil, nil, err
 	}
-	memoryCommandRuntime := newMemoryCommandRuntime(fabric)
+	memoryCommandRuntime := newMemoryCommandRuntime(fabricEngine)
 	return memoryCommandRuntime, func() {
 		cleanup()
 	}, nil
@@ -48,19 +48,19 @@ func initializeMemoryCommandRuntime(ctx context.Context, cfg config.Config) (*Me
 func initializeRuntimeInspectionRuntime(ctx context.Context, opts RuntimeInspectionOptions) (*RuntimeInspectionRuntime, func(), error) {
 	configConfig := provideRuntimeInspectionConfig(opts)
 	mainRuntimeSessionID := provideRuntimeSessionID(opts)
-	runtimeJournal, cleanup, err := provideRuntimeJournal(ctx, configConfig, mainRuntimeSessionID)
+	runtimeStore, cleanup, err := provideRuntimeJournal(ctx, configConfig, mainRuntimeSessionID)
 	if err != nil {
 		return nil, nil, err
 	}
 	configuredMemoryFabricFactory := agent.NewConfiguredMemoryFabricFactory()
 	queryEngine, cleanup2 := providePromptEngine(configConfig, configuredMemoryFabricFactory)
-	runtimeAssembly, err := provideRuntimeAssembly(mainRuntimeSessionID, runtimeJournal, queryEngine)
+	runtimeAssembly, err := provideRuntimeAssembly(mainRuntimeSessionID, runtimeStore, queryEngine)
 	if err != nil {
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
-	runtimeInspectionRuntime := newRuntimeInspectionRuntime(runtimeJournal, queryEngine, runtimeAssembly)
+	runtimeInspectionRuntime := newRuntimeInspectionRuntime(runtimeStore, queryEngine, runtimeAssembly)
 	return runtimeInspectionRuntime, func() {
 		cleanup2()
 		cleanup()

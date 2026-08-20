@@ -37,20 +37,59 @@ func InitializeDaemonApp(ctx context.Context, opts DaemonOptions) (*DaemonApp, f
 	endpointInfo := ProvideEndpointInfo(normalizedDaemonOptions, listener, authToken)
 	configConfig := ProvideDaemonConfig(normalizedDaemonOptions)
 	store := ProvideSessionStore(configConfig)
+	sessionRepository, cleanup2, err := ProvideSessionRepository(ctx, configConfig, store)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 	configuredMemoryFabricFactory := agent.NewConfiguredMemoryFabricFactory()
 	defaultQueryEngineFactory := agent.NewQueryEngineFactory(configuredMemoryFabricFactory)
-	eventHub, cleanup2 := ProvideEventHub()
-	eventEmitter := ProvideEventEmitter(eventHub)
-	sessionRuntimeFactory := NewSessionRuntimeFactory(configConfig, store, defaultQueryEngineFactory, eventEmitter)
-	sessionManager, cleanup3 := ProvideSessionManager(configConfig, store, sessionRuntimeFactory)
-	manager, cleanup4 := ProvideTeamManager(configConfig, defaultQueryEngineFactory, sessionManager, eventEmitter)
+	eventHub, cleanup3 := ProvideEventHub()
+	redisRuntime, cleanup4, err := ProvideRedisRuntime(ctx, configConfig)
+	if err != nil {
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	eventRelay, cleanup5 := NewEventRelay(configConfig, eventHub, redisRuntime)
+	eventEmitter := ProvideEventEmitter(eventRelay)
+	sessionRuntimeFactory := NewSessionRuntimeFactory(configConfig, sessionRepository, defaultQueryEngineFactory, eventEmitter)
+	sessionManager, cleanup6 := ProvideSessionManager(configConfig, sessionRepository, sessionRuntimeFactory)
+	manager, cleanup7 := ProvideTeamManager(configConfig, defaultQueryEngineFactory, sessionManager, eventEmitter)
 	shutdownSignal := NewShutdownSignal()
 	upgrader := ProvideWebSocketUpgrader()
-	daemonServer := NewDaemonServer(normalizedDaemonOptions, authToken, sessionManager, manager, eventHub, shutdownSignal, configuredMemoryFabricFactory, upgrader)
-	handler := ProvideHTTPHandler(daemonServer)
-	server := ProvideHTTPServer(handler)
-	daemonApp := NewDaemonApp(normalizedDaemonOptions, endpointInfo, listener, server, daemonServer, shutdownSignal)
+	clusterRouter := NewClusterRouter(configConfig, redisRuntime, sessionRepository, sessionManager, manager, eventHub)
+	daemonServer := NewDaemonServer(normalizedDaemonOptions, authToken, sessionManager, manager, eventHub, shutdownSignal, configuredMemoryFabricFactory, upgrader, clusterRouter)
+	jwtAuthenticator, err := NewJWTAuthenticator(ctx, configConfig)
+	if err != nil {
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	handler := ProvideHTTPHandler(configConfig, daemonServer, jwtAuthenticator, clusterRouter)
+	hertz := ProvideHertzEngine(configConfig, listener, handler)
+	backendDaemonMemoryPreflight, err := ValidateDaemonMemory(ctx, configConfig, configuredMemoryFabricFactory)
+	if err != nil {
+		cleanup7()
+		cleanup6()
+		cleanup5()
+		cleanup4()
+		cleanup3()
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	daemonApp := NewDaemonApp(normalizedDaemonOptions, endpointInfo, listener, hertz, daemonServer, shutdownSignal, clusterRouter, backendDaemonMemoryPreflight)
 	return daemonApp, func() {
+		cleanup7()
+		cleanup6()
+		cleanup5()
 		cleanup4()
 		cleanup3()
 		cleanup2()

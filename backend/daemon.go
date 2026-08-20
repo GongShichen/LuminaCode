@@ -19,11 +19,13 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/apppaths"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/harness"
 	"LuminaCode/memory"
 	luminateam "LuminaCode/team"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -104,6 +106,7 @@ type DaemonServer struct {
 	shutdown      *ShutdownSignal
 	memoryFactory agent.MemoryFabricFactory
 	upgrader      websocket.Upgrader
+	clusterRouter *ClusterRouter
 
 	mu                sync.Mutex
 	activeConnections int
@@ -115,6 +118,8 @@ type wsClient struct {
 	mu            sync.Mutex
 	sessionID     string
 	exitRequested bool
+	principal     cluster.Principal
+	clusterMode   bool
 }
 
 func RunDaemonCLI(args []string) error {
@@ -138,9 +143,6 @@ func RunDaemonCLI(args []string) error {
 		if err := cfg.ValidateMemoryConfig(); err != nil {
 			return err
 		}
-		if _, err := initializeDaemonMemoryPreflight(context.Background(), cfg); err != nil {
-			return err
-		}
 	}
 	return Serve(context.Background(), DaemonOptions{
 		Host:         *host,
@@ -154,6 +156,11 @@ func RunShutdownCLI(args []string) error {
 	flags := flag.NewFlagSet("shutdown", flag.ContinueOnError)
 	endpointPath := flags.String("endpoint", DefaultEndpointPath(), "daemon endpoint file")
 	timeout := flags.Duration("timeout", 10*time.Second, "shutdown wait timeout")
+	defaultAdminJWT := strings.TrimSpace(os.Getenv("LUMINA_ADMIN_JWT"))
+	if defaultAdminJWT == "" {
+		defaultAdminJWT = strings.TrimSpace(os.Getenv("LUMINA_JWT"))
+	}
+	adminJWT := flags.String("jwt", defaultAdminJWT, "cluster admin JWT")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -173,13 +180,19 @@ func RunShutdownCLI(args []string) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	if endpoint.Port <= 0 || endpoint.AuthToken == "" {
+	if endpoint.Port <= 0 || (endpoint.AuthToken == "" && strings.TrimSpace(*adminJWT) == "") {
 		return fmt.Errorf("invalid backend endpoint file: %s", *endpointPath)
 	}
-	url := fmt.Sprintf("ws://%s:%d/v1/ws?token=%s", host, endpoint.Port, endpoint.AuthToken)
+	url := fmt.Sprintf("ws://%s:%d/v1/ws", host, endpoint.Port)
+	headers := http.Header{}
+	if endpoint.AuthToken != "" {
+		url += "?token=" + endpoint.AuthToken
+	} else {
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(*adminJWT))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, headers)
 	if err != nil {
 		return err
 	}
@@ -188,7 +201,7 @@ func RunShutdownCLI(args []string) error {
 		_ = conn.SetReadDeadline(deadline)
 		_ = conn.SetWriteDeadline(deadline)
 	}
-	req := RPCRequest{ID: "shutdown", Method: "backend.shutdown"}
+	req := RPCRequest{ID: uuid.NewString(), Method: "backend.shutdown"}
 	if err := conn.WriteJSON(req); err != nil {
 		return err
 	}
@@ -233,6 +246,9 @@ func Serve(ctx context.Context, opts DaemonOptions) error {
 }
 
 func (s *DaemonServer) startManagedServices() {
+	if s.opts.Config.UsesClusterRuntime() {
+		return
+	}
 	if path := s.searxNGScriptPath(); path != "" {
 		if output, err := runManagedScript(path, "start", s.opts.Config); err != nil {
 			fmt.Fprintf(os.Stderr, "lumina-backend warning: failed to start managed SearxNG: %v\n%s\n", err, output)
@@ -241,6 +257,9 @@ func (s *DaemonServer) startManagedServices() {
 }
 
 func (s *DaemonServer) stopManagedServices() {
+	if s.opts.Config.UsesClusterRuntime() {
+		return
+	}
 	if path := s.searxNGScriptPath(); path != "" {
 		if output, err := runManagedScript(path, "stop", s.opts.Config); err != nil {
 			fmt.Fprintf(os.Stderr, "lumina-backend warning: failed to stop managed SearxNG: %v\n%s\n", err, output)
@@ -310,8 +329,13 @@ func randomToken() (string, error) {
 }
 
 func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("token") != s.token {
+	principal := PrincipalFromContext(r.Context())
+	if !s.opts.Config.UsesClusterRuntime() && r.URL.Query().Get("token") != s.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.opts.Config.UsesClusterRuntime() && !principal.HasScope("lumina:session:read") {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
@@ -320,7 +344,7 @@ func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	unregister := s.registerConnection()
 	defer unregister()
-	client := &wsClient{conn: conn}
+	client := &wsClient{conn: conn, principal: principal, clusterMode: s.opts.Config.UsesClusterRuntime()}
 	if !s.eventHub.Register(client) {
 		_ = conn.Close()
 		return
@@ -349,8 +373,13 @@ func (s *DaemonServer) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *DaemonServer) handleA2AWS(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("token") != s.token {
+	principal := PrincipalFromContext(r.Context())
+	if !s.opts.Config.UsesClusterRuntime() && r.URL.Query().Get("token") != s.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.opts.Config.UsesClusterRuntime() && !principal.HasScope("lumina:session:write") {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	teamSessionID := r.URL.Query().Get("team_session_id")
@@ -371,7 +400,12 @@ func (s *DaemonServer) handleA2AWS(w http.ResponseWriter, r *http.Request) {
 		if err := conn.ReadJSON(&req); err != nil {
 			return
 		}
-		result, err := s.teamManager.HandleA2A(r.Context(), teamSessionID, agentID, req.Method, req.Params)
+		if s.clusterRouter != nil && s.clusterRouter.Enabled() {
+			response := s.clusterRouter.HandleA2A(r.Context(), principal, req, teamSessionID, agentID)
+			_ = conn.WriteJSON(response)
+			continue
+		}
+		result, err := s.teamManager.HandleA2AFor(r.Context(), principal.TenantID, teamSessionID, agentID, req.Method, req.Params)
 		if err != nil {
 			_ = conn.WriteJSON(RPCResponse{ID: req.ID, OK: false, Error: &RPCError{Code: "a2a_error", Message: err.Error()}})
 			continue
@@ -384,6 +418,19 @@ func (c *wsClient) setSessionID(sessionID string) {
 	c.mu.Lock()
 	c.sessionID = sessionID
 	c.mu.Unlock()
+}
+
+func (c *wsClient) accepts(event PushEvent) bool {
+	if !c.clusterMode {
+		return true
+	}
+	c.mu.Lock()
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if event.TenantID != "" && event.TenantID != c.principal.TenantID {
+		return false
+	}
+	return event.SessionID == "" || (sessionID != "" && event.SessionID == sessionID)
 }
 
 func (c *wsClient) requestExit() {
@@ -455,6 +502,16 @@ func (s *DaemonServer) startIdleHeartbeat(ctx context.Context) {
 }
 
 func (s *DaemonServer) dispatch(ctx context.Context, client *wsClient, req RPCRequest) RPCResponse {
+	if rpcErr := authorizeRPC(client.principal, req.Method); rpcErr != nil {
+		return RPCResponse{ID: req.ID, OK: false, Error: rpcErr}
+	}
+	if s.clusterRouter != nil && s.clusterRouter.Enabled() {
+		return s.clusterRouter.Dispatch(ctx, client, req)
+	}
+	return s.dispatchLocal(ctx, client, req)
+}
+
+func (s *DaemonServer) dispatchLocal(ctx context.Context, client *wsClient, req RPCRequest) RPCResponse {
 	result, rpcErr := s.dispatchResult(ctx, client, req)
 	if rpcErr != nil {
 		return RPCResponse{ID: req.ID, OK: false, Error: rpcErr}
@@ -465,8 +522,9 @@ func (s *DaemonServer) dispatch(ctx context.Context, client *wsClient, req RPCRe
 func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req RPCRequest) (any, *RPCError) {
 	switch req.Method {
 	case "backend.status":
+		draining := s.clusterRouter != nil && s.clusterRouter.Draining()
 		return map[string]any{
-			"protocol_version":     2,
+			"protocol_version":     3,
 			"event_schema_version": 1,
 			"pid":                  os.Getpid(),
 			"model":                s.opts.Config.APIModel,
@@ -477,6 +535,9 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			"idle_check_interval":  s.opts.IdleCheckInterval.String(),
 			"idle_empty_checks":    s.opts.IdleEmptyChecks,
 			"started":              true,
+			"cluster_mode":         s.opts.Config.UsesClusterRuntime(),
+			"instance_id":          s.opts.Config.InstanceID,
+			"draining":             draining,
 		}, nil
 	case "backend.shutdown":
 		go func() {
@@ -486,17 +547,28 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		return map[string]any{"shutting_down": true}, nil
 	case "session.create":
 		var p struct {
-			CWD  string `json:"cwd"`
-			Yolo bool   `json:"yolo"`
+			SessionID string `json:"session_id"`
+			CWD       string `json:"cwd"`
+			Yolo      bool   `json:"yolo"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.manager.Create(p.CWD)
+		identity := dispatchIdentity(ctx)
+		if p.SessionID == "" {
+			p.SessionID = identity.SessionID
+		}
+		var controller *SessionController
+		var err error
+		if p.SessionID != "" {
+			controller, err = s.manager.CreateWithIDFor(client.principal, p.SessionID, p.CWD, identity.FenceToken)
+		} else {
+			controller, err = s.manager.CreateFor(client.principal, p.CWD, identity.FenceToken)
+		}
 		if err != nil {
 			return nil, toRPCError("session_create_failed", err)
 		}
 		if p.Yolo {
 			controller.SetYolo(true)
-			s.teamManager.ApplyParentRuntimeConfig(controller.ID(), controller.RuntimeConfig())
+			s.teamManager.ApplyParentRuntimeConfigFor(client.principal.TenantID, controller.ID(), controller.RuntimeConfig())
 		}
 		client.setSessionID(controller.ID())
 		return controller.Snapshot(), nil
@@ -506,7 +578,8 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			CWD       string `json:"cwd"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.manager.Resume(p.SessionID, p.CWD)
+		identity := dispatchIdentity(ctx)
+		controller, err := s.manager.ResumeFor(client.principal, p.SessionID, p.CWD, identity.FenceToken)
 		if err != nil {
 			return nil, toRPCError("session_resume_failed", err)
 		}
@@ -517,13 +590,13 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			return nil, toRPCError("session_resume_failed", checkpointErr)
 		}
 		if len(checkpoints) > 0 {
-			snapshot.Teams = s.teamManager.RestoreRuntimeCheckpoints(controller.ID(), p.CWD, checkpoints)
+			snapshot.Teams = s.teamManager.RestoreRuntimeCheckpointsWithIdentity(controller.RuntimeIdentity(), p.CWD, checkpoints)
 		} else {
 			// One-time compatibility import. The first subsequent Team mutation
 			// writes a lossless journal checkpoint; no new sidecar is created.
-			snapshot.Teams = s.teamManager.RestorePersistedForParent(controller.ID(), p.CWD)
+			snapshot.Teams = s.teamManager.RestorePersistedForParentFor(client.principal.TenantID, controller.ID(), p.CWD)
 			for _, restored := range snapshot.Teams {
-				if teamSession, getErr := s.teamManager.Get(restored.TeamSessionID); getErr == nil {
+				if teamSession, getErr := s.teamManager.GetFor(client.principal.TenantID, restored.TeamSessionID); getErr == nil {
 					if appendErr := controller.AppendTeamEvent(context.Background(), restored.TeamSessionID, harness.EventTeamRuntimeCheckpointed, teamSession.ExportRuntimeCheckpoint()); appendErr != nil {
 						slog.Warn("import legacy team checkpoint", "session_id", controller.ID(), "team_session_id", restored.TeamSessionID, "error", appendErr)
 					}
@@ -532,9 +605,9 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		return snapshot, nil
 	case "session.list":
-		return s.manager.List(), nil
+		return s.manager.ListFor(client.principal), nil
 	case "session.snapshot":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -547,17 +620,13 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			Limit     int    `json:"limit"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.manager.Get(p.SessionID)
-		if err != nil {
-			return nil, toRPCError("session_not_found", err)
-		}
-		page, err := controller.Events(ctx, p.AfterSeq, p.Limit)
+		page, err := s.manager.EventsFor(ctx, client.principal, p.SessionID, p.AfterSeq, p.Limit)
 		if err != nil {
 			return nil, toRPCError("session_events_failed", err)
 		}
 		return page, nil
 	case "runtime.describe":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -569,7 +638,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			CommandID string `json:"command_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.manager.Get(p.SessionID)
+		controller, err := s.manager.GetFor(client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("session_not_found", err)
 		}
@@ -599,14 +668,14 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			"shutdown_after_disconnect": otherClients == 0,
 		}, nil
 	case "session.abort":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		controller.Abort()
 		return map[string]any{"aborted": true}, nil
 	case "session.save":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -615,31 +684,31 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		return map[string]any{"saved": true}, nil
 	case "session.clear":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		controller.Clear()
 		return controller.Snapshot(), nil
 	case "session.compact":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		return controller.Compact(), nil
 	case "session.tokens":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		return controller.Tokens(), nil
 	case "session.yolo":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		result := controller.ToggleYolo()
-		s.teamManager.ApplyParentRuntimeConfig(controller.ID(), controller.RuntimeConfig())
+		s.teamManager.ApplyParentRuntimeConfigFor(client.principal.TenantID, controller.ID(), controller.RuntimeConfig())
 		return result, nil
 	case "session.pin":
 		var p struct {
@@ -650,13 +719,13 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		if strings.TrimSpace(p.SessionID) == "" {
 			return nil, &RPCError{Code: "session_id_required", Message: "session_id is required"}
 		}
-		meta, err := s.manager.Pin(p.SessionID, p.Pinned)
+		meta, err := s.manager.PinFor(client.principal, p.SessionID, p.Pinned)
 		if err != nil {
 			return nil, toRPCError("session_pin_failed", err)
 		}
 		return meta, nil
 	case "storage.status":
-		report, err := s.manager.StorageStatus()
+		report, err := s.manager.StorageStatusFor(client.principal)
 		if err != nil {
 			return nil, toRPCError("storage_status_failed", err)
 		}
@@ -691,10 +760,14 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		decodeParams(req.Params, &p)
 		base := s.opts.Config
-		if parent, err := s.manager.Get(p.SessionID); err == nil {
+		if parent, err := s.manager.GetFor(client.principal, p.SessionID); err == nil {
 			base = parent.RuntimeConfig()
 		}
-		controller, err := s.teamManager.StartWithConfig(p.SessionID, p.TeamName, p.CWD, base)
+		identity := cluster.RuntimeIdentity{TenantID: client.principal.TenantID, SessionID: p.SessionID}
+		if parent, getErr := s.manager.GetFor(client.principal, p.SessionID); getErr == nil {
+			identity = parent.RuntimeIdentity()
+		}
+		controller, err := s.teamManager.StartWithRuntimeIdentity(identity, p.TeamName, p.CWD, base)
 		if err != nil {
 			return nil, toRPCError("team_start_failed", err)
 		}
@@ -703,9 +776,10 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		var p struct {
 			TeamSessionID string `json:"team_session_id"`
 			Input         string `json:"input"`
+			CommandID     string `json:"command_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -724,7 +798,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		decodeParams(req.Params, &p)
 		if p.Abort {
-			s.teamManager.Abort(p.TeamSessionID)
+			s.teamManager.AbortFor(client.principal.TenantID, p.TeamSessionID)
 		}
 		return map[string]any{"team_mode": false, "team_session_id": p.TeamSessionID}, nil
 	case "team.abort":
@@ -732,14 +806,14 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		ok := s.teamManager.Abort(p.TeamSessionID)
+		ok := s.teamManager.AbortFor(client.principal.TenantID, p.TeamSessionID)
 		return map[string]any{"aborted": ok}, nil
 	case "team.snapshot", "team.status":
 		var p struct {
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -749,7 +823,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -759,7 +833,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -769,7 +843,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -779,7 +853,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			TeamSessionID string `json:"team_session_id"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -792,7 +866,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			Name          string `json:"name"`
 		}
 		decodeParams(req.Params, &p)
-		controller, err := s.teamManager.Get(p.TeamSessionID)
+		controller, err := s.teamManager.GetFor(client.principal.TenantID, p.TeamSessionID)
 		if err != nil {
 			return nil, toRPCError("team_session_not_found", err)
 		}
@@ -811,7 +885,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			IncludeDiagnostics bool   `json:"include_diagnostics"`
 		}
 		decodeParams(req.Params, &p)
-		fabric, cfg, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, cfg, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -843,7 +917,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			memory.MemoryRequest
 		}
 		decodeParams(req.Params, &p)
-		fabric, cfg, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, cfg, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -873,7 +947,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		if p.MemoryID != "" {
 			p.MemoryIDs = append(p.MemoryIDs, p.MemoryID)
 		}
-		fabric, cfg, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, cfg, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -896,7 +970,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			SessionID string `json:"session_id"`
 		}
 		decodeParams(req.Params, &p)
-		fabric, _, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, _, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -913,7 +987,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			Label     string `json:"label"`
 		}
 		decodeParams(req.Params, &p)
-		fabric, cfg, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, cfg, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -934,7 +1008,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 			SlotIDs     []string `json:"slot_ids"`
 		}
 		decodeParams(req.Params, &p)
-		fabric, cfg, err := s.openMemoryFabric(ctx, p.SessionID)
+		fabric, cfg, err := s.openMemoryFabric(ctx, client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("memory_fabric_open_failed", err)
 		}
@@ -953,13 +1027,13 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		return nil, &RPCError{Code: "memory_operation_removed",
 			Message: req.Method + " belonged to the retired memory store; use Memory Fabric search/remember/forget/doctor APIs"}
 	case "slash.list":
-		controller, rpcErr := s.optionalController(req.Params)
+		controller, rpcErr := s.optionalController(client.principal, req.Params)
 		if rpcErr != nil || controller == nil {
 			return map[string]any{"items": []any{}, "rows": []any{}}, nil
 		}
 		return map[string]any{"items": controller.SlashItems(), "rows": controller.SlashRows()}, nil
 	case "skills.list":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -972,7 +1046,7 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		decodeParams(req.Params, &p)
 		return map[string]any{"text": "/" + strings.TrimPrefix(p.Name, "/") + " "}, nil
 	case "mcp.list":
-		controller, rpcErr := s.controllerFromParams(req.Params)
+		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -986,16 +1060,16 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		}
 		decodeParams(req.Params, &p)
 		if strings.TrimSpace(p.TeamSessionID) != "" {
-			ok := s.teamManager.ResolvePermission(p.RequestID, p.Decision)
+			ok := s.teamManager.ResolvePermissionFor(client.principal.TenantID, p.RequestID, p.Decision)
 			return map[string]any{"resolved": ok}, nil
 		}
-		controller, err := s.manager.Get(p.SessionID)
+		controller, err := s.manager.GetFor(client.principal, p.SessionID)
 		if err != nil {
 			return nil, toRPCError("session_not_found", err)
 		}
 		ok := controller.ResolvePermission(p.RequestID, p.Decision)
 		if !ok {
-			ok = s.teamManager.ResolvePermission(p.RequestID, p.Decision)
+			ok = s.teamManager.ResolvePermissionFor(client.principal.TenantID, p.RequestID, p.Decision)
 		}
 		return map[string]any{"resolved": ok}, nil
 	default:
@@ -1003,8 +1077,8 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 	}
 }
 
-func (s *DaemonServer) controllerFromParams(raw json.RawMessage) (*SessionController, *RPCError) {
-	controller, rpcErr := s.optionalController(raw)
+func (s *DaemonServer) controllerFromParams(principal cluster.Principal, raw json.RawMessage) (*SessionController, *RPCError) {
+	controller, rpcErr := s.optionalController(principal, raw)
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -1014,11 +1088,19 @@ func (s *DaemonServer) controllerFromParams(raw json.RawMessage) (*SessionContro
 	return controller, nil
 }
 
-func (s *DaemonServer) openMemoryFabric(ctx context.Context, sessionID string) (*memory.Fabric, config.Config, error) {
+func (s *DaemonServer) openMemoryFabric(ctx context.Context, principal cluster.Principal,
+	sessionID string) (memory.FabricEngine, config.Config, error) {
 	cfg := s.opts.Config
+	identity := cluster.RuntimeIdentity{TenantID: principal.TenantID, Subject: principal.Subject,
+		InstanceID: cfg.InstanceID, SessionID: sessionID}
 	if strings.TrimSpace(sessionID) != "" {
-		if controller, err := s.manager.Get(sessionID); err == nil && controller != nil {
+		if controller, err := s.manager.GetFor(principal, sessionID); err == nil && controller != nil {
 			cfg = controller.RuntimeConfig()
+			identity = controller.RuntimeIdentity()
+		} else if info, infoErr := s.manager.RuntimeInfoFor(ctx, principal, sessionID); infoErr == nil &&
+			strings.TrimSpace(info.CWD) != "" {
+			cfg = config.NewConfigForCWD(info.CWD)
+			applyPinnedDaemonConfig(&cfg, s.opts.Config)
 		}
 	}
 	if !cfg.LongTermMemoryEnabled {
@@ -1027,7 +1109,8 @@ func (s *DaemonServer) openMemoryFabric(ctx context.Context, sessionID string) (
 	if !cfg.UsesMemoryFabric() {
 		return nil, cfg, errors.New("Memory Fabric is required")
 	}
-	fabric, err := s.memoryFactory.Open(ctx, cfg, false)
+	identity.ProjectID = agent.MemoryFabricSpace(cfg)
+	fabric, err := s.memoryFactory.Open(ctx, cfg, agent.MemoryOpenOptions{Identity: identity})
 	if err != nil {
 		return nil, cfg, err
 	}
@@ -1050,7 +1133,7 @@ func parseMemoryReferenceTime(text string) time.Time {
 	return time.Time{}
 }
 
-func (s *DaemonServer) optionalController(raw json.RawMessage) (*SessionController, *RPCError) {
+func (s *DaemonServer) optionalController(principal cluster.Principal, raw json.RawMessage) (*SessionController, *RPCError) {
 	var p struct {
 		SessionID string `json:"session_id"`
 	}
@@ -1058,7 +1141,7 @@ func (s *DaemonServer) optionalController(raw json.RawMessage) (*SessionControll
 	if p.SessionID == "" {
 		return nil, nil
 	}
-	controller, err := s.manager.Get(p.SessionID)
+	controller, err := s.manager.GetFor(principal, p.SessionID)
 	if err != nil {
 		return nil, toRPCError("session_not_found", err)
 	}

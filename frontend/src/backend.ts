@@ -7,6 +7,11 @@ import type { LaunchOptions } from "./types";
 import { backendLogPath, endpointPath } from "./paths";
 import { delay } from "./utils";
 
+export interface BackendConnection {
+  ws: WebSocket;
+  reconnect: () => Promise<WebSocket>;
+}
+
 export function parseLaunchOptions(args: string[]): LaunchOptions {
   let cwd = process.cwd();
   let resumeSessionID: string | undefined;
@@ -79,11 +84,22 @@ export function runBackendPassthrough(args: string[]): void {
 }
 
 export async function ensureBackend(): Promise<WebSocket> {
+	return (await ensureBackendConnection()).ws;
+}
+
+export async function ensureBackendConnection(): Promise<BackendConnection> {
+  const configuredURL = process.env.LUMINA_BACKEND_URL?.trim();
+  if (configuredURL) {
+    const reconnect = () => connectURL(normalizeBackendURL(configuredURL), 5_000);
+    return { ws: await reconnect(), reconnect };
+  }
   const existing = readEndpoint();
-  if (existing?.port && existing?.auth_token) {
+	if (existing?.port && (existing?.auth_token || bearerToken())) {
     try {
-      return await connectEndpoint(existing);
-    } catch {
+	  const reconnect = () => connectPreferredLocalEndpoint();
+	  return { ws: await connectEndpoint(existing), reconnect };
+    } catch (err) {
+	  if (!existing.auth_token) throw err;
       // Fall through and start a fresh backend.
     }
   }
@@ -108,16 +124,23 @@ export async function ensureBackend(): Promise<WebSocket> {
   for (let i = 0; i < 80; i += 1) {
     await delay(100);
     const info = readEndpoint();
-    if (!info?.port || !info?.auth_token) continue;
+	if (!info?.port || (!info?.auth_token && !bearerToken())) continue;
     const stat = fs.statSync(endpointPath());
     if (stat.mtimeMs + 500 < before) continue;
     try {
-      return await connectEndpoint(info, 1200);
+	  const reconnect = () => connectPreferredLocalEndpoint();
+	  return { ws: await connectEndpoint(info, 1200), reconnect };
     } catch {
       // Keep polling.
     }
   }
   throw new Error("Unable to start lumina-backend daemon");
+}
+
+async function connectPreferredLocalEndpoint(): Promise<WebSocket> {
+  const info = readEndpoint();
+	if (!info?.port || (!info?.auth_token && !bearerToken())) throw new Error("backend endpoint is unavailable");
+  return connectEndpoint(info, 1_200);
 }
 
 function readEndpoint(): any | null {
@@ -129,9 +152,15 @@ function readEndpoint(): any | null {
 }
 
 function connectEndpoint(info: any, timeoutMs = 700): Promise<WebSocket> {
+	let url = `ws://${info.host || "127.0.0.1"}:${info.port}/v1/ws`;
+	if (info.auth_token) url += `?token=${encodeURIComponent(info.auth_token)}`;
+	return connectURL(url, timeoutMs);
+}
+
+function connectURL(url: string, timeoutMs: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const url = `ws://${info.host || "127.0.0.1"}:${info.port}/v1/ws?token=${encodeURIComponent(info.auth_token)}`;
-    const ws = new WebSocket(url);
+	const token = bearerToken();
+	const ws = new WebSocket(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
     const timer = setTimeout(() => {
       ws.close();
       reject(new Error("connect timeout"));
@@ -145,4 +174,19 @@ function connectEndpoint(info: any, timeoutMs = 700): Promise<WebSocket> {
       reject(err);
     });
   });
+}
+
+function bearerToken(): string | undefined {
+	return process.env.LUMINA_JWT?.trim() || process.env.LUMINA_ACCESS_TOKEN?.trim();
+}
+
+function normalizeBackendURL(value: string): string {
+  const parsed = new URL(value);
+  if (parsed.protocol === "http:") parsed.protocol = "ws:";
+  if (parsed.protocol === "https:") parsed.protocol = "wss:";
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error("LUMINA_BACKEND_URL must use http(s) or ws(s)");
+  }
+  if (!parsed.pathname || parsed.pathname === "/") parsed.pathname = "/v1/ws";
+  return parsed.toString();
 }

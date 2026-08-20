@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 )
 
@@ -33,7 +34,7 @@ func (r *HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prom
 	previousConfig := config.GetConfig()
 	config.SetConfig(cfg)
 	defer config.SetConfig(previousConfig)
-	engine := r.engineFactory.Create(cfg)
+	engine := r.engineFactory.Create(cfg, cluster.RuntimeIdentity{TenantID: "local", SessionID: sessionID})
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.MemoryQueryTime = queryTime

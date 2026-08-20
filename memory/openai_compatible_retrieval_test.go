@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,57 @@ func TestOpenAICompatibleRetrievalEncoderUsesEmbeddingContract(t *testing.T) {
 	}
 	if len(encoded[0].Sparse) != 0 || len(encoded[0].Multi) != 0 {
 		t.Fatalf("OpenAI embedding endpoint should provide dense channels only: %+v", encoded[0])
+	}
+}
+
+func TestOpenAICompatibleRetrievalEncoderBatchesProviderRequests(t *testing.T) {
+	var calls atomic.Int32
+	var largest atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		calls.Add(1)
+		for {
+			current := largest.Load()
+			if int32(len(request.Input)) <= current || largest.CompareAndSwap(current, int32(len(request.Input))) {
+				break
+			}
+		}
+		data := make([]map[string]any, len(request.Input))
+		for index := range request.Input {
+			vector := make([]float32, openAICompatibleBGEDimensions)
+			vector[0] = 1
+			data[index] = map[string]any{"index": index, "embedding": vector}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+	encoder, err := NewOpenAICompatibleRetrievalEncoder(OpenAICompatibleModelOptions{
+		APIKey: "secret", BaseURL: server.URL, Model: "BAAI/bge-m3", HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := make([]string, remoteRetrievalBatchSize*2+5)
+	for index := range texts {
+		texts[index] = fmt.Sprintf("document %d", index)
+	}
+	encoded, err := encoder.EncodeChannels(context.Background(), texts, RetrievalDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != len(texts) {
+		t.Fatalf("encoded=%d, want %d", len(encoded), len(texts))
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("provider calls=%d, want 3", got)
+	}
+	if got := largest.Load(); got != remoteRetrievalBatchSize {
+		t.Fatalf("largest provider batch=%d, want %d", got, remoteRetrievalBatchSize)
 	}
 }
 

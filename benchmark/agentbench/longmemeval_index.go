@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -572,7 +573,10 @@ func prepareLongMemEvalIndexCase(ctx context.Context, options RunnerOptions, dat
 	}
 	recordLongMemEvalPrepareTiming(options, id, "recover_jobs", stageStarted, nil)
 	stageStarted = time.Now()
-	fabric, err := options.MemoryFactory.OpenWithUsageObserver(ctx, cfg, false, longMemEvalUsageObserver(options, id))
+	fabric, err := options.MemoryFactory.Open(ctx, cfg, agent.MemoryOpenOptions{
+		Identity:      cluster.RuntimeIdentity{TenantID: "local", SessionID: id},
+		UsageObserver: longMemEvalUsageObserver(options, id),
+	})
 	recordLongMemEvalPrepareTiming(options, id, "open", stageStarted, err)
 	if err != nil {
 		return manifest, err
@@ -836,7 +840,7 @@ func longMemEvalEmbeddingModel(cfg config.Config) string {
 	return strings.TrimSpace(cfg.MemoryEmbeddingModel)
 }
 
-func ingestLongMemEvalFabricHistory(ctx context.Context, fabric *memory.Fabric, cfg config.Config,
+func ingestLongMemEvalFabricHistory(ctx context.Context, fabric memory.FabricEngine, cfg config.Config,
 	c longMemEvalCase) (int, int, error) {
 	space := agent.MemoryFabricSpace(cfg)
 	allEvents, contexts, expectedEvents := buildLongMemEvalFabricHistory(c, space)

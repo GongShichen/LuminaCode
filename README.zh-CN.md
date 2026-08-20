@@ -47,7 +47,7 @@ Runtime 通过 typed capability 和确定性 hook 组装。Memory preparation、
 context、MCP 注册、context compilation、model response、权限、工具和 sub-agent
 共享同一个 session scope，不依赖 TUI 才能工作。
 
-WebSocket protocol v2 会推送带 journal sequence 的 durable event。TUI 发现
+WebSocket protocol v3 会推送带 journal sequence 的 durable event。TUI 发现
 序号缺口时，会先调用 `session.events` 拉取并 reduce 缺失事件，再处理实时事件。
 Submit command 带幂等 key，因此断线重试会返回原结果，不会启动重复 run。
 
@@ -56,9 +56,64 @@ Task 状态由 lifecycle event 重建，Team child stream 使用无损 runtime
 checkpoint。旧 JSON/JSONL session 文件和 Team sidecar 会在备份后一次性导入；
 新 session 不再生成这些 sidecar。
 
+### 多进程、多实例集群模式
+
+`local` 仍是默认模式，继续使用上面的 SQLite journal。`cluster` 是显式且
+fail-closed 的运行模式：
+
+- PostgreSQL 是 Session stream、event、checkpoint、command result、blob、
+  consumer offset、Team checkpoint 和 Memory Fabric 的耐久事实源。
+- Redis 保存带 TTL 的实例注册与 Session lease、单调递增 fencing token、
+  Redis Streams RPC 和实时事件提示；Pub/Sub 永远不是事实源。
+- 任意 Hertz gateway 都能接受 WebSocket，并透明转发到 Session owner。
+  Team、sub-agent、permission、artifact 和 A2A 继承父 Session 的 owner 与 fence。
+- 所有 PostgreSQL runtime 写入都校验 fencing token；旧 owner 在接管后无法提交。
+- TUI 使用 UUID request ID 和 `Authorization: Bearer <JWT>`，断线后最多重连
+  30 秒，执行 resume、按 seq 补齐事件，再用相同 UUID 重试已确认 mutation。
+- `/healthz` 只表示进程存活；`/readyz` 还会检查 Redis、PostgreSQL、schema
+  和实例注册。
+
+可在用户 `settings.json` 或对应的 `LUMINA_*` 环境变量中配置：
+
+```json
+{
+  "session_runtime_backend": "cluster",
+  "memory_fabric_store": "postgres",
+  "cluster_id": "production",
+  "instance_id": "backend-1",
+  "cluster_listen_addr": "0.0.0.0:8080",
+  "cluster_advertise_addr": "backend-1:8080",
+  "redis_url": "redis://...",
+  "postgres_url": "postgres://...",
+  "jwt_issuer": "https://issuer.example",
+  "jwt_audience": "lumina",
+  "jwt_jwks_url": "https://issuer.example/.well-known/jwks.json"
+}
+```
+
+连接 URL、私钥和 JWT 只能来自用户配置或 Secret Manager，不会进入默认配置、
+endpoint 文件或诊断输出。JWT 仅接受 RS256、ES256、EdDSA，并强制校验
+`exp/iss/aud/sub/tenant`。读写 scope 分别是 `lumina:session:read/write`，
+shutdown 与 drain 需要 `lumina:admin`。
+
+本机多进程可生成 Ed25519 keypair 和 admin token：
+
+```sh
+lumina-backend cluster init-local --tenant local
+export LUMINA_JWT="$(cat <AppRoot>/config/cluster/admin.jwt)"
+export LUMINA_BACKEND_URL=ws://127.0.0.1:8080/v1/ws
+```
+
+要求 PostgreSQL 15+、pgvector 0.8.6+、Redis 7.2+。固定依赖版本为 Hertz
+0.10.6、go-redis 9.20.0、pgx 5.10.0、pgvector-go 0.4.1 和 golang-jwt
+5.3.1。Hertz 使用 Go standard transport，并通过官方 HTTP adaptor 复用现有
+`gorilla/websocket` handler。SQL schema 与部署示例位于 `deploy/`。
+各实例必须通过共享持久卷或外部 Git/Object Storage 看到同一 project workspace；
+源码和 artifact 内容不会写入 Redis/PostgreSQL。
+
 ## 长期记忆
 
-Memory Fabric 使用两个本地 SQLite 数据库保存持久化跨 Session 状态，并构建
+Local 模式下，Memory Fabric 使用两个 SQLite 数据库保存持久化跨 Session 状态，并构建
 一个可替换的 BGE-M3 检索索引：
 
 ```text
@@ -66,6 +121,12 @@ Memory Fabric 使用两个本地 SQLite 数据库保存持久化跨 Session 状�
 <AppRoot>/data/memory/fabric/index.sqlite
 <AppRoot>/data/memory/fabric/retrieval-bge-m3.sqlite
 ```
+
+Cluster 模式把 ledger、node、conflict、resolution、job、generated FTS、语义
+`vector(1024)`、event window `halfvec(1024)`、learned-sparse posting、graph edge
+和 index build state 全部按 tenant/project 存入 PostgreSQL。少于 50,000 个
+vector 的 space 使用 exact cosine，超过阈值后使用 HNSW；模型变化只重建派生
+索引，不改写 durable evidence。
 
 ### 记忆写入流程
 
@@ -454,6 +515,22 @@ active session 默认位于 `<AppRoot>/data/sessions/active`，archive 位于
 <AppRoot>/state/projects/{project-id}/tool-results/{session-id}/
 ```
 
+Cluster 迁移必须显式执行，不进行运行期双写：
+
+```sh
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all --dry-run
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all
+lumina-backend session export --from cluster --to local --tenant TENANT --session ID --output NEW_DIR
+
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT --dry-run
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT
+lumina-backend memory export --from postgres --to sqlite --tenant TENANT --project PROJECT --output NEW_DIR
+```
+
+迁移只复制 durable fact，校验数量和 canonical checksum，再用当前模型重建
+FTS/vector/sparse 派生索引。源 SQLite 文件会完整保留，只有目标校验通过后才
+写入只读迁移标记；export 必须使用新目录。
+
 ## CLI 参数
 
 ```text
@@ -584,6 +661,7 @@ make purge
 ```sh
 go test ./...
 npm --prefix frontend test
+make integration-test # 需要 Docker，会启动 Redis 8 与 pgvector 0.8.6
 ```
 
 编译期依赖装配使用仓库固定的 Wire `v0.7.0` 工具生成：
@@ -629,14 +707,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `apppaths/`：跨平台 AppRoot、项目身份、doctor 和迁移。
 - `api/`：LLM 流式客户端和供应商协议适配。
 - `backend/`：WebSocket daemon、session manager 和前端 IPC bridge。
+- `cluster/`：Redis lease、fencing owner、command stream 和事件通知。
 - `cli/`：slash 命令分类和补全辅助逻辑。
 - `config/`：配置加载、环境变量覆盖和路径解析。
 - `frontend/`：TypeScript 终端前端。
+- `deploy/`：PostgreSQL schema 与容器/Kubernetes 部署示例。
 - `harness/`：持久 event contract、scope、hook、projection 和 store。
 - `mcp/`：MCP 配置、信任和动态工具注册。
-- `memory/`：自动记忆存储和召回。
+- `memory/`：SQLite 与 PostgreSQL/pgvector Memory Fabric。
 - `security/`：命令和路径安全检查。
-- `session/`：SQLite runtime journal、session 迁移、projection 和崩溃恢复。
+- `session/`：SQLite/PostgreSQL runtime store、迁移、projection 和崩溃恢复。
 - `sessionmemory/`：per-session memory commit log 和历史查询工具。
 - `skills/`：skill 加载、解析、发现和执行。
 - `team/`：Agent Team 配置、runtime loop、A2A 对话、gate 和 journal checkpoint。

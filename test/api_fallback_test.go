@@ -208,6 +208,9 @@ func TestDefaultsTemplateCoversSupportedNonPathConfigKeys(t *testing.T) {
 		"memory_embedding_model_dir": true, "skills_dir": true, "user_skills_dir": true,
 		"bundled_skills_dir": true, "team_dir": true, "system_prompt_path": true,
 		"worktree_dir": true,
+		// Connection strings are supported user settings but intentionally do
+		// not appear in the shipped defaults template.
+		"redis_url": true, "postgres_url": true,
 	}
 	var want []string
 	for _, key := range config.DefaultJSONKeys() {

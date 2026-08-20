@@ -65,6 +65,17 @@ func openRuntimeJournal(ctx context.Context, path, sessionID string, now func() 
 
 func (j *RuntimeJournal) Path() string { return j.path }
 
+func (j *RuntimeJournal) SessionID() string { return j.sessionID }
+
+func (j *RuntimeJournal) WithProjectionLock(ctx context.Context, fn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	j.projectionMu.Lock()
+	defer j.projectionMu.Unlock()
+	return fn()
+}
+
 func (j *RuntimeJournal) init(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA journal_mode=WAL`,

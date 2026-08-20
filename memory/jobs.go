@@ -37,6 +37,11 @@ type fabricJob struct {
 }
 
 func (f *Fabric) processNextWork(ctx context.Context) (bool, error) {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return false, err
+		}
+	}
 	worked, err := f.processOutboxOnce(ctx)
 	if err != nil {
 		return worked, fmt.Errorf("process memory outbox: %w", err)

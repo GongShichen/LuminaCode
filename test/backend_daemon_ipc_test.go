@@ -61,8 +61,8 @@ func TestBackendDaemonWebSocketStatusAndSessionCreate(t *testing.T) {
 	}
 	var statusPayload map[string]any
 	decodeResult(t, status.Result, &statusPayload)
-	if statusPayload["protocol_version"] != float64(2) {
-		t.Fatalf("backend must advertise protocol v2, got %#v", statusPayload)
+	if statusPayload["protocol_version"] != float64(3) {
+		t.Fatalf("backend must advertise protocol v3, got %#v", statusPayload)
 	}
 	if err := conn.WriteJSON(map[string]any{"id": "2", "method": "session.create", "params": map[string]any{"cwd": root}}); err != nil {
 		t.Fatal(err)

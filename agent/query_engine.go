@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"LuminaCode/agentContext"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/harness"
 	"LuminaCode/memory"
@@ -33,7 +34,7 @@ func NewQueryEngine(cfg config.Config, core *CoreExecutionEngine) *QueryEngine {
 }
 
 type QueryEngineFactory interface {
-	Create(config.Config) *QueryEngine
+	Create(config.Config, cluster.RuntimeIdentity) *QueryEngine
 }
 
 type DefaultQueryEngineFactory struct {
@@ -44,8 +45,14 @@ func NewQueryEngineFactory(memoryFactory MemoryFabricFactory) *DefaultQueryEngin
 	return &DefaultQueryEngineFactory{memoryFactory: memoryFactory}
 }
 
-func (f *DefaultQueryEngineFactory) Create(cfg config.Config) *QueryEngine {
-	core := NewCoreExecutionEngine(cfg, f.memoryFactory)
+func (f *DefaultQueryEngineFactory) Create(cfg config.Config, identity cluster.RuntimeIdentity) *QueryEngine {
+	if strings.TrimSpace(identity.TenantID) == "" {
+		identity.TenantID = "local"
+	}
+	if strings.TrimSpace(identity.ProjectID) == "" {
+		identity.ProjectID = MemoryFabricSpace(cfg)
+	}
+	core := NewCoreExecutionEngine(cfg, identity, f.memoryFactory)
 	return NewQueryEngine(cfg, core)
 }
 

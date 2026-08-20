@@ -19,6 +19,18 @@ type Engine interface {
 	Close() error
 }
 
+// FabricEngine includes lifecycle and historical-import capabilities used by
+// administrative commands and benchmarks in addition to the agent-facing
+// Engine contract. Both SQLite and PostgreSQL fabrics implement it.
+type FabricEngine interface {
+	Engine
+	Flush(context.Context) error
+	ResolvePendingConflicts(context.Context, string, int) (APIUsage, error)
+	RetrievalSidecarEnabled() bool
+	SyncRetrievalSidecar(context.Context) error
+	SealImport(context.Context, []ContextRef, ImportPlanningOptions) ([]JobRef, error)
+}
+
 type SemanticPolicy string
 
 const (

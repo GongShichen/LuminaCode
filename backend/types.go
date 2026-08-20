@@ -37,6 +37,7 @@ type RPCError struct {
 }
 
 type PushEvent struct {
+	TenantID        string `json:"-"`
 	Type            string `json:"type"`
 	ProtocolVersion int    `json:"protocol_version,omitempty"`
 	SessionID       string `json:"session_id,omitempty"`

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 )
 
@@ -14,9 +15,9 @@ type countingQueryEngineFactory struct {
 	count atomic.Int32
 }
 
-func (f *countingQueryEngineFactory) Create(cfg config.Config) *agent.QueryEngine {
+func (f *countingQueryEngineFactory) Create(cfg config.Config, identity cluster.RuntimeIdentity) *agent.QueryEngine {
 	f.count.Add(1)
-	return f.inner.Create(cfg)
+	return f.inner.Create(cfg, identity)
 }
 
 func TestTeamSessionCreatesEveryAgentThroughInjectedFactory(t *testing.T) {

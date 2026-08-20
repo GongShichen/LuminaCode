@@ -17,7 +17,7 @@ BACKEND_BUILD_PATH := $(BUILD_DIR)/$(BACKEND_NAME)
 INSTALL_PATH := $(INSTALL_DIR)/$(APP_NAME)
 BACKEND_INSTALL_PATH := $(INSTALL_DIR)/$(BACKEND_NAME)
 
-.PHONY: help build generate wire-check install _install-preflight _install-build _install-deploy uninstall purge doctor clean
+.PHONY: help build generate wire-check integration-test install _install-preflight _install-build _install-deploy uninstall purge doctor clean
 
 help:
 	@printf '%s\n' \
@@ -27,6 +27,7 @@ help:
 		'  make build      Build the frontend launcher and Go backend' \
 		'  make generate   Regenerate compile-time dependency wiring' \
 		'  make wire-check Validate providers and committed generated wiring' \
+		'  make integration-test  Run Redis/PostgreSQL/pgvector container tests' \
 		'  make install    Install or atomically upgrade AppRoot' \
 		'  make doctor     Inspect the resolved AppRoot and managed components' \
 		'  make uninstall  Remove app/cache/state; preserve config/data/layout.json' \
@@ -46,6 +47,9 @@ generate:
 wire-check:
 	$(GO) tool wire check ./...
 	$(GO) tool wire diff ./...
+
+integration-test:
+	$(GO) test -tags=integration ./integration -count=1
 
 build:
 	@mkdir -p "$(BUILD_DIR)"

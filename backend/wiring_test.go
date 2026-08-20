@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/session"
 )
@@ -89,8 +90,8 @@ type recordingEngineFactory struct {
 	originalTask *agent.AgentTaskRuntime
 }
 
-func (f *recordingEngineFactory) Create(cfg config.Config) *agent.QueryEngine {
-	f.engine = f.inner.Create(cfg)
+func (f *recordingEngineFactory) Create(cfg config.Config, identity cluster.RuntimeIdentity) *agent.QueryEngine {
+	f.engine = f.inner.Create(cfg, identity)
 	f.originalTask = f.engine.CoreEngine.TaskRuntime
 	return f.engine
 }
@@ -102,14 +103,16 @@ func TestSessionRuntimeFactoryCleansPartialAssembly(t *testing.T) {
 	cfg.LongTermMemoryEnabled = false
 	cfg.SkillsEnabled = false
 	store := session.NewStore(cfg.SessionDir)
+	repository := session.NewLocalRepository(store)
 	engines := &recordingEngineFactory{inner: agent.NewQueryEngineFactory(agent.NewConfiguredMemoryFabricFactory())}
-	factory := NewSessionRuntimeFactory(cfg, store, engines, func(PushEvent) {})
-	var openedJournal *session.RuntimeJournal
-	factory.assemble = func(_ string, journal *session.RuntimeJournal, _ *agent.QueryEngine) (*agent.RuntimeAssembly, error) {
+	factory := NewSessionRuntimeFactory(cfg, repository, engines, func(PushEvent) {})
+	var openedJournal session.RuntimeStore
+	factory.assemble = func(_ string, journal session.RuntimeStore, _ *agent.QueryEngine) (*agent.RuntimeAssembly, error) {
 		openedJournal = journal
 		return nil, errors.New("assembly failed")
 	}
-	if _, err := factory.Create(context.Background(), "partial-runtime", root, nil); err == nil {
+	if _, err := factory.Create(context.Background(), cluster.RuntimeIdentity{TenantID: session.LocalTenantID},
+		"partial-runtime", root, nil, true); err == nil {
 		t.Fatal("expected assembly failure")
 	}
 	if engines.engine == nil || engines.engine.CoreEngine.TaskRuntime == engines.originalTask {

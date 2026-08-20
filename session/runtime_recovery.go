@@ -29,7 +29,7 @@ type openStep struct {
 // RecoverInterruptedRuntime closes lifecycles that were durable before a
 // process stopped but never reached a terminal event. It only appends facts;
 // existing history is never rewritten.
-func RecoverInterruptedRuntime(ctx context.Context, journal *RuntimeJournal) error {
+func RecoverInterruptedRuntime(ctx context.Context, journal RuntimeStore) error {
 	tools := map[string]openTool{}
 	runs := map[string]openRun{}
 	steps := map[string]openStep{}

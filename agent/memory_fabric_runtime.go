@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"LuminaCode/api"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 	"LuminaCode/memory/localmodel"
@@ -67,8 +68,13 @@ func ConfiguredMemorySemanticCompiler(cfg config.Config) memory.SemanticCompiler
 // wiring while runtime-scoped engines can create and refresh fabrics through
 // the same factory.
 type MemoryFabricFactory interface {
-	Open(context.Context, config.Config, bool) (*memory.Fabric, error)
-	OpenWithUsageObserver(context.Context, config.Config, bool, memory.APIUsageObserver) (*memory.Fabric, error)
+	Open(context.Context, config.Config, MemoryOpenOptions) (memory.FabricEngine, error)
+}
+
+type MemoryOpenOptions struct {
+	Identity      cluster.RuntimeIdentity
+	StartWorkers  bool
+	UsageObserver memory.APIUsageObserver
 }
 
 type ConfiguredMemoryFabricFactory struct{}
@@ -77,23 +83,22 @@ func NewConfiguredMemoryFabricFactory() *ConfiguredMemoryFabricFactory {
 	return &ConfiguredMemoryFabricFactory{}
 }
 
-func (*ConfiguredMemoryFabricFactory) Open(ctx context.Context, cfg config.Config, startWorkers bool) (*memory.Fabric, error) {
-	return openConfiguredMemoryFabricWithUsageObserver(ctx, cfg, startWorkers, nil)
+func (*ConfiguredMemoryFabricFactory) Open(ctx context.Context, cfg config.Config,
+	openOptions MemoryOpenOptions) (memory.FabricEngine, error) {
+	return openConfiguredMemoryFabric(ctx, cfg, openOptions)
 }
 
-func (*ConfiguredMemoryFabricFactory) OpenWithUsageObserver(ctx context.Context, cfg config.Config, startWorkers bool,
-	observer memory.APIUsageObserver) (*memory.Fabric, error) {
-	return openConfiguredMemoryFabricWithUsageObserver(ctx, cfg, startWorkers, observer)
-}
-
-func openConfiguredMemoryFabricWithUsageObserver(ctx context.Context, cfg config.Config, startWorkers bool,
-	observer memory.APIUsageObserver) (*memory.Fabric, error) {
+func openConfiguredMemoryFabric(ctx context.Context, cfg config.Config,
+	openOptions MemoryOpenOptions) (memory.FabricEngine, error) {
 	if !cfg.LongTermMemoryEnabled || !isFabricMemoryBackend(cfg) {
 		return nil, nil
 	}
+	if !cfg.UsesPostgresMemoryFabric() && memory.SQLiteFabricMigrated(cfg.MemoryPath) {
+		return nil, errors.New("local Memory Fabric was migrated to PostgreSQL and is read-only")
+	}
 	options := memory.DefaultFabricOptions(cfg.MemoryPath)
-	options.StartWorkers = startWorkers
-	options.UsageObserver = observer
+	options.StartWorkers = openOptions.StartWorkers
+	options.UsageObserver = openOptions.UsageObserver
 	options.RemoteProcessing = memory.RemoteProcessingPolicy(strings.ToLower(strings.TrimSpace(cfg.MemoryRemoteProcessing)))
 	options.CompileBatchTokens = effectiveFabricCompileBatchTokens(cfg.MemoryCompileBatchTokens)
 	options.SearchLatencyBudget = time.Duration(cfg.MemorySearchLatencyMS) * time.Millisecond
@@ -101,6 +106,18 @@ func openConfiguredMemoryFabricWithUsageObserver(ctx context.Context, cfg config
 	options.MaxEvidence = cfg.MemoryRecallMaxItems
 	options.TargetContextTokens = cfg.MemoryContextTargetTokens
 	options.MaxContextTokens = cfg.MemoryContextMaxTokens
+	// The managed BGE-M3 runtimes accept at most 20 inputs per request.
+	// Keep Fabric job batches within that shared provider contract.
+	options.EmbeddingBatchSize = 20
+	var writeGuards []func(context.Context) error
+	if !cfg.UsesPostgresMemoryFabric() {
+		writeGuards = append(writeGuards, func(context.Context) error {
+			if memory.SQLiteFabricMigrated(options.Dir) {
+				return errors.New("local Memory Fabric was migrated to PostgreSQL and is read-only")
+			}
+			return nil
+		})
+	}
 
 	encoder, encoderErr := configuredMemoryRetrievalEncoder(cfg)
 	if encoderErr != nil {
@@ -122,7 +139,63 @@ func openConfiguredMemoryFabricWithUsageObserver(ctx context.Context, cfg config
 		options.Compiler = newFabricSemanticCompiler(cfg, configuredFabricModel(cfg.MemoryCompilerModel, cfg.APIModel))
 		options.Adjudicator = newFabricConflictAdjudicator(cfg, configuredFabricModel(cfg.MemoryConflictModel, cfg.APIModel))
 	}
-	return memory.OpenFabric(ctx, options)
+	identity := openOptions.Identity
+	if strings.TrimSpace(identity.TenantID) == "" {
+		identity.TenantID = "local"
+	}
+	if strings.TrimSpace(identity.ProjectID) == "" {
+		identity.ProjectID = MemoryFabricSpace(cfg)
+	}
+	if strings.TrimSpace(cfg.RedisURL) != "" {
+		guardRuntime, guardErr := cluster.NewRedisRuntime(ctx, cfg.RedisURL, cfg.ClusterID)
+		if guardErr != nil {
+			return nil, fmt.Errorf("open Memory Fabric migration guard: %w", guardErr)
+		}
+		options.Cleanup = guardRuntime.Close
+		writeGuards = append(writeGuards, func(checkCtx context.Context) error {
+			owner, lookupErr := guardRuntime.Lookup(checkCtx, identity.TenantID,
+				"memory-migration:"+identity.ProjectID)
+			if lookupErr != nil {
+				return fmt.Errorf("check Memory Fabric migration lease: %w", lookupErr)
+			}
+			if owner != nil {
+				return errors.New("Memory Fabric project is locked for migration")
+			}
+			return nil
+		})
+	}
+	if len(writeGuards) > 0 {
+		options.WriteGuard = func(checkCtx context.Context) error {
+			for _, guard := range writeGuards {
+				if err := guard(checkCtx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	if options.WriteGuard != nil {
+		if guardErr := options.WriteGuard(ctx); guardErr != nil {
+			if options.Cleanup != nil {
+				_ = options.Cleanup()
+			}
+			return nil, guardErr
+		}
+	}
+	if cfg.UsesPostgresMemoryFabric() {
+		fabric, openErr := memory.OpenPostgresFabric(ctx, memory.PostgresFabricOptions{FabricOptions: options,
+			PostgresURL: cfg.PostgresURL, ClusterID: cfg.ClusterID, TenantID: identity.TenantID,
+			ProjectID: identity.ProjectID})
+		if openErr != nil && options.Cleanup != nil {
+			_ = options.Cleanup()
+		}
+		return fabric, openErr
+	}
+	fabric, openErr := memory.OpenFabric(ctx, options)
+	if openErr != nil && options.Cleanup != nil {
+		_ = options.Cleanup()
+	}
+	return fabric, openErr
 }
 
 func fabricMemoryRuntimeKey(cfg config.Config) string {
@@ -131,6 +204,8 @@ func fabricMemoryRuntimeKey(cfg config.Config) string {
 	}
 	return strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(cfg.MemoryBackend)),
+		strings.ToLower(strings.TrimSpace(cfg.MemoryFabricStore)),
+		strings.TrimSpace(cfg.ClusterID),
 		strings.TrimSpace(cfg.MemoryPath),
 		strings.ToLower(strings.TrimSpace(cfg.MemoryRemoteProcessing)),
 		configuredFabricModel(cfg.MemoryCompilerModel, cfg.APIModel),
@@ -139,8 +214,13 @@ func fabricMemoryRuntimeKey(cfg config.Config) string {
 		fmt.Sprintf("%d", cfg.MemorySearchLatencyMS),
 		fmt.Sprintf("%d", cfg.MemoryCandidateLimit),
 		strings.TrimSpace(cfg.MemoryBGEModelDir),
-		memoryRemoteModelRuntimeKey(cfg),
+		memoryRemoteModelRuntimeKey(cfg), sensitiveRuntimeHash(cfg.PostgresURL, cfg.RedisURL),
 	}, "\x1f")
+}
+
+func sensitiveRuntimeHash(values ...string) string {
+	hash := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(hash[:])
 }
 
 func memoryRemoteModelRuntimeKey(cfg config.Config) string {
@@ -190,8 +270,8 @@ func (e *CoreExecutionEngine) configureMemoryEngine(ctx context.Context, cfg con
 		if e.memoryFactory == nil {
 			openErr = errors.New("memory fabric factory is required")
 		} else {
-			var fabric *memory.Fabric
-			fabric, openErr = e.memoryFactory.Open(ctx, cfg, true)
+			var fabric memory.FabricEngine
+			fabric, openErr = e.memoryFactory.Open(ctx, cfg, MemoryOpenOptions{Identity: e.runtimeIdentity, StartWorkers: true})
 			if fabric != nil {
 				next = fabric
 			}

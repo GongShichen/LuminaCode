@@ -20,6 +20,7 @@ const (
 	openAICompatibleBGEDimensions = 1024
 	remoteRetrievalMaxBodyBytes   = 8 << 20
 	remoteRetrievalAttempts       = 3
+	remoteRetrievalBatchSize      = 20
 	remoteSplitterRunesPerToken   = 3
 )
 
@@ -65,6 +66,20 @@ func (e *OpenAICompatibleRetrievalEncoder) Encode(ctx context.Context, texts []s
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	result := make([]RetrievalEncoding, 0, len(texts))
+	for start := 0; start < len(texts); start += remoteRetrievalBatchSize {
+		end := minIntMemory(len(texts), start+remoteRetrievalBatchSize)
+		batch, err := e.encodeBatch(ctx, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, batch...)
+	}
+	return result, nil
+}
+
+func (e *OpenAICompatibleRetrievalEncoder) encodeBatch(ctx context.Context,
+	texts []string) ([]RetrievalEncoding, error) {
 	request := struct {
 		Model          string   `json:"model"`
 		Input          []string `json:"input"`

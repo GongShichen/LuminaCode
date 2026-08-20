@@ -59,7 +59,7 @@ hooks. Memory preparation, skill context, MCP registration, context compilation,
 model responses, permissions, tools, and sub-agents share the same session
 scope without being coupled to the TUI.
 
-The WebSocket protocol publishes durable v2 events with their journal sequence.
+The WebSocket protocol publishes durable v3 events with their journal sequence.
 If the TUI detects a gap, it calls `session.events` and reduces the missing
 events before applying the live event. Submit commands carry an idempotency key,
 so reconnect retries return the original result instead of starting duplicate
@@ -70,16 +70,88 @@ events. Task state is rebuilt from lifecycle events, and Team child streams use
 lossless runtime checkpoints. Older JSON/JSONL session files and Team sidecars
 are imported once with a backup; new sessions do not create those sidecars.
 
+### Multi-instance cluster mode
+
+Local mode remains the default and continues to use the SQLite runtime journal
+above. Cluster mode is explicit and fail-closed:
+
+- PostgreSQL is the durable source of truth for Session streams, events,
+  checkpoints, command results, blobs, consumer offsets, Team checkpoints, and
+  Memory Fabric data.
+- Redis stores expiring instance registrations and Session leases,
+  monotonically increasing fencing tokens, Redis Streams RPC envelopes, and
+  low-latency event notifications. Pub/Sub is never treated as durable state.
+- Any Hertz gateway can accept a WebSocket and transparently forward work to
+  the Session owner. Team, sub-agent, permission, artifact, and A2A work
+  inherits the parent's owner and fencing token.
+- Every PostgreSQL runtime write checks its fencing token, so a former owner
+  cannot commit after another instance takes ownership.
+- The TUI uses UUID request IDs and `Authorization: Bearer <JWT>`. It reconnects
+  to any gateway for up to 30 seconds, resumes the Session, fills event gaps by
+  sequence, and retries confirmed mutations with the same UUID.
+- `/healthz` reports liveness. `/readyz` additionally checks Redis,
+  PostgreSQL, schema state, and instance registration.
+
+Configure cluster mode in user `settings.json` or with the corresponding
+`LUMINA_*` environment variables:
+
+```json
+{
+  "session_runtime_backend": "cluster",
+  "memory_fabric_store": "postgres",
+  "cluster_id": "production",
+  "instance_id": "backend-1",
+  "cluster_listen_addr": "0.0.0.0:8080",
+  "cluster_advertise_addr": "backend-1:8080",
+  "redis_url": "redis://...",
+  "postgres_url": "postgres://...",
+  "jwt_issuer": "https://issuer.example",
+  "jwt_audience": "lumina",
+  "jwt_jwks_url": "https://issuer.example/.well-known/jwks.json"
+}
+```
+
+Connection URLs, private keys, and JWTs must come from user settings or a
+secret manager; they are not written to defaults, endpoint files, or
+diagnostics. JWT validation accepts only RS256, ES256, and EdDSA and requires
+`exp`, `iss`, `aud`, `sub`, and the tenant claim. Reads and writes require
+`lumina:session:read` and `lumina:session:write`; shutdown and drain require
+`lumina:admin`.
+
+For a local multi-process cluster, generate an Ed25519 key pair and admin token:
+
+```sh
+lumina-backend cluster init-local --tenant local
+export LUMINA_JWT="$(cat <AppRoot>/config/cluster/admin.jwt)"
+export LUMINA_BACKEND_URL=ws://127.0.0.1:8080/v1/ws
+```
+
+PostgreSQL 15+ with pgvector 0.8.6+ and Redis 7.2+ are required. Runtime
+dependencies are pinned to Hertz 0.10.6, go-redis 9.20.0, pgx 5.10.0,
+pgvector-go 0.4.1, and golang-jwt 5.3.1. Hertz uses the Go standard transport
+and its official HTTP adaptor around the existing `gorilla/websocket` handlers.
+Repeatable schemas and deployment examples are under `deploy/`.
+Cluster instances must see the same project workspace through shared persistent
+storage or an external Git/object-storage workflow; source files and artifacts
+are intentionally not stored in Redis or PostgreSQL.
+
 ## Long-Term Memory
 
-Memory Fabric keeps durable cross-session state in two local SQLite databases
-and builds a third, replaceable BGE-M3 retrieval index:
+In local mode, Memory Fabric keeps durable cross-session state in two SQLite
+databases and builds a third, replaceable BGE-M3 retrieval index:
 
 ```text
 <AppRoot>/data/memory/fabric/ledger.sqlite
 <AppRoot>/data/memory/fabric/index.sqlite
 <AppRoot>/data/memory/fabric/retrieval-bge-m3.sqlite
 ```
+
+In cluster mode, the ledger, nodes, conflicts, resolutions, jobs, generated
+FTS, semantic `vector(1024)`, event-window `halfvec(1024)`, learned-sparse
+postings, graph edges, and index build state are tenant/project-scoped in
+PostgreSQL. Spaces below 50,000 vectors use exact cosine search; larger spaces
+use HNSW with request-scaled `ef_search`. Model changes rebuild derived indexes
+without rewriting durable evidence.
 
 ### Memory Write Flow
 
@@ -500,6 +572,23 @@ Large background outputs:
 <AppRoot>/state/projects/{project-id}/tool-results/{session-id}/
 ```
 
+Cluster migration is explicit and never dual-writes:
+
+```sh
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all --dry-run
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all
+lumina-backend session export --from cluster --to local --tenant TENANT --session ID --output NEW_DIR
+
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT --dry-run
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT
+lumina-backend memory export --from postgres --to sqlite --tenant TENANT --project PROJECT --output NEW_DIR
+```
+
+Migration copies durable facts only, validates counts and canonical checksums,
+then rebuilds FTS/vector/sparse derived indexes with the current models. Source
+SQLite files remain in place and receive a read-only migration marker only
+after target verification. Export always requires a new directory.
+
 ## CLI Reference
 
 ```text
@@ -639,6 +728,7 @@ Test:
 ```sh
 go test ./...
 npm --prefix frontend test
+make integration-test # requires Docker; starts Redis 8 and pgvector 0.8.6
 ```
 
 Compile-time dependency wiring is generated with the repository-pinned Wire
@@ -687,15 +777,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `apppaths/`: cross-platform AppRoot, project identity, doctor, and migration
 - `api/`: streaming LLM clients and provider protocol normalization
 - `backend/`: WebSocket daemon, session manager, and frontend IPC bridge
+- `cluster/`: Redis leases, fencing ownership, command streams, and event notifications
 - `cli/`: slash command classification and completion helpers
 - `config/`: configuration loading, environment overrides, and path resolution
 - `frontend/`: TypeScript terminal frontend
+- `deploy/`: repeatable PostgreSQL schemas and container/Kubernetes examples
 - `harness/`: durable event contracts, scopes, hooks, projections, and stores
 - `mcp/`: MCP config, trust, and dynamic tool registration
-- `memory/`: auto-memory storage and recall
+- `memory/`: SQLite and PostgreSQL/pgvector Memory Fabric implementations
 - `security/`: command and path safety checks
-- `session/`: SQLite runtime journal, session migration, projections, and crash
-  recovery
+- `session/`: SQLite/PostgreSQL runtime stores, migration, projections, and crash recovery
 - `sessionmemory/`: per-session memory commit log and history tools
 - `skills/`: skill loading, prompt processing, discovery, and execution
 - `team/`: Agent Team configuration, runtime loop, A2A dialogue, gates, and

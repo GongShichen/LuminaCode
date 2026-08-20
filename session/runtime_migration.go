@@ -17,7 +17,7 @@ import (
 )
 
 type RuntimeLoad struct {
-	Journal       *RuntimeJournal
+	Journal       RuntimeStore
 	State         *agent.AgentState
 	SkillRecovery map[string]any
 	Tasks         []map[string]any
@@ -36,6 +36,9 @@ type runtimeMigrationReport struct {
 }
 
 func (s *Store) OpenRuntime(ctx context.Context, sessionID string) (*RuntimeLoad, error) {
+	if LocalRuntimeMigrated(s.dir, sessionID) {
+		return nil, fmt.Errorf("session %s was migrated to cluster storage and is read-only locally", sessionID)
+	}
 	path := RuntimeJournalPath(s.dir, sessionID)
 	if _, err := os.Stat(path); err == nil {
 		journal, openErr := OpenRuntimeJournal(ctx, s.dir, sessionID)
@@ -207,43 +210,43 @@ func (s *Store) writeMigrationFailure(sessionID string, report runtimeMigrationR
 	return fmt.Errorf("session %s runtime migration failed at %s: %w", sessionID, stage, cause)
 }
 
-func AppendRuntimeState(ctx context.Context, journal *RuntimeJournal, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
-	journal.projectionMu.Lock()
-	defer journal.projectionMu.Unlock()
-	// Checkpoint facts can follow any concurrently committed lifecycle event;
-	// their total order is the SQLite event sequence, so no stale read/write
-	// decision is involved here.
-	events, err := appendRuntimeState(ctx, journal, harness.AnyStreamSeq, state, recovery, tasks, harness.EventRuntimeStateCheckpointed)
-	if err != nil {
-		return err
-	}
-	if len(events) == 0 {
-		return nil
-	}
-	projection := harness.NewSessionProjection()
-	after := int64(0)
-	checkpoint, err := journal.LoadCheckpoint(ctx, journal.sessionID, projection.Name())
-	if err != nil {
-		return err
-	}
-	if checkpoint != nil && checkpoint.ProjectorVersion == projection.Version() {
-		if err := projection.UnmarshalState(checkpoint.State); err != nil {
+func AppendRuntimeState(ctx context.Context, journal RuntimeStore, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
+	return journal.WithProjectionLock(ctx, func() error {
+		// Checkpoint facts can follow any concurrently committed lifecycle event;
+		// their total order is the event sequence, so no stale read/write decision
+		// is involved here.
+		events, err := appendRuntimeState(ctx, journal, harness.AnyStreamSeq, state, recovery, tasks, harness.EventRuntimeStateCheckpointed)
+		if err != nil {
 			return err
 		}
-		after = checkpoint.UpToSeq
-	}
-	last, err := harness.Replay(ctx, journal, projection, after)
-	if err != nil {
-		return err
-	}
-	data, err := projection.MarshalState()
-	if err != nil {
-		return err
-	}
-	return journal.SaveCheckpoint(ctx, harness.Checkpoint{StreamID: journal.sessionID, Projector: projection.Name(), ProjectorVersion: projection.Version(), UpToSeq: last, State: data})
+		if len(events) == 0 {
+			return nil
+		}
+		projection := harness.NewSessionProjection()
+		after := int64(0)
+		checkpoint, err := journal.LoadCheckpoint(ctx, journal.SessionID(), projection.Name())
+		if err != nil {
+			return err
+		}
+		if checkpoint != nil && checkpoint.ProjectorVersion == projection.Version() {
+			if err := projection.UnmarshalState(checkpoint.State); err != nil {
+				return err
+			}
+			after = checkpoint.UpToSeq
+		}
+		last, err := harness.Replay(ctx, journal, projection, after)
+		if err != nil {
+			return err
+		}
+		data, err := projection.MarshalState()
+		if err != nil {
+			return err
+		}
+		return journal.SaveCheckpoint(ctx, harness.Checkpoint{StreamID: journal.SessionID(), Projector: projection.Name(), ProjectorVersion: projection.Version(), UpToSeq: last, State: data})
+	})
 }
 
-func appendRuntimeState(ctx context.Context, journal *RuntimeJournal, expectedStreamSeq int64, state *agent.AgentState, recovery map[string]any, tasks []map[string]any, eventType string) ([]harness.Event, error) {
+func appendRuntimeState(ctx context.Context, journal RuntimeStore, expectedStreamSeq int64, state *agent.AgentState, recovery map[string]any, tasks []map[string]any, eventType string) ([]harness.Event, error) {
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
 		return nil, err
@@ -262,7 +265,7 @@ func appendRuntimeState(ctx context.Context, journal *RuntimeJournal, expectedSt
 	})
 }
 
-func LoadRuntimeState(ctx context.Context, journal *RuntimeJournal) (*agent.AgentState, map[string]any, []map[string]any, error) {
+func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentState, map[string]any, []map[string]any, error) {
 	var latest *harness.RuntimeStateCheckpointedPayload
 	taskRecords := map[string]map[string]any{}
 	after := int64(0)

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumina-backend
+spec:
+  selector: {app: lumina-backend}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lumina-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: lumina-backend}
+  template:
+    metadata:
+      labels: {app: lumina-backend}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: backend
+          image: your-registry/lumina-backend:replace-me
+          args: ["daemon"]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: LUMINA_SESSION_RUNTIME_BACKEND, value: cluster}
+            - {name: LUMINA_MEMORY_FABRIC_STORE, value: postgres}
+            - {name: LUMINA_CLUSTER_ID, value: production}
+            - {name: LUMINA_INSTANCE_ID, valueFrom: {fieldRef: {fieldPath: metadata.uid}}}
+            - {name: LUMINA_CLUSTER_LISTEN_ADDR, value: "0.0.0.0:8080"}
+            - {name: LUMINA_CLUSTER_ADVERTISE_ADDR, value: "lumina-backend:8080"}
+            - {name: LUMINA_REDIS_URL, valueFrom: {secretKeyRef: {name: lumina-cluster, key: redis-url}}}
+            - {name: LUMINA_POSTGRES_URL, valueFrom: {secretKeyRef: {name: lumina-cluster, key: postgres-url}}}
+            - {name: LUMINA_JWT_ISSUER, valueFrom: {configMapKeyRef: {name: lumina-cluster, key: jwt-issuer}}}
+            - {name: LUMINA_JWT_AUDIENCE, valueFrom: {configMapKeyRef: {name: lumina-cluster, key: jwt-audience}}}
+            - {name: LUMINA_JWT_JWKS_URL, valueFrom: {configMapKeyRef: {name: lumina-cluster, key: jwks-url}}}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10

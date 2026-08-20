@@ -18,6 +18,7 @@ type permissionWaiter struct {
 }
 
 type WSRendererBridge struct {
+	tenantID  string
 	sessionID string
 	emit      EventEmitter
 	nextSeq   func() int64
@@ -27,8 +28,9 @@ type WSRendererBridge struct {
 	selections  map[string]chan *string
 }
 
-func NewWSRendererBridge(sessionID string, emit EventEmitter, nextSeq func() int64) *WSRendererBridge {
+func NewWSRendererBridge(tenantID, sessionID string, emit EventEmitter, nextSeq func() int64) *WSRendererBridge {
 	return &WSRendererBridge{
+		tenantID:    tenantID,
 		sessionID:   sessionID,
 		emit:        emit,
 		nextSeq:     nextSeq,
@@ -143,6 +145,7 @@ func (b *WSRendererBridge) emitEvent(eventType string, payload any) {
 		return
 	}
 	b.emit(PushEvent{
+		TenantID:  b.tenantID,
 		Type:      "event",
 		SessionID: b.sessionID,
 		Seq:       b.nextSeq(),
@@ -159,7 +162,7 @@ func (b *WSRendererBridge) emitRuntimeEvents(events []harness.Event) {
 	}
 	for _, event := range events {
 		b.emit(PushEvent{
-			Type: "event", ProtocolVersion: 2, SessionID: b.sessionID, StreamID: event.StreamID,
+			TenantID: b.tenantID, Type: "event", ProtocolVersion: 3, SessionID: b.sessionID, StreamID: event.StreamID,
 			Seq: event.Seq, EventID: event.ID, EventType: event.Type, SchemaVersion: event.SchemaVersion,
 			Durable: true, Timestamp: event.OccurredAt.UTC().Format(time.RFC3339Nano), Payload: json.RawMessage(event.Payload),
 			Event: map[string]any{"type": "runtime.event", "payload": event},

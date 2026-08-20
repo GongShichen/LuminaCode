@@ -111,6 +111,7 @@ export class LuminaTui {
     this.bindKeys();
     this.prepareTerminalInput();
     this.rpc.onEvent((event) => this.handlePush(event));
+	this.rpc.onRecovery((snapshot) => this.applySnapshot(snapshot));
     this.rpc.onDisconnect((reason) => this.handleBackendDisconnect(reason));
     const snapshot = this.options.resumeSessionID
       ? await this.rpc.call("session.resume", { session_id: this.options.resumeSessionID, cwd: this.options.cwd })

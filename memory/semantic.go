@@ -40,6 +40,11 @@ func (e *CompileInputBudgetError) Error() string {
 
 func (f *Fabric) Remember(ctx context.Context, request MemoryRequest) (MemoryCommitResult, error) {
 	result := MemoryCommitResult{SemanticStatus: SemanticEventDurable}
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return result, err
+		}
+	}
 	request.Space = normalizeSpace(request.Space)
 	if request.Mode == "" {
 		request.Mode = WriteExplicit
@@ -365,6 +370,11 @@ func redactMetadata(metadata map[string]string) map[string]string {
 }
 
 func (f *Fabric) SealContext(ctx context.Context, ref ContextRef) (JobRef, error) {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return JobRef{}, err
+		}
+	}
 	ref.Space = normalizeSpace(ref.Space)
 	if ref.ClosedAt.IsZero() {
 		ref.ClosedAt = f.now()

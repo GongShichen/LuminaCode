@@ -23,6 +23,7 @@ func isolatedConfigForCWD(t *testing.T, cwd string) config.Config {
 	cfg := config.NewConfigForCWD(cwd)
 	cfg.CWD = cwd
 	cfg.SessionDir = filepath.Join(cwd, "sessions")
+	cfg.LongTermMemoryEnabled = false
 	// Tests that exercise query expansion opt in explicitly and provide a
 	// dedicated expansion-model response. Other tests keep their API mock
 	// focused on the main agent request.

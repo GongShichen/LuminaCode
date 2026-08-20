@@ -6,14 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"LuminaCode/agent"
 	luminacli "LuminaCode/cli"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/harness"
 	"LuminaCode/maintenance"
@@ -27,24 +28,32 @@ import (
 
 type SessionManager struct {
 	baseConfig config.Config
-	store      *session.Store
+	repository session.SessionRepository
 	factory    *SessionRuntimeFactory
 
 	mu       sync.Mutex
 	sessions map[string]*SessionController
 }
 
-func NewSessionManager(cfg config.Config, store *session.Store, factory *SessionRuntimeFactory) *SessionManager {
+func NewSessionManager(cfg config.Config, repository session.SessionRepository, factory *SessionRuntimeFactory) *SessionManager {
 	manager := &SessionManager{
 		baseConfig: cfg,
-		store:      store,
+		repository: repository,
 		factory:    factory,
 		sessions:   map[string]*SessionController{},
 	}
+	if cfg.UsesClusterRuntime() {
+		return manager
+	}
 	// Upgrade every discoverable legacy session eagerly. Failures are isolated
 	// per session so a damaged archive cannot prevent the daemon from starting.
-	for _, meta := range manager.store.ListSessions() {
-		loaded, err := manager.store.OpenRuntime(context.Background(), meta.SessionID)
+	metas, listErr := manager.repository.ListSessions(context.Background(), session.LocalTenantID)
+	if listErr != nil {
+		slog.Warn("list sessions during runtime migration", "error", listErr)
+	}
+	for _, meta := range metas {
+		loaded, err := manager.repository.OpenRuntime(context.Background(), session.LocalTenantID, meta.SessionID,
+			session.RuntimeOpenOptions{CreateIfMissing: false})
 		if err != nil {
 			slog.Warn("runtime journal migration failed", "session_id", meta.SessionID, "error", err)
 			continue
@@ -57,40 +66,112 @@ func NewSessionManager(cfg config.Config, store *session.Store, factory *Session
 }
 
 func (m *SessionManager) Create(cwd string) (*SessionController, error) {
-	id := uuid.NewString()
-	return m.createWithState(id, cwd, nil)
+	return m.CreateFor(cluster.LocalPrincipal(), cwd, 0)
 }
 
-func (m *SessionManager) Resume(sessionID, cwd string) (*SessionController, error) {
+func (m *SessionManager) CreateFor(principal cluster.Principal, cwd string, fenceToken int64) (*SessionController, error) {
+	id := uuid.NewString()
+	return m.CreateWithIDFor(principal, id, cwd, fenceToken)
+}
+
+func (m *SessionManager) CreateWithIDFor(principal cluster.Principal, sessionID, cwd string,
+	fenceToken int64) (*SessionController, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, errors.New("session_id is required")
 	}
 	m.mu.Lock()
-	if existing := m.sessions[sessionID]; existing != nil {
+	if existing := m.sessions[sessionMapKey(principal.TenantID, sessionID)]; existing != nil {
 		m.mu.Unlock()
 		return existing, nil
 	}
 	m.mu.Unlock()
-	if _, err := os.Stat(session.RuntimeJournalPath(m.baseConfig.SessionDir, sessionID)); errors.Is(err, os.ErrNotExist) {
-		if m.store.LoadState(sessionID) == nil && len(m.store.Load(sessionID)) == 0 {
-			return nil, fmt.Errorf("session %s not found", sessionID)
-		}
+	return m.createWithState(principal, sessionID, cwd, nil, true, fenceToken)
+}
+
+func (m *SessionManager) Resume(sessionID, cwd string) (*SessionController, error) {
+	return m.ResumeFor(cluster.LocalPrincipal(), sessionID, cwd, 0)
+}
+
+func (m *SessionManager) ResumeFor(principal cluster.Principal, sessionID, cwd string,
+	fenceToken int64) (*SessionController, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, errors.New("session_id is required")
 	}
-	return m.createWithState(sessionID, cwd, nil)
+	m.mu.Lock()
+	key := sessionMapKey(principal.TenantID, sessionID)
+	if existing := m.sessions[key]; existing != nil {
+		m.mu.Unlock()
+		return existing, nil
+	}
+	m.mu.Unlock()
+	exists, err := m.repository.Exists(context.Background(), principal.TenantID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+	return m.createWithState(principal, sessionID, cwd, nil, false, fenceToken)
 }
 
 func (m *SessionManager) Get(sessionID string) (*SessionController, error) {
+	return m.GetFor(cluster.LocalPrincipal(), sessionID)
+}
+
+func (m *SessionManager) GetFor(principal cluster.Principal, sessionID string) (*SessionController, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	session := m.sessions[sessionID]
+	session := m.sessions[sessionMapKey(principal.TenantID, sessionID)]
 	if session == nil {
 		return nil, fmt.Errorf("session %s not found", sessionID)
 	}
 	return session, nil
 }
 
+func (m *SessionManager) EventsFor(ctx context.Context, principal cluster.Principal, sessionID string,
+	afterSeq int64, limit int) (EventPage, error) {
+	if controller, err := m.GetFor(principal, sessionID); err == nil {
+		return controller.Events(ctx, afterSeq, limit)
+	}
+	events, head, err := m.repository.LoadEvents(ctx, principal.TenantID, sessionID, afterSeq, limit)
+	if err != nil {
+		return EventPage{}, err
+	}
+	next := afterSeq
+	if len(events) > 0 {
+		next = events[len(events)-1].Seq
+	}
+	return EventPage{Events: events, NextAfterSeq: next, HasMore: next < head}, nil
+}
+
+func (m *SessionManager) ReleaseFor(principal cluster.Principal, sessionID string) {
+	key := sessionMapKey(principal.TenantID, sessionID)
+	m.mu.Lock()
+	controller := m.sessions[key]
+	delete(m.sessions, key)
+	m.mu.Unlock()
+	if controller != nil {
+		controller.Abort()
+		controller.Shutdown()
+	}
+}
+
 func (m *SessionManager) List() []session.Meta {
-	return m.store.ListSessions()
+	return m.ListFor(cluster.LocalPrincipal())
+}
+
+func (m *SessionManager) ListFor(principal cluster.Principal) []session.Meta {
+	metas, err := m.repository.ListSessions(context.Background(), principal.TenantID)
+	if err != nil {
+		slog.Warn("list sessions", "error", err)
+		return nil
+	}
+	return metas
+}
+
+func (m *SessionManager) RuntimeInfoFor(ctx context.Context, principal cluster.Principal,
+	sessionID string) (session.RuntimeInfo, error) {
+	return m.repository.RuntimeInfo(ctx, principal.TenantID, sessionID)
 }
 
 func (m *SessionManager) Count() int {
@@ -110,15 +191,41 @@ func (m *SessionManager) ActiveSessionIDs() map[string]struct{} {
 }
 
 func (m *SessionManager) StorageStatus() (maintenance.Report, error) {
+	return m.StorageStatusFor(cluster.LocalPrincipal())
+}
+
+func (m *SessionManager) StorageStatusFor(principal cluster.Principal) (maintenance.Report, error) {
+	if m.baseConfig.UsesClusterRuntime() {
+		metas, err := m.repository.ListSessions(context.Background(), principal.TenantID)
+		report := maintenance.Report{Mode: "cluster-postgres", GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		if err != nil {
+			return report, err
+		}
+		for _, meta := range metas {
+			report.Sessions = append(report.Sessions, maintenance.SessionInfo{SessionID: meta.SessionID,
+				LastUpdated: meta.LastUpdated, MessageCount: meta.MessageCount, TurnCount: meta.TurnCount,
+				Pinned: meta.Pinned})
+		}
+		report.SessionCount = len(report.Sessions)
+		return report, nil
+	}
 	return maintenance.Status(m.baseConfig, maintenance.Options{CurrentSessions: m.ActiveSessionIDs()})
 }
 
 func (m *SessionManager) CleanupStorage(enforce bool) (maintenance.Report, error) {
+	if m.baseConfig.UsesClusterRuntime() {
+		return maintenance.Report{Mode: "cluster-postgres"},
+			errors.New("cluster storage cleanup requires an explicit retention policy and is not a filesystem operation")
+	}
 	return maintenance.Cleanup(m.baseConfig, maintenance.Options{Enforce: enforce, CurrentSessions: m.ActiveSessionIDs()})
 }
 
 func (m *SessionManager) Pin(sessionID string, pinned bool) (*session.Meta, error) {
-	return m.store.Pin(sessionID, pinned)
+	return m.PinFor(cluster.LocalPrincipal(), sessionID, pinned)
+}
+
+func (m *SessionManager) PinFor(principal cluster.Principal, sessionID string, pinned bool) (*session.Meta, error) {
+	return m.repository.Pin(context.Background(), principal.TenantID, sessionID, pinned)
 }
 
 func (m *SessionManager) Shutdown() {
@@ -133,15 +240,25 @@ func (m *SessionManager) Shutdown() {
 	}
 }
 
-func (m *SessionManager) createWithState(sessionID, cwd string, state *agent.AgentState) (*SessionController, error) {
-	controller, err := m.factory.Create(context.Background(), sessionID, cwd, state)
+func (m *SessionManager) createWithState(principal cluster.Principal, sessionID, cwd string, state *agent.AgentState,
+	createIfMissing bool, fenceToken int64) (*SessionController, error) {
+	identity := cluster.RuntimeIdentity{TenantID: principal.TenantID, Subject: principal.Subject,
+		InstanceID: m.baseConfig.InstanceID, SessionID: sessionID, FenceToken: fenceToken}
+	controller, err := m.factory.Create(context.Background(), identity, sessionID, cwd, state, createIfMissing)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
-	m.sessions[sessionID] = controller
+	m.sessions[sessionMapKey(principal.TenantID, sessionID)] = controller
 	m.mu.Unlock()
 	return controller, nil
+}
+
+func sessionMapKey(tenantID, sessionID string) string {
+	if strings.TrimSpace(tenantID) == "" {
+		tenantID = session.LocalTenantID
+	}
+	return tenantID + "\x00" + sessionID
 }
 
 func applyPinnedDaemonConfig(target *config.Config, source config.Config) {
@@ -172,13 +289,16 @@ func applyPinnedDaemonConfig(target *config.Config, source config.Config) {
 }
 
 type SessionController struct {
-	id      string
-	cfg     config.Config
-	engine  *agent.QueryEngine
-	store   *session.Store
-	journal *session.RuntimeJournal
-	ui      *luminaui.UiRuntime
-	bridge  *WSRendererBridge
+	tenantID   string
+	id         string
+	fenceToken int64
+	identity   cluster.RuntimeIdentity
+	cfg        config.Config
+	engine     *agent.QueryEngine
+	repository session.SessionRepository
+	journal    session.RuntimeStore
+	ui         *luminaui.UiRuntime
+	bridge     *WSRendererBridge
 
 	stateMu sync.Mutex
 	state   *agent.AgentState
@@ -191,16 +311,27 @@ type SessionController struct {
 	seq  atomic.Int64
 }
 
-func NewSessionController(sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState, store *session.Store, journal *session.RuntimeJournal, emit EventEmitter) *SessionController {
-	controller := &SessionController{
-		id:      sessionID,
-		cfg:     cfg,
-		engine:  engine,
-		store:   store,
-		journal: journal,
-		state:   state,
+func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState,
+	repository session.SessionRepository, journal session.RuntimeStore, emit EventEmitter) *SessionController {
+	if identity.TenantID == "" {
+		identity.TenantID = session.LocalTenantID
 	}
-	controller.bridge = NewWSRendererBridge(sessionID, emit, controller.nextSeq)
+	identity.SessionID = sessionID
+	if identity.ProjectID == "" {
+		identity.ProjectID = agent.MemoryFabricSpace(cfg)
+	}
+	controller := &SessionController{
+		tenantID:   identity.TenantID,
+		id:         sessionID,
+		fenceToken: identity.FenceToken,
+		identity:   identity,
+		cfg:        cfg,
+		engine:     engine,
+		repository: repository,
+		journal:    journal,
+		state:      state,
+	}
+	controller.bridge = NewWSRendererBridge(identity.TenantID, sessionID, emit, controller.nextSeq)
 	controller.ui = luminaui.NewUiRuntime(engine, controller.bridge)
 	if engine != nil && engine.CoreEngine != nil {
 		engine.CoreEngine.StateObserver = controller.observeState
@@ -213,6 +344,14 @@ func NewSessionController(sessionID string, cfg config.Config, engine *agent.Que
 
 func (c *SessionController) ID() string {
 	return c.id
+}
+
+func (c *SessionController) TenantID() string { return c.tenantID }
+
+func (c *SessionController) FenceToken() int64 { return c.fenceToken }
+
+func (c *SessionController) RuntimeIdentity() cluster.RuntimeIdentity {
+	return c.identity
 }
 
 func (c *SessionController) RuntimeConfig() config.Config {
@@ -384,6 +523,46 @@ func (c *SessionController) SubmitCommand(ctx context.Context, commandID, input 
 	return result, err
 }
 
+func (c *SessionController) CachedCommandResponse(ctx context.Context, commandID string) (*RPCResponse, error) {
+	if c.journal == nil || strings.TrimSpace(commandID) == "" {
+		return nil, nil
+	}
+	stored, err := c.journal.GetCommandResult(ctx, commandID)
+	if err != nil || stored == nil {
+		return nil, err
+	}
+	var response RPCResponse
+	if err := json.Unmarshal(stored.Result, &response); err == nil && response.ID != "" {
+		return &response, nil
+	}
+	// session.submit historically stored only its accepted result. Preserve
+	// that durable idempotency record while upgrading the RPC envelope.
+	var result any
+	if err := json.Unmarshal(stored.Result, &result); err != nil {
+		return nil, err
+	}
+	return &RPCResponse{ID: commandID, OK: true, Result: result}, nil
+}
+
+func (c *SessionController) SaveCommandResponse(ctx context.Context, response RPCResponse) error {
+	if c.journal == nil || strings.TrimSpace(response.ID) == "" {
+		return errors.New("runtime journal or command id is unavailable")
+	}
+	if existing, err := c.journal.GetCommandResult(ctx, response.ID); err != nil || existing != nil {
+		return err
+	}
+	raw, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	head, err := c.journal.Head(ctx)
+	if err != nil {
+		return err
+	}
+	return c.journal.SaveCommandResult(ctx, harness.CommandResult{CommandID: response.ID,
+		SessionID: c.id, AcceptedSeq: head, Result: raw})
+}
+
 func (c *SessionController) submit(ctx context.Context, input string, beforeStart func() error) (map[string]any, error) {
 	if strings.TrimSpace(input) == "" {
 		return nil, errors.New("empty input")
@@ -505,7 +684,8 @@ func (c *SessionController) persistStateSnapshot(state *agent.AgentState) error 
 	if err := session.AppendRuntimeState(context.Background(), c.journal, state, recovery, tasks); err != nil {
 		return err
 	}
-	return c.store.UpdateMetaProjection(c.id, len(state.Messages), state.TurnCount)
+	return c.repository.UpdateMetaProjection(context.Background(), c.tenantID, c.id, c.fenceToken,
+		len(state.Messages), state.TurnCount)
 }
 
 func (c *SessionController) Compact() map[string]any {

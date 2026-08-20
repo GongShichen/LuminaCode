@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,6 +53,9 @@ func NewInspectionStore(sessionDir string) *Store {
 }
 
 func (s *Store) Save(sessionID string, messages []map[string]any, turnCount int) error {
+	if err := s.requireWritable(sessionID); err != nil {
+		return err
+	}
 	s.migrateLegacySession(sessionID)
 	if err := atomicWriteJSONL(s.sessionPath(sessionID), messages); err != nil {
 		return err
@@ -61,6 +65,9 @@ func (s *Store) Save(sessionID string, messages []map[string]any, turnCount int)
 }
 
 func (s *Store) SaveWithMeta(sessionID string, messages []map[string]any, meta *Meta, turnCount int) error {
+	if err := s.requireWritable(sessionID); err != nil {
+		return err
+	}
 	s.migrateLegacySession(sessionID)
 	if err := atomicWriteJSONL(s.sessionPath(sessionID), messages); err != nil {
 		return err
@@ -104,6 +111,9 @@ func (s *Store) Load(sessionID string) []map[string]any {
 }
 
 func (s *Store) SaveStateWithRecovery(sessionID string, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
+	if err := s.requireWritable(sessionID); err != nil {
+		return err
+	}
 	if state == nil {
 		return nil
 	}
@@ -159,6 +169,9 @@ func (s *Store) SaveSnapshotWithRecovery(sessionID string, state *agent.AgentSta
 // UpdateMetaProjection maintains the small, rebuildable session-list index.
 // Runtime state is sourced from runtime.sqlite rather than this cache.
 func (s *Store) UpdateMetaProjection(sessionID string, messageCount, turnCount int) error {
+	if err := s.requireWritable(sessionID); err != nil {
+		return err
+	}
 	_, err := s.upsertMeta(sessionID, messageCount, turnCount, nil)
 	return err
 }
@@ -377,6 +390,9 @@ func (s *Store) loadSQLiteMeta(sessionID string) *Meta {
 }
 
 func (s *Store) Delete(sessionID string) {
+	if s.requireWritable(sessionID) != nil {
+		return
+	}
 	_ = os.Remove(s.sessionPath(sessionID))
 	_ = os.Remove(s.metaPath(sessionID))
 	_ = os.Remove(s.statePath(sessionID))
@@ -391,6 +407,9 @@ func (s *Store) Delete(sessionID string) {
 }
 
 func (s *Store) Pin(sessionID string, pinned bool) (*Meta, error) {
+	if err := s.requireWritable(sessionID); err != nil {
+		return nil, err
+	}
 	s.migrateLegacySession(sessionID)
 	meta := s.LoadMeta(sessionID)
 	if meta == nil {
@@ -403,6 +422,13 @@ func (s *Store) Pin(sessionID string, pinned bool) (*Meta, error) {
 	}
 	meta.Pinned = pinned
 	return meta, atomicWriteJSON(s.metaPath(sessionID), meta)
+}
+
+func (s *Store) requireWritable(sessionID string) error {
+	if LocalRuntimeMigrated(s.dir, sessionID) {
+		return fmt.Errorf("session %s was migrated to cluster storage and is read-only locally", sessionID)
+	}
+	return nil
 }
 
 func (s *Store) upsertMeta(sessionID string, messageCount, turnCount int, provided *Meta) (*Meta, error) {

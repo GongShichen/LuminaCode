@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 )
 
@@ -20,6 +21,10 @@ type persistedTeamFile struct {
 }
 
 func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snapshot {
+	return m.RestorePersistedForParentFor("local", parentSessionID, cwd)
+}
+
+func (m *Manager) RestorePersistedForParentFor(tenantID, parentSessionID, cwd string) []Snapshot {
 	parentSessionID = strings.TrimSpace(parentSessionID)
 	if parentSessionID == "" {
 		return nil
@@ -32,7 +37,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 			continue
 		}
 		m.mu.Lock()
-		existing := m.sessions[persisted.ID]
+		existing := m.sessions[teamSessionKey(tenantID, persisted.ID)]
 		m.mu.Unlock()
 		if existing != nil {
 			snapshots = append(snapshots, existing.Snapshot())
@@ -48,7 +53,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 		if err != nil {
 			continue
 		}
-		session := NewSession(parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
+		session := NewSessionFor(tenantID, parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 		session.ID = persisted.ID
 		session.rootDir = root
 		m.mu.Lock()
@@ -80,7 +85,7 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 			}
 		}
 		m.mu.Lock()
-		m.sessions[session.ID] = session
+		m.sessions[teamSessionKey(tenantID, session.ID)] = session
 		m.mu.Unlock()
 		session.persist()
 		snapshots = append(snapshots, session.Snapshot())
@@ -91,6 +96,18 @@ func (m *Manager) RestorePersistedForParent(parentSessionID, cwd string) []Snaps
 // RestoreRuntimeCheckpoints rebuilds Team aggregates exclusively from the
 // parent session journal. Legacy sidecar files are intentionally not read.
 func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpoints []RuntimeCheckpoint) []Snapshot {
+	return m.RestoreRuntimeCheckpointsFor("local", parentSessionID, cwd, checkpoints)
+}
+
+func (m *Manager) RestoreRuntimeCheckpointsFor(tenantID, parentSessionID, cwd string,
+	checkpoints []RuntimeCheckpoint) []Snapshot {
+	return m.RestoreRuntimeCheckpointsWithIdentity(cluster.RuntimeIdentity{TenantID: tenantID,
+		SessionID: parentSessionID}, cwd, checkpoints)
+}
+
+func (m *Manager) RestoreRuntimeCheckpointsWithIdentity(identity cluster.RuntimeIdentity, cwd string,
+	checkpoints []RuntimeCheckpoint) []Snapshot {
+	tenantID, parentSessionID := identity.TenantID, identity.SessionID
 	parentSessionID = strings.TrimSpace(parentSessionID)
 	if parentSessionID == "" {
 		return nil
@@ -104,7 +121,7 @@ func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpo
 			continue
 		}
 		m.mu.Lock()
-		existing := m.sessions[checkpoint.Snapshot.TeamSessionID]
+		existing := m.sessions[teamSessionKey(tenantID, checkpoint.Snapshot.TeamSessionID)]
 		journalPersistence := m.journalPersistence
 		m.mu.Unlock()
 		if existing != nil {
@@ -121,7 +138,7 @@ func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpo
 		if err != nil {
 			continue
 		}
-		session := NewSession(parentSessionID, cfg, spec, m.engineFactory, m.emit, m.askPermission)
+		session := NewSessionWithIdentity(identity, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 		session.ID = checkpoint.Snapshot.TeamSessionID
 		session.rootDir = teamSessionRoot(cfg, parentSessionID, spec.Name, session.ID)
 		session.persistEnabled = !journalPersistence
@@ -148,7 +165,7 @@ func (m *Manager) RestoreRuntimeCheckpoints(parentSessionID, cwd string, checkpo
 			}
 		}
 		m.mu.Lock()
-		m.sessions[session.ID] = session
+		m.sessions[teamSessionKey(tenantID, session.ID)] = session
 		m.mu.Unlock()
 		snapshots = append(snapshots, session.Snapshot())
 	}

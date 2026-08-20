@@ -3,7 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +22,7 @@ import (
 	"LuminaCode/apppaths"
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/maintenance"
 	"LuminaCode/memory"
@@ -26,6 +31,7 @@ import (
 	coretools "LuminaCode/tools"
 	luminaui "LuminaCode/ui"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
@@ -41,7 +47,13 @@ func main() {
 
 func runMemoryCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lumina-backend memory <search|remember|forget|doctor|seal|flush>")
+		return fmt.Errorf("usage: lumina-backend memory <search|remember|forget|doctor|seal|flush|migrate|export>")
+	}
+	if args[0] == "migrate" {
+		return runMemoryStoreMigration(args[1:], false)
+	}
+	if args[0] == "export" {
+		return runMemoryStoreMigration(args[1:], true)
 	}
 	cfg := config.NewConfig()
 	if len(cfg.PathErrors) > 0 {
@@ -183,6 +195,172 @@ func runMemoryCLI(args []string) error {
 	}
 }
 
+func runMemoryStoreMigration(args []string, exporting bool) error {
+	command := "memory migrate"
+	if exporting {
+		command = "memory export"
+	}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	from := flags.String("from", "", "source store")
+	to := flags.String("to", "", "target store")
+	tenantID := flags.String("tenant", "", "tenant ID")
+	project := flags.String("project", "", "project working directory")
+	output := flags.String("output", "", "new SQLite Fabric directory for export")
+	dryRun := flags.Bool("dry-run", false, "validate without publishing target data")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if !exporting && (*from != "sqlite" || *to != "postgres") {
+		return fmt.Errorf("memory migration supports only --from sqlite --to postgres")
+	}
+	if exporting && (*from != "postgres" || *to != "sqlite") {
+		return fmt.Errorf("memory export supports only --from postgres --to sqlite")
+	}
+	if strings.TrimSpace(*tenantID) == "" {
+		return fmt.Errorf("%s requires --tenant", command)
+	}
+	cfg := config.NewConfigForCWD(strings.TrimSpace(*project))
+	if strings.TrimSpace(cfg.PostgresURL) == "" || strings.TrimSpace(cfg.RedisURL) == "" {
+		return fmt.Errorf("%s requires postgres_url and redis_url", command)
+	}
+	if exporting && strings.TrimSpace(*output) == "" {
+		return fmt.Errorf("memory export requires --output with a new directory")
+	}
+	ctx := context.Background()
+	identity := cluster.RuntimeIdentity{TenantID: strings.TrimSpace(*tenantID), ProjectID: agent.MemoryFabricSpace(cfg)}
+	coordinator, err := cluster.NewRedisRuntime(ctx, cfg.RedisURL, cfg.ClusterID)
+	if err != nil {
+		return err
+	}
+	defer coordinator.Close()
+	var lease cluster.SessionLease
+	if !*dryRun {
+		lease, err = coordinator.Acquire(ctx, identity.TenantID, "memory-migration:"+identity.ProjectID,
+			"memory-migration-"+uuid.NewString(), 60*time.Second, 20*time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire Memory Fabric migration lease: %w", err)
+		}
+		defer lease.Release(context.Background())
+	}
+	factory := agent.NewConfiguredMemoryFabricFactory()
+	if exporting {
+		sourceConfig := cfg
+		sourceConfig.MemoryFabricStore = "postgres"
+		sourceConfig.RedisURL = ""
+		source, err := factory.Open(ctx, sourceConfig, agent.MemoryOpenOptions{Identity: identity})
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		if !*dryRun {
+			if err := source.Flush(ctx); err != nil {
+				return err
+			}
+		}
+		exporter, ok := source.(memory.DurableSnapshotExporter)
+		if !ok {
+			return fmt.Errorf("PostgreSQL Memory Fabric does not support durable export")
+		}
+		snapshot, err := exporter.ExportDurableSnapshot(ctx, agent.MemoryFabricSpace(cfg))
+		if err != nil {
+			return err
+		}
+		if *dryRun {
+			return writeJSON(os.Stdout, memory.FabricMigrationReport{MigrationID: "memory-export-" + snapshot.Checksum[:16],
+				TenantID: identity.TenantID, ProjectID: identity.ProjectID, Space: snapshot.Space,
+				Events: len(snapshot.Events), Identities: len(snapshot.Identities), Nodes: len(snapshot.Nodes), Conflicts: len(snapshot.Conflicts),
+				Resolutions: len(snapshot.Resolutions), Checksum: snapshot.Checksum, DryRun: true, Status: "validated"})
+		}
+		targetDir := filepath.Clean(*output)
+		if entries, readErr := os.ReadDir(targetDir); readErr == nil && len(entries) > 0 {
+			return fmt.Errorf("memory export target must be a new or empty directory: %s", targetDir)
+		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		targetConfig := cfg
+		targetConfig.MemoryFabricStore = "sqlite"
+		targetConfig.MemoryPath = targetDir
+		targetConfig.RedisURL = ""
+		target, err := factory.Open(ctx, targetConfig, agent.MemoryOpenOptions{Identity: cluster.RuntimeIdentity{TenantID: "local"}})
+		if err != nil {
+			return err
+		}
+		defer target.Close()
+		importer, ok := target.(memory.DurableSnapshotImporter)
+		if !ok {
+			return fmt.Errorf("SQLite Memory Fabric does not support durable import")
+		}
+		report, err := importer.ImportDurableSnapshot(ctx, snapshot,
+			"memory-export-"+snapshot.Checksum[:16], *dryRun)
+		if err != nil {
+			return err
+		}
+		return writeJSON(os.Stdout, report)
+	}
+
+	sourceConfig := cfg
+	sourceConfig.MemoryFabricStore = "sqlite"
+	sourceConfig.RedisURL = ""
+	source, err := factory.Open(ctx, sourceConfig, agent.MemoryOpenOptions{Identity: cluster.RuntimeIdentity{TenantID: "local"}})
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	if !*dryRun {
+		if err := source.Flush(ctx); err != nil {
+			return err
+		}
+	}
+	exporter, ok := source.(memory.DurableSnapshotExporter)
+	if !ok {
+		return fmt.Errorf("SQLite Memory Fabric does not support durable export")
+	}
+	snapshot, err := exporter.ExportDurableSnapshot(ctx, agent.MemoryFabricSpace(cfg))
+	if err != nil {
+		return err
+	}
+	if *dryRun {
+		return writeJSON(os.Stdout, memory.FabricMigrationReport{MigrationID: "memory-" + snapshot.Checksum[:16],
+			TenantID: identity.TenantID, ProjectID: identity.ProjectID, Space: snapshot.Space,
+			Events: len(snapshot.Events), Identities: len(snapshot.Identities), Nodes: len(snapshot.Nodes), Conflicts: len(snapshot.Conflicts),
+			Resolutions: len(snapshot.Resolutions), Checksum: snapshot.Checksum, DryRun: true, Status: "validated"})
+	}
+	targetConfig := cfg
+	targetConfig.MemoryFabricStore = "postgres"
+	targetConfig.RedisURL = ""
+	target, err := factory.Open(ctx, targetConfig, agent.MemoryOpenOptions{Identity: identity})
+	if err != nil {
+		return err
+	}
+	defer target.Close()
+	importer, ok := target.(memory.DurableSnapshotImporter)
+	if !ok {
+		return fmt.Errorf("PostgreSQL Memory Fabric does not support durable import")
+	}
+	report, err := importer.ImportDurableSnapshot(ctx, snapshot, "memory-"+snapshot.Checksum[:16], false)
+	if err != nil {
+		return err
+	}
+	if err := target.Flush(ctx); err != nil {
+		return err
+	}
+	verified, err := target.(memory.DurableSnapshotExporter).ExportDurableSnapshot(ctx, snapshot.Space)
+	if err != nil {
+		return err
+	}
+	if verified.Checksum != snapshot.Checksum {
+		return fmt.Errorf("Memory Fabric migration checksum mismatch: source=%s target=%s",
+			snapshot.Checksum, verified.Checksum)
+	}
+	if _, err := target.Doctor(ctx); err != nil {
+		return err
+	}
+	if err := memory.MarkSQLiteFabricMigrated(cfg.MemoryPath, report); err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, report)
+}
+
 func parseMemoryCLITime(text string) time.Time {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -223,6 +401,9 @@ func run(args []string) error {
 	}
 	if len(args) > 0 && args[0] == "session" {
 		return runSessionCLI(args[1:])
+	}
+	if len(args) > 0 && args[0] == "cluster" {
+		return runClusterCLI(args[1:])
 	}
 	flags := flag.NewFlagSet("lumina", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -385,6 +566,65 @@ func run(args []string) error {
 	return runREPL(context.Background(), engine, state, store, sessionID)
 }
 
+func runClusterCLI(args []string) error {
+	if len(args) == 0 || args[0] != "init-local" {
+		return fmt.Errorf("usage: lumina-backend cluster init-local [--output <dir>] [--tenant <id>]")
+	}
+	flags := flag.NewFlagSet("cluster init-local", flag.ContinueOnError)
+	cfg := config.NewConfig()
+	output := flags.String("output", filepath.Join(cfg.Paths.ConfigDir, "cluster"), "key and token output directory")
+	tenantID := flags.String("tenant", "local", "admin token tenant")
+	issuer := flags.String("issuer", "lumina-local", "JWT issuer")
+	audience := flags.String("audience", "lumina-local", "JWT audience")
+	validFor := flags.Duration("valid-for", 24*time.Hour, "admin token lifetime")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*issuer) == "" ||
+		strings.TrimSpace(*audience) == "" || *validFor <= 0 {
+		return fmt.Errorf("tenant, issuer, audience, and a positive valid-for are required")
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return err
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		return err
+	}
+	outputDir := filepath.Clean(*output)
+	privatePath := filepath.Join(outputDir, "jwt-private.pem")
+	publicPath := filepath.Join(outputDir, "jwt-public.pem")
+	tokenPath := filepath.Join(outputDir, "admin.jwt")
+	if err := apppaths.WriteFileAtomic(privatePath,
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		return err
+	}
+	if err := apppaths.WriteFileAtomic(publicPath,
+		pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}), 0o600); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	claims := jwt.MapClaims{"iss": strings.TrimSpace(*issuer), "aud": strings.TrimSpace(*audience),
+		"sub": "local-admin", "tenant_id": strings.TrimSpace(*tenantID),
+		"scope": "lumina:admin lumina:session:read lumina:session:write", "jti": uuid.NewString(),
+		"iat": now.Unix(), "nbf": now.Add(-30 * time.Second).Unix(), "exp": now.Add(*validFor).Unix()}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(private)
+	if err != nil {
+		return err
+	}
+	if err := apppaths.WriteFileAtomic(tokenPath, append([]byte(token), '\n'), 0o600); err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, map[string]any{"public_key_file": publicPath, "private_key_file": privatePath,
+		"admin_token_file": tokenPath, "jwt_issuer": *issuer, "jwt_audience": *audience,
+		"jwt_tenant_claim": "tenant_id", "jwt_scope_claim": "scope", "expires_at": now.Add(*validFor)})
+}
+
 func runRuntimeCLI(args []string) error {
 	if len(args) == 0 || args[0] != "dump" {
 		return fmt.Errorf("usage: lumina-backend runtime dump --session <session-id>")
@@ -429,15 +669,30 @@ func runRuntimeCLI(args []string) error {
 }
 
 func runSessionCLI(args []string) error {
-	if len(args) == 0 || args[0] != "migrate" {
-		return fmt.Errorf("usage: lumina-backend session migrate <--check|--all|--status> [--session <id>]")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lumina-backend session <migrate|export>")
 	}
+	if args[0] == "export" {
+		return runClusterSessionExport(args[1:])
+	}
+	if args[0] != "migrate" {
+		return fmt.Errorf("usage: lumina-backend session <migrate|export>")
+	}
+	for _, arg := range args[1:] {
+		if arg == "--from" || strings.HasPrefix(arg, "--from=") || arg == "--to" || strings.HasPrefix(arg, "--to=") {
+			return runClusterSessionMigration(args[1:])
+		}
+	}
+	return runLegacySessionMigration(args[1:])
+}
+
+func runLegacySessionMigration(args []string) error {
 	flags := flag.NewFlagSet("session migrate", flag.ContinueOnError)
 	check := flags.Bool("check", false, "inspect migration status without changing sessions")
 	all := flags.Bool("all", false, "migrate all legacy sessions")
 	status := flags.Bool("status", false, "show migration status")
 	sessionID := flags.String("session", "", "limit operation to one session")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	selected := 0
@@ -485,6 +740,145 @@ func runSessionCLI(args []string) error {
 		results = append(results, entry)
 	}
 	return writeJSON(os.Stdout, map[string]any{"sessions": results})
+}
+
+func runClusterSessionMigration(args []string) error {
+	flags := flag.NewFlagSet("session migrate", flag.ContinueOnError)
+	from := flags.String("from", "", "source backend (local)")
+	to := flags.String("to", "", "target backend (cluster)")
+	tenantID := flags.String("tenant", "", "target tenant ID")
+	sessionID := flags.String("session", "", "one session ID")
+	all := flags.Bool("all", false, "migrate all local sessions")
+	dryRun := flags.Bool("dry-run", false, "validate without writing PostgreSQL or markers")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *from != "local" || *to != "cluster" {
+		return fmt.Errorf("session migration supports only --from local --to cluster")
+	}
+	if strings.TrimSpace(*tenantID) == "" {
+		return fmt.Errorf("session migration requires --tenant")
+	}
+	if (*all && strings.TrimSpace(*sessionID) != "") || (!*all && strings.TrimSpace(*sessionID) == "") {
+		return fmt.Errorf("exactly one of --session or --all is required")
+	}
+	cfg := config.NewConfig()
+	if strings.TrimSpace(cfg.PostgresURL) == "" || strings.TrimSpace(cfg.RedisURL) == "" {
+		return fmt.Errorf("session migration requires postgres_url and redis_url")
+	}
+	ctx := context.Background()
+	repository, err := session.NewPostgresRepository(ctx, cfg.PostgresURL, cfg.ClusterID)
+	if err != nil {
+		return err
+	}
+	defer repository.Close()
+	coordinator, err := cluster.NewRedisRuntime(ctx, cfg.RedisURL, cfg.ClusterID)
+	if err != nil {
+		return err
+	}
+	defer coordinator.Close()
+	store := session.NewStore(cfg.SessionDir)
+	ids := []string{strings.TrimSpace(*sessionID)}
+	if *all {
+		ids = ids[:0]
+		for _, meta := range store.ListSessions() {
+			ids = append(ids, meta.SessionID)
+		}
+	}
+	results := make([]session.ClusterMigrationReport, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		var journal *session.RuntimeJournal
+		if _, statErr := os.Stat(session.RuntimeJournalPath(cfg.SessionDir, id)); errors.Is(statErr, os.ErrNotExist) {
+			loaded, migrateErr := store.OpenRuntime(ctx, id)
+			if migrateErr != nil {
+				return migrateErr
+			}
+			journal, _ = loaded.Journal.(*session.RuntimeJournal)
+		} else if statErr != nil {
+			return statErr
+		} else {
+			var openErr error
+			journal, openErr = session.OpenRuntimeJournal(ctx, cfg.SessionDir, id)
+			if openErr != nil {
+				return openErr
+			}
+		}
+		if journal == nil {
+			return fmt.Errorf("session %s does not have a local runtime journal", id)
+		}
+		migrationID := "session-" + uuid.NewSHA1(uuid.NameSpaceOID,
+			[]byte(strings.TrimSpace(*tenantID)+"\x00"+id)).String()
+		fence := int64(0)
+		var lease cluster.SessionLease
+		if !*dryRun {
+			lease, err = coordinator.Acquire(ctx, strings.TrimSpace(*tenantID), id,
+				"migration-"+uuid.NewString(), 30*time.Second, 10*time.Second)
+			if err != nil {
+				_ = journal.Close()
+				return fmt.Errorf("acquire migration lease for %s: %w", id, err)
+			}
+			fence = lease.Owner().FenceToken
+		}
+		report, migrateErr := repository.ImportLocalRuntime(ctx, strings.TrimSpace(*tenantID), id,
+			cfg.CWD, migrationID, fence, journal, *dryRun)
+		_ = journal.Close()
+		if lease != nil {
+			_ = lease.Release(ctx)
+		}
+		if migrateErr != nil {
+			return migrateErr
+		}
+		if !*dryRun {
+			if err := session.MarkLocalRuntimeMigrated(cfg.SessionDir, report); err != nil {
+				return err
+			}
+		}
+		results = append(results, report)
+	}
+	return writeJSON(os.Stdout, map[string]any{"sessions": results, "dry_run": *dryRun})
+}
+
+func runClusterSessionExport(args []string) error {
+	flags := flag.NewFlagSet("session export", flag.ContinueOnError)
+	from := flags.String("from", "", "source backend (cluster)")
+	to := flags.String("to", "", "target backend (local)")
+	tenantID := flags.String("tenant", "", "source tenant ID")
+	sessionID := flags.String("session", "", "session ID")
+	output := flags.String("output", "", "new local session directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *from != "cluster" || *to != "local" || strings.TrimSpace(*tenantID) == "" ||
+		strings.TrimSpace(*sessionID) == "" || strings.TrimSpace(*output) == "" {
+		return fmt.Errorf("usage: lumina-backend session export --from cluster --to local --tenant <id> --session <id> --output <dir>")
+	}
+	cfg := config.NewConfig()
+	ctx := context.Background()
+	coordinator, err := cluster.NewRedisRuntime(ctx, cfg.RedisURL, cfg.ClusterID)
+	if err != nil {
+		return err
+	}
+	defer coordinator.Close()
+	owner, err := coordinator.Lookup(ctx, *tenantID, *sessionID)
+	if err != nil {
+		return err
+	}
+	if owner != nil {
+		return fmt.Errorf("session %s has active owner %s; drain it before export", *sessionID, owner.InstanceID)
+	}
+	repository, err := session.NewPostgresRepository(ctx, cfg.PostgresURL, cfg.ClusterID)
+	if err != nil {
+		return err
+	}
+	defer repository.Close()
+	report, err := repository.ExportRuntimeToLocal(ctx, *tenantID, *sessionID, filepath.Clean(*output))
+	if err != nil {
+		return err
+	}
+	return writeJSON(os.Stdout, report)
 }
 
 func runPrompt(ctx context.Context, engine *agent.QueryEngine, prompt string, state *agent.AgentState) error {

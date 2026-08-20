@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"LuminaCode/agent"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -306,11 +307,11 @@ func TestLongMemEvalFabricPrepareBuildsRawSnapshotWithoutSemanticAPI(t *testing.
 	cfg.MemoryBackend = "fabric"
 	cfg.MemoryRemoteProcessing = "off"
 	cfg.MemoryEmbeddingModel = "bge-m3"
-	fixtureOpener := func(ctx context.Context, cfg config.Config, startWorkers bool,
-		observer memory.APIUsageObserver) (*memory.Fabric, error) {
+	fixtureOpener := func(ctx context.Context, cfg config.Config,
+		openOptions agent.MemoryOpenOptions) (memory.FabricEngine, error) {
 		fabricOptions := memory.DefaultFabricOptions(cfg.MemoryPath)
-		fabricOptions.StartWorkers = startWorkers
-		fabricOptions.UsageObserver = observer
+		fabricOptions.StartWorkers = openOptions.StartWorkers
+		fabricOptions.UsageObserver = openOptions.UsageObserver
 		fabricOptions.RemoteProcessing = memory.RemoteProcessingOff
 		fabricOptions.Vectorizer = longMemEvalFixtureVectorizer{}
 		return memory.OpenFabric(ctx, fabricOptions)

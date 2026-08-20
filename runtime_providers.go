@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 	"LuminaCode/session"
@@ -17,7 +18,7 @@ func provideMemoryPreflight(ctx context.Context, cfg config.Config, factory agen
 	if !cfg.LongTermMemoryEnabled {
 		return memoryPreflight{}, nil
 	}
-	fabric, err := factory.Open(ctx, cfg, false)
+	fabric, err := factory.Open(ctx, cfg, agent.MemoryOpenOptions{Identity: cluster.RuntimeIdentity{TenantID: session.LocalTenantID}})
 	if err != nil {
 		return memoryPreflight{}, fmt.Errorf("open Memory Fabric: %w", err)
 	}
@@ -37,7 +38,7 @@ type PromptRuntime struct {
 }
 
 func providePromptEngine(cfg config.Config, memoryFactory agent.MemoryFabricFactory) (*agent.QueryEngine, func()) {
-	core := agent.NewCoreExecutionEngine(cfg, memoryFactory)
+	core := agent.NewCoreExecutionEngine(cfg, cluster.RuntimeIdentity{TenantID: session.LocalTenantID}, memoryFactory)
 	engine := agent.NewQueryEngine(cfg, core)
 	return engine, engine.Shutdown
 }
@@ -51,11 +52,11 @@ func newPromptRuntime(engine *agent.QueryEngine, store *session.Store) *PromptRu
 }
 
 type MemoryCommandRuntime struct {
-	Fabric *memory.Fabric
+	Fabric memory.FabricEngine
 }
 
-func provideMemoryCommandFabric(ctx context.Context, cfg config.Config, factory agent.MemoryFabricFactory) (*memory.Fabric, func(), error) {
-	fabric, err := factory.Open(ctx, cfg, false)
+func provideMemoryCommandFabric(ctx context.Context, cfg config.Config, factory agent.MemoryFabricFactory) (memory.FabricEngine, func(), error) {
+	fabric, err := factory.Open(ctx, cfg, agent.MemoryOpenOptions{Identity: cluster.RuntimeIdentity{TenantID: session.LocalTenantID}})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,7 +66,7 @@ func provideMemoryCommandFabric(ctx context.Context, cfg config.Config, factory 
 	return fabric, func() { _ = fabric.Close() }, nil
 }
 
-func newMemoryCommandRuntime(fabric *memory.Fabric) *MemoryCommandRuntime {
+func newMemoryCommandRuntime(fabric memory.FabricEngine) *MemoryCommandRuntime {
 	return &MemoryCommandRuntime{Fabric: fabric}
 }
 
@@ -77,7 +78,7 @@ type RuntimeInspectionOptions struct {
 type runtimeSessionID string
 
 type RuntimeInspectionRuntime struct {
-	Journal  *session.RuntimeJournal
+	Journal  session.RuntimeStore
 	Engine   *agent.QueryEngine
 	Assembly *agent.RuntimeAssembly
 }
@@ -87,7 +88,7 @@ func provideRuntimeSessionID(opts RuntimeInspectionOptions) runtimeSessionID {
 	return runtimeSessionID(opts.SessionID)
 }
 
-func provideRuntimeJournal(ctx context.Context, cfg config.Config, sessionID runtimeSessionID) (*session.RuntimeJournal, func(), error) {
+func provideRuntimeJournal(ctx context.Context, cfg config.Config, sessionID runtimeSessionID) (session.RuntimeStore, func(), error) {
 	journal, err := session.OpenRuntimeJournal(ctx, cfg.SessionDir, string(sessionID))
 	if err != nil {
 		return nil, nil, err
@@ -95,7 +96,7 @@ func provideRuntimeJournal(ctx context.Context, cfg config.Config, sessionID run
 	return journal, func() { _ = journal.Close() }, nil
 }
 
-func provideRuntimeAssembly(sessionID runtimeSessionID, journal *session.RuntimeJournal,
+func provideRuntimeAssembly(sessionID runtimeSessionID, journal session.RuntimeStore,
 	engine *agent.QueryEngine) (*agent.RuntimeAssembly, error) {
 	assembly, err := agent.NewRuntimeAssembly(string(sessionID), journal, engine.CoreEngine.Registry)
 	if err != nil {
@@ -108,7 +109,7 @@ func provideRuntimeAssembly(sessionID runtimeSessionID, journal *session.Runtime
 	return assembly, nil
 }
 
-func newRuntimeInspectionRuntime(journal *session.RuntimeJournal, engine *agent.QueryEngine,
+func newRuntimeInspectionRuntime(journal session.RuntimeStore, engine *agent.QueryEngine,
 	assembly *agent.RuntimeAssembly) *RuntimeInspectionRuntime {
 	return &RuntimeInspectionRuntime{Journal: journal, Engine: engine, Assembly: assembly}
 }
