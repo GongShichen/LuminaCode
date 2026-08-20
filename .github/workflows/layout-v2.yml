@@ -41,8 +41,22 @@ jobs:
           $toolchain | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
+      - name: Check generated dependency wiring
+        run: |
+          go tool wire check ./...
+          go tool wire diff ./...
       - name: Go tests
         run: go test ./...
+      - name: Go vet
+        run: go vet ./...
+      - name: Go build
+        run: go build ./...
+      - name: Race-sensitive runtime tests
+        if: runner.os == 'Linux'
+        run: go test -race ./agent ./backend ./session ./team
+      - name: Redis and pgvector integration tests
+        if: runner.os == 'Linux'
+        run: go test -tags=integration ./integration -count=1
       - name: Frontend tests
         run: npm --prefix frontend test
       - name: AppRoot hardcoding check

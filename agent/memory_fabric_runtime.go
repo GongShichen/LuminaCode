@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"LuminaCode/api"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 	"LuminaCode/memory/localmodel"
@@ -46,8 +47,8 @@ func MemoryFabricSpace(cfg config.Config) string {
 // ledger or invoking a remote model.
 func ConfiguredMemorySemanticPlanner(cfg config.Config) memory.SemanticPlanner {
 	var vectorizer memory.Vectorizer
-	if encoder, err := configuredMemoryBGEEncoder(cfg); err == nil {
-		vectorizer = newFabricVectorizer(bgeDenseVectorEncoder{encoder: encoder}, fabricEmbeddingArtifactDir(cfg))
+	if encoder, err := configuredMemoryRetrievalEncoder(cfg); err == nil {
+		vectorizer = newFabricVectorizer(retrievalDenseVectorEncoder{encoder: encoder}, fabricEmbeddingArtifactDir(cfg))
 	}
 	return memory.NewLocalSemanticPlanner(vectorizer)
 }
@@ -62,22 +63,42 @@ func ConfiguredMemorySemanticCompiler(cfg config.Config) memory.SemanticCompiler
 	return newFabricSemanticCompiler(cfg, configuredFabricModel(cfg.MemoryCompilerModel, cfg.APIModel))
 }
 
-func openConfiguredMemoryFabric(ctx context.Context, cfg config.Config) (*memory.Fabric, error) {
-	return OpenConfiguredMemoryFabric(ctx, cfg, true)
+// MemoryFabricFactory owns creation of configured Memory Fabric instances.
+// Keeping this dependency explicit lets static entrypoints use generated
+// wiring while runtime-scoped engines can create and refresh fabrics through
+// the same factory.
+type MemoryFabricFactory interface {
+	Open(context.Context, config.Config, MemoryOpenOptions) (memory.FabricEngine, error)
 }
 
-func OpenConfiguredMemoryFabric(ctx context.Context, cfg config.Config, startWorkers bool) (*memory.Fabric, error) {
-	return OpenConfiguredMemoryFabricWithUsageObserver(ctx, cfg, startWorkers, nil)
+type MemoryOpenOptions struct {
+	Identity      cluster.RuntimeIdentity
+	StartWorkers  bool
+	UsageObserver memory.APIUsageObserver
 }
 
-func OpenConfiguredMemoryFabricWithUsageObserver(ctx context.Context, cfg config.Config, startWorkers bool,
-	observer memory.APIUsageObserver) (*memory.Fabric, error) {
+type ConfiguredMemoryFabricFactory struct{}
+
+func NewConfiguredMemoryFabricFactory() *ConfiguredMemoryFabricFactory {
+	return &ConfiguredMemoryFabricFactory{}
+}
+
+func (*ConfiguredMemoryFabricFactory) Open(ctx context.Context, cfg config.Config,
+	openOptions MemoryOpenOptions) (memory.FabricEngine, error) {
+	return openConfiguredMemoryFabric(ctx, cfg, openOptions)
+}
+
+func openConfiguredMemoryFabric(ctx context.Context, cfg config.Config,
+	openOptions MemoryOpenOptions) (memory.FabricEngine, error) {
 	if !cfg.LongTermMemoryEnabled || !isFabricMemoryBackend(cfg) {
 		return nil, nil
 	}
+	if !cfg.UsesPostgresMemoryFabric() && memory.SQLiteFabricMigrated(cfg.MemoryPath) {
+		return nil, errors.New("local Memory Fabric was migrated to PostgreSQL and is read-only")
+	}
 	options := memory.DefaultFabricOptions(cfg.MemoryPath)
-	options.StartWorkers = startWorkers
-	options.UsageObserver = observer
+	options.StartWorkers = openOptions.StartWorkers
+	options.UsageObserver = openOptions.UsageObserver
 	options.RemoteProcessing = memory.RemoteProcessingPolicy(strings.ToLower(strings.TrimSpace(cfg.MemoryRemoteProcessing)))
 	options.CompileBatchTokens = effectiveFabricCompileBatchTokens(cfg.MemoryCompileBatchTokens)
 	options.SearchLatencyBudget = time.Duration(cfg.MemorySearchLatencyMS) * time.Millisecond
@@ -85,18 +106,96 @@ func OpenConfiguredMemoryFabricWithUsageObserver(ctx context.Context, cfg config
 	options.MaxEvidence = cfg.MemoryRecallMaxItems
 	options.TargetContextTokens = cfg.MemoryContextTargetTokens
 	options.MaxContextTokens = cfg.MemoryContextMaxTokens
+	// The managed BGE-M3 runtimes accept at most 20 inputs per request.
+	// Keep Fabric job batches within that shared provider contract.
+	options.EmbeddingBatchSize = 20
+	var writeGuards []func(context.Context) error
+	if !cfg.UsesPostgresMemoryFabric() {
+		writeGuards = append(writeGuards, func(context.Context) error {
+			if memory.SQLiteFabricMigrated(options.Dir) {
+				return errors.New("local Memory Fabric was migrated to PostgreSQL and is read-only")
+			}
+			return nil
+		})
+	}
 
-	encoder, encoderErr := configuredMemoryBGEEncoder(cfg)
+	encoder, encoderErr := configuredMemoryRetrievalEncoder(cfg)
 	if encoderErr != nil {
 		return nil, fmt.Errorf("BGE-M3 is required for Memory Fabric: %w", encoderErr)
 	}
-	options.Vectorizer = newFabricVectorizer(bgeDenseVectorEncoder{encoder: encoder}, fabricEmbeddingArtifactDir(cfg))
-	options.RetrievalEncoder = fabricRetrievalEncoder{encoder: encoder}
+	options.Vectorizer = newFabricVectorizer(retrievalDenseVectorEncoder{encoder: encoder}, fabricEmbeddingArtifactDir(cfg))
+	options.RetrievalEncoder = encoder
+	if cfg.MemoryRerankerEnabled {
+		reranker, rerankerErr := memory.NewOpenAICompatibleReranker(memory.OpenAICompatibleModelOptions{
+			APIKey: cfg.MemoryRerankerAPIKey, BaseURL: cfg.MemoryRerankerBaseURL,
+			Model: cfg.MemoryRerankerModel, Timeout: memoryRemoteModelTimeout(cfg),
+		})
+		if rerankerErr != nil {
+			return nil, fmt.Errorf("configure memory reranker: %w", rerankerErr)
+		}
+		options.Reranker = reranker
+	}
 	if options.RemoteProcessing != memory.RemoteProcessingOff {
 		options.Compiler = newFabricSemanticCompiler(cfg, configuredFabricModel(cfg.MemoryCompilerModel, cfg.APIModel))
 		options.Adjudicator = newFabricConflictAdjudicator(cfg, configuredFabricModel(cfg.MemoryConflictModel, cfg.APIModel))
 	}
-	return memory.OpenFabric(ctx, options)
+	identity := openOptions.Identity
+	if strings.TrimSpace(identity.TenantID) == "" {
+		identity.TenantID = "local"
+	}
+	if strings.TrimSpace(identity.ProjectID) == "" {
+		identity.ProjectID = MemoryFabricSpace(cfg)
+	}
+	if strings.TrimSpace(cfg.RedisURL) != "" {
+		guardRuntime, guardErr := cluster.NewRedisRuntime(ctx, cfg.RedisURL, cfg.ClusterID)
+		if guardErr != nil {
+			return nil, fmt.Errorf("open Memory Fabric migration guard: %w", guardErr)
+		}
+		options.Cleanup = guardRuntime.Close
+		writeGuards = append(writeGuards, func(checkCtx context.Context) error {
+			owner, lookupErr := guardRuntime.Lookup(checkCtx, identity.TenantID,
+				"memory-migration:"+identity.ProjectID)
+			if lookupErr != nil {
+				return fmt.Errorf("check Memory Fabric migration lease: %w", lookupErr)
+			}
+			if owner != nil {
+				return errors.New("Memory Fabric project is locked for migration")
+			}
+			return nil
+		})
+	}
+	if len(writeGuards) > 0 {
+		options.WriteGuard = func(checkCtx context.Context) error {
+			for _, guard := range writeGuards {
+				if err := guard(checkCtx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	if options.WriteGuard != nil {
+		if guardErr := options.WriteGuard(ctx); guardErr != nil {
+			if options.Cleanup != nil {
+				_ = options.Cleanup()
+			}
+			return nil, guardErr
+		}
+	}
+	if cfg.UsesPostgresMemoryFabric() {
+		fabric, openErr := memory.OpenPostgresFabric(ctx, memory.PostgresFabricOptions{FabricOptions: options,
+			PostgresURL: cfg.PostgresURL, ClusterID: cfg.ClusterID, TenantID: identity.TenantID,
+			ProjectID: identity.ProjectID})
+		if openErr != nil && options.Cleanup != nil {
+			_ = options.Cleanup()
+		}
+		return fabric, openErr
+	}
+	fabric, openErr := memory.OpenFabric(ctx, options)
+	if openErr != nil && options.Cleanup != nil {
+		_ = options.Cleanup()
+	}
+	return fabric, openErr
 }
 
 func fabricMemoryRuntimeKey(cfg config.Config) string {
@@ -105,6 +204,8 @@ func fabricMemoryRuntimeKey(cfg config.Config) string {
 	}
 	return strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(cfg.MemoryBackend)),
+		strings.ToLower(strings.TrimSpace(cfg.MemoryFabricStore)),
+		strings.TrimSpace(cfg.ClusterID),
 		strings.TrimSpace(cfg.MemoryPath),
 		strings.ToLower(strings.TrimSpace(cfg.MemoryRemoteProcessing)),
 		configuredFabricModel(cfg.MemoryCompilerModel, cfg.APIModel),
@@ -113,7 +214,32 @@ func fabricMemoryRuntimeKey(cfg config.Config) string {
 		fmt.Sprintf("%d", cfg.MemorySearchLatencyMS),
 		fmt.Sprintf("%d", cfg.MemoryCandidateLimit),
 		strings.TrimSpace(cfg.MemoryBGEModelDir),
+		memoryRemoteModelRuntimeKey(cfg), sensitiveRuntimeHash(cfg.PostgresURL, cfg.RedisURL),
 	}, "\x1f")
+}
+
+func sensitiveRuntimeHash(values ...string) string {
+	hash := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(hash[:])
+}
+
+func memoryRemoteModelRuntimeKey(cfg config.Config) string {
+	values := []string{
+		strings.ToLower(strings.TrimSpace(cfg.MemoryBGEProvider)),
+		strings.TrimSpace(cfg.MemoryBGEBaseURL), strings.TrimSpace(cfg.MemoryBGEModel), cfg.MemoryBGEAPIKey,
+		fmt.Sprintf("%t", cfg.MemoryRerankerEnabled), strings.TrimSpace(cfg.MemoryRerankerBaseURL),
+		strings.ToLower(strings.TrimSpace(cfg.MemoryRerankerProvider)),
+		strings.TrimSpace(cfg.MemoryRerankerModel), cfg.MemoryRerankerAPIKey,
+	}
+	hash := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(hash[:])
+}
+
+func memoryRemoteModelTimeout(cfg config.Config) time.Duration {
+	if cfg.MemoryEmbeddingExecutionTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(cfg.MemoryEmbeddingExecutionTimeout * float64(time.Second))
 }
 
 func effectiveFabricCompileBatchTokens(configured int) int {
@@ -133,7 +259,7 @@ func (e *CoreExecutionEngine) configureMemoryEngine(ctx context.Context, cfg con
 	e.memoryMu.RUnlock()
 	if unchanged {
 		if e.extraction != nil {
-			e.extraction.Engine = e.memoryEngineSnapshot()
+			e.extraction.SetEngine(e.memoryEngineSnapshot())
 		}
 		return
 	}
@@ -141,10 +267,14 @@ func (e *CoreExecutionEngine) configureMemoryEngine(ctx context.Context, cfg con
 	var next memory.Engine
 	var openErr error
 	if desiredKey != "" {
-		var fabric *memory.Fabric
-		fabric, openErr = openConfiguredMemoryFabric(ctx, cfg)
-		if fabric != nil {
-			next = fabric
+		if e.memoryFactory == nil {
+			openErr = errors.New("memory fabric factory is required")
+		} else {
+			var fabric memory.FabricEngine
+			fabric, openErr = e.memoryFactory.Open(ctx, cfg, MemoryOpenOptions{Identity: e.runtimeIdentity, StartWorkers: true})
+			if fabric != nil {
+				next = fabric
+			}
 		}
 	}
 	e.memoryMu.Lock()
@@ -158,7 +288,7 @@ func (e *CoreExecutionEngine) configureMemoryEngine(ctx context.Context, cfg con
 	}
 	e.memoryMu.Unlock()
 	if e.extraction != nil {
-		e.extraction.Engine = next
+		e.extraction.SetEngine(next)
 	}
 	if previous != nil && previous != next {
 		_ = previous.Close()
@@ -196,7 +326,7 @@ func (e *CoreExecutionEngine) closeMemoryEngine() {
 	e.memoryEngineRuntimeKey = ""
 	e.memoryMu.Unlock()
 	if e.extraction != nil {
-		e.extraction.Engine = nil
+		e.extraction.SetEngine(nil)
 	}
 	if engine != nil {
 		_ = engine.Close()
@@ -225,7 +355,7 @@ func (e *CoreExecutionEngine) flushAndSealMemory(ctx context.Context) {
 	}
 	defer cancel()
 	if e.extraction != nil && e.LastState != nil {
-		e.extraction.Engine = engine
+		e.extraction.SetEngine(engine)
 		for batch := 0; batch < 256; batch++ {
 			count, err := e.extraction.IngestMessages(flushCtx, e.LastState)
 			if err != nil {
@@ -343,23 +473,29 @@ type fabricDenseEncoder interface {
 	EmbedDense(context.Context, []string, memory.VectorPurpose) ([][]float32, error)
 }
 
-type bgeDenseVectorEncoder struct {
-	encoder localmodel.BGEEncoder
+type retrievalDenseVectorEncoder struct {
+	encoder memory.RetrievalEncoder
 }
 
-func (e bgeDenseVectorEncoder) Model() string {
+func (e retrievalDenseVectorEncoder) Model() string {
 	return e.encoder.Model() + "@" + e.encoder.Revision()
 }
 
-func (e bgeDenseVectorEncoder) Dimensions() int { return localmodel.BGEEmbeddingDimensions }
+func (e retrievalDenseVectorEncoder) Dimensions() int { return localmodel.BGEEmbeddingDimensions }
 
-func (e bgeDenseVectorEncoder) EmbedDense(ctx context.Context, texts []string,
+func (e retrievalDenseVectorEncoder) EmbedDense(ctx context.Context, texts []string,
 	purpose memory.VectorPurpose) ([][]float32, error) {
-	kind := localmodel.BGEDocument
+	kind := memory.RetrievalDocument
 	if purpose == memory.VectorQuery {
-		kind = localmodel.BGEQuery
+		kind = memory.RetrievalQuery
 	}
-	encoded, err := e.encoder.EncodeChannels(ctx, texts, kind)
+	var encoded []memory.RetrievalEncoding
+	var err error
+	if channels, ok := e.encoder.(memory.RetrievalChannelEncoder); ok {
+		encoded, err = channels.EncodeChannels(ctx, texts, kind)
+	} else {
+		encoded, err = e.encoder.Encode(ctx, texts, kind)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -398,8 +534,18 @@ func (v fabricVectorizer) Embed(ctx context.Context, texts []string, purpose mem
 	return v.encoder.EmbedDense(ctx, texts, purpose)
 }
 
-func configuredMemoryBGEEncoder(cfg config.Config) (localmodel.BGEEncoder, error) {
-	return localmodel.SharedLocalBGEEncoder(cfg.MemoryBGEModelDir)
+func configuredMemoryRetrievalEncoder(cfg config.Config) (memory.RetrievalEncoder, error) {
+	if strings.EqualFold(strings.TrimSpace(cfg.MemoryBGEProvider), "openai_compatible") {
+		return memory.NewOpenAICompatibleRetrievalEncoder(memory.OpenAICompatibleModelOptions{
+			APIKey: cfg.MemoryBGEAPIKey, BaseURL: cfg.MemoryBGEBaseURL,
+			Model: cfg.MemoryBGEModel, Timeout: memoryRemoteModelTimeout(cfg),
+		})
+	}
+	encoder, err := localmodel.SharedLocalBGEEncoder(cfg.MemoryBGEModelDir)
+	if err != nil {
+		return nil, err
+	}
+	return fabricRetrievalEncoder{encoder: encoder}, nil
 }
 
 type fabricRetrievalEncoder struct {

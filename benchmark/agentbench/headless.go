@@ -6,16 +6,26 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 )
 
-type HeadlessAgentRunner struct{}
-
-func (HeadlessAgentRunner) Run(ctx context.Context, cfg config.Config, prompt string, sessionID string) AgentRunResult {
-	return (HeadlessAgentRunner{}).RunAt(ctx, cfg, prompt, sessionID, time.Time{})
+type HeadlessAgentRunner struct {
+	engineFactory agent.QueryEngineFactory
 }
 
-func (HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prompt string, sessionID string, queryTime time.Time) AgentRunResult {
+func NewHeadlessAgentRunner(engineFactory agent.QueryEngineFactory) *HeadlessAgentRunner {
+	return &HeadlessAgentRunner{engineFactory: engineFactory}
+}
+
+func (r *HeadlessAgentRunner) Run(ctx context.Context, cfg config.Config, prompt string, sessionID string) AgentRunResult {
+	return r.RunAt(ctx, cfg, prompt, sessionID, time.Time{})
+}
+
+func (r *HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prompt string, sessionID string, queryTime time.Time) AgentRunResult {
+	if r == nil || r.engineFactory == nil {
+		return AgentRunResult{ErrorType: "runner_dependency_error: query engine factory is required"}
+	}
 	start := time.Now()
 	timeline := []TimelineEvent{
 		newTimelineEvent(start, start, "first_model_request", nil),
@@ -24,7 +34,7 @@ func (HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prompt 
 	previousConfig := config.GetConfig()
 	config.SetConfig(cfg)
 	defer config.SetConfig(previousConfig)
-	engine := agent.NewQueryEngine(&cfg)
+	engine := r.engineFactory.Create(cfg, cluster.RuntimeIdentity{TenantID: "local", SessionID: sessionID})
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.MemoryQueryTime = queryTime

@@ -31,6 +31,9 @@ func RunSuite(ctx context.Context, options RunnerOptions) (Report, error) {
 	if isMemoryBenchmarkSuite(options.Suite) {
 		return RunMemoryBenchmarkSuite(ctx, options)
 	}
+	if options.AgentRunner == nil {
+		return Report{}, fmt.Errorf("agent runner dependency is required for suite %q", options.Suite)
+	}
 	cases, err := LoadCases(options.Suite, options.CasesPath, options.Limit)
 	if err != nil {
 		return Report{}, err
@@ -95,9 +98,6 @@ func normalizeOptions(options RunnerOptions) RunnerOptions {
 	}
 	if options.Now == nil {
 		options.Now = time.Now
-	}
-	if options.AgentRunner == nil {
-		options.AgentRunner = HeadlessAgentRunner{}
 	}
 	if options.Config.CWD == "" {
 		cwd, _ := os.Getwd()

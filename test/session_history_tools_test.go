@@ -15,7 +15,7 @@ import (
 func TestSessionHistoryToolsAreRegisteredWhenEnabled(t *testing.T) {
 	cfg := config.NewConfigForCWD(t.TempDir())
 	cfg.SessionMemoryEnabled = true
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 
 	if engine.Registry.Get("session_history_list") == nil {
 		t.Fatal("session_history_list should be registered when session memory is enabled")
@@ -37,7 +37,7 @@ func stringify(t *testing.T, value any) string {
 func TestSessionHistoryToolsAreNotRegisteredWhenDisabled(t *testing.T) {
 	cfg := config.NewConfigForCWD(t.TempDir())
 	cfg.SessionMemoryEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 
 	if engine.Registry.Get("session_history_list") != nil {
 		t.Fatal("session_history_list should not be registered when session memory is disabled")

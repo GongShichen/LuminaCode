@@ -7,6 +7,7 @@ APP_ROOT="${LUMINA_APP_ROOT:-${APP_ROOT:-$HOME/.lumina}}"
 SKIP_MANAGED_COMPONENTS="${SKIP_MANAGED_COMPONENTS:-0}"
 SKIP_MEMORY_MODELS="${SKIP_MEMORY_MODELS:-0}"
 PREPARE_ACCELERATOR="${LUMINA_INSTALL_PREPARE_ACCELERATOR:-1}"
+MEMORY_USE_API="${1:-}"
 
 fail() {
     printf 'LuminaCode install preflight failed: %s\n' "$*" >&2
@@ -36,7 +37,8 @@ done
 if ! command -v shasum >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1; then
     fail "a SHA-256 command is required (shasum or sha256sum)"
 fi
-if ! command -v "${CC:-cc}" >/dev/null 2>&1; then
+provider="$(node "$SCRIPT_DIR/configure-memory-models.mjs" provider --app-root "$APP_ROOT" --use-api "$MEMORY_USE_API")"
+if [ "$provider" = "local" ] && ! command -v "${CC:-cc}" >/dev/null 2>&1; then
     fail "a C compiler is required for the local BGE-M3 runtime (${CC:-cc})"
 fi
 
@@ -57,7 +59,7 @@ prepare_apple_metal() {
         fail "Apple Metal Toolchain was downloaded but xcrun cannot execute the metal compiler"
 }
 
-if [ "$os/$arch" = "Darwin/arm64" ]; then
+if [ "$provider" = "local" ] && [ "$os/$arch" = "Darwin/arm64" ]; then
     prepare_apple_metal
 fi
 
@@ -99,13 +101,19 @@ if [ -n "$memory_bytes" ]; then
 fi
 printf '  toolchain: %s; node %s; npm %s; cc %s\n' \
     "$go_version" "$node_version" "$npm_version" "${CC:-cc}"
-if [ "$os/$arch" = "Darwin/arm64" ]; then
+if [ "$provider" = "local" ] && [ "$os/$arch" = "Darwin/arm64" ]; then
     metal_version="$(xcrun --sdk macosx metal -v 2>&1 | sed -n '1p')"
     printf '  Metal compiler: %s\n' "${metal_version:-available}"
 fi
 
 if [ "$SKIP_MANAGED_COMPONENTS" = "1" ]; then
     printf '  managed memory runtime: skipped (SKIP_MANAGED_COMPONENTS=1)\n'
+    exit 0
+fi
+
+if [ "$provider" = "openai_compatible" ]; then
+    node "$SCRIPT_DIR/configure-memory-models.mjs" validate --app-root "$APP_ROOT" --use-api "$MEMORY_USE_API"
+    printf 'Preflight complete; remote memory API selected and local model assets are not required\n'
     exit 0
 fi
 

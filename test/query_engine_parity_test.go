@@ -36,7 +36,7 @@ Read carefully: $ARGUMENTS
 	}
 	cfg := isolatedConfigForCWD(t, dir)
 	cfg.SkillsEnabled = true
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	state := agent.NewAgentState()
 
 	var events []agent.StreamEvent
@@ -104,7 +104,7 @@ func TestCoreQueryLoopInlineSkillIntegerLikeEffortSetsThinkingBudgetLikePython(t
 	cfg.APIMaxTokens = 256
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.LastQuery = "hello"
@@ -155,7 +155,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	cfg := isolatedConfigForCWD(t, dir)
 	cfg.SkillsDir = ".Lumina/PROJECT_SKILLS"
 	cfg.SkillsEnabled = true
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	state := agent.NewAgentState()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2_000_000_000)
@@ -191,7 +191,7 @@ Inline output: !` + "`printf shell-ok`" + `
 func TestQueryEngineManualCompactUsesPythonPipeline(t *testing.T) {
 	cfg := isolatedConfig(t)
 	cfg.APIMaxTokens = 1000
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	state := agent.NewAgentState()
 	state.CacheBreakPoints.Add(1)
 	noisyOutput := strings.Repeat("Collecting package\nDownloading file\nRequirement already satisfied: dep\n", 200)
@@ -232,7 +232,7 @@ Lumina identity.
 	cfg := isolatedConfigForCWD(t, dir)
 	enableTestMemoryFabric(&cfg, dir)
 	cfg.SkillsEnabled = false
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "stale prompt"
 
@@ -286,7 +286,7 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
-	engine := agent.NewCoreExecutionEngineWithMemoryEngine(&cfg, fabric)
+	engine := newTestCoreExecutionEngineWithMemoryEngine(cfg, fabric)
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
@@ -357,7 +357,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 
-	engine := agent.NewCoreExecutionEngineWithMemoryEngine(&cfg, fabric)
+	engine := newTestCoreExecutionEngineWithMemoryEngine(cfg, fabric)
 	defer engine.Shutdown()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
@@ -385,7 +385,7 @@ func TestQueryEngineShutdownTearsDownRuntimeLikePython(t *testing.T) {
 	cfg := isolatedConfig(t)
 	cfg.APIKey = "test-key"
 	cfg.APIBaseURL = "http://127.0.0.1"
-	engine := agent.NewQueryEngine(&cfg)
+	engine := newTestQueryEngine(cfg)
 	oldRuntime := engine.CoreEngine.TaskRuntime
 	record := oldRuntime.RegisterForegroundTask("task-1", "", "main", "worker", "desc", "general-purpose")
 	if record == nil {

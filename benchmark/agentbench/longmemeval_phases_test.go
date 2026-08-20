@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"LuminaCode/agent"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -305,18 +306,19 @@ func TestLongMemEvalFabricPrepareBuildsRawSnapshotWithoutSemanticAPI(t *testing.
 	cfg := config.NewConfig()
 	cfg.MemoryBackend = "fabric"
 	cfg.MemoryRemoteProcessing = "off"
-	fixtureOpener := func(ctx context.Context, cfg config.Config, startWorkers bool,
-		observer memory.APIUsageObserver) (*memory.Fabric, error) {
+	cfg.MemoryEmbeddingModel = "bge-m3"
+	fixtureOpener := func(ctx context.Context, cfg config.Config,
+		openOptions agent.MemoryOpenOptions) (memory.FabricEngine, error) {
 		fabricOptions := memory.DefaultFabricOptions(cfg.MemoryPath)
-		fabricOptions.StartWorkers = startWorkers
-		fabricOptions.UsageObserver = observer
+		fabricOptions.StartWorkers = openOptions.StartWorkers
+		fabricOptions.UsageObserver = openOptions.UsageObserver
 		fabricOptions.RemoteProcessing = memory.RemoteProcessingOff
 		fabricOptions.Vectorizer = longMemEvalFixtureVectorizer{}
 		return memory.OpenFabric(ctx, fabricOptions)
 	}
 	options := normalizeLongMemEvalOptions(RunnerOptions{WorkDir: filepath.Join(root, "work"),
 		OutputDir: filepath.Join(root, "reports"), LongMemEvalIndexDir: filepath.Join(root, "index"), Config: cfg,
-		longMemEvalFabricOpener: fixtureOpener})
+		MemoryFactory: memoryFabricFactoryFunc(fixtureOpener)})
 	caseData := longMemEvalCase{QuestionID: "q1", Question: "gold question must not be indexed", Answer: "gold answer",
 		HaystackSessionIDs: []string{"s1"}, HaystackDates: []string{"2026/07/20 09:00"},
 		HaystackSessions: [][]map[string]any{{

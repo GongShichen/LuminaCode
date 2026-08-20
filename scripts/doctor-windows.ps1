@@ -108,8 +108,19 @@ if (Test-Path $defaults) {
     Status-Line "WebSearch" "not configured"
 }
 Status-Line "arXiv MCP" ($(if ((Test-Path $arxivPython) -and (Test-Path $mcpConfig)) { "installed" } else { "not installed" }))
-Status-Line "BGE-M3" ($(if ((Test-Path $bgeModel) -and (Test-Path $bgeRuntime)) { "installed" } else { "missing" }))
-if (Test-Path $backend) {
+$memoryProvider = "local"
+if (Test-Path $defaults) {
+    try {
+        $memorySettings = Get-Content -LiteralPath $defaults -Raw | ConvertFrom-Json
+        if ($memorySettings.memory_bge_provider) { $memoryProvider = [string]$memorySettings.memory_bge_provider }
+    } catch {}
+}
+if ($memoryProvider -eq "openai_compatible") {
+    Status-Line "BGE-M3" "remote OpenAI-compatible API"
+} else {
+    Status-Line "BGE-M3" ($(if ((Test-Path $bgeModel) -and (Test-Path $bgeRuntime)) { "installed" } else { "missing" }))
+}
+if ((Test-Path $backend) -and $memoryProvider -ne "openai_compatible") {
     try {
         & $backend memory doctor | Out-Null
         Status-Line "BGE-M3 memory test" "inference ready"

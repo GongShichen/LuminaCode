@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"strings"
 
-	"LuminaCode/benchmark/agentbench"
 	"LuminaCode/config"
 )
 
@@ -45,7 +44,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "agent benchmark runner requires API key, base URL, and model configuration")
 		os.Exit(2)
 	}
-	result := agentbench.HeadlessAgentRunner{}.Run(context.Background(), cfg, userPrompt, *sessionID)
+	runner := initializeBenchmarkAgentRunner()
+	result := runner.Run(context.Background(), cfg, userPrompt, *sessionID)
 	if *transcriptPath != "" {
 		if err := writeJSONL(*transcriptPath, result.Events); err != nil {
 			fmt.Fprintln(os.Stderr, err)

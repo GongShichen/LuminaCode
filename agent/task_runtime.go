@@ -116,6 +116,7 @@ type AgentTaskRuntime struct {
 	recordCleanupCancels    map[string]context.CancelFunc
 	idleTTLCancels          map[string]context.CancelFunc
 	taskEventSink           TaskEventSink
+	taskEventObserver       TaskEventSink
 }
 
 type workerSpec struct {
@@ -134,6 +135,14 @@ func (rt *AgentTaskRuntime) SetTaskEventSink(sink TaskEventSink) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.taskEventSink = sink
+}
+
+// SetTaskEventObserver installs the durable lifecycle observer. Unlike the UI
+// sink, it remains attached outside an active submit/render cycle.
+func (rt *AgentTaskRuntime) SetTaskEventObserver(observer TaskEventSink) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.taskEventObserver = observer
 }
 
 func NewAgentTaskRuntime() *AgentTaskRuntime {
@@ -323,9 +332,10 @@ func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, 
 		cfg: cfg, registry: registry, definition: definition, parentState: &workerState,
 		agentType: agentType, modelOverride: modelOverride, extraContext: workerExtraContext,
 	}
+	result := *record
 	rt.mu.Unlock()
 	go rt.runWorker(childCtx, taskID, prompt)
-	return record
+	return &result
 }
 
 func (rt *AgentTaskRuntime) SendMessage(taskID, scopeID, prompt string) any {
@@ -635,6 +645,7 @@ func (rt *AgentTaskRuntime) finish(taskID, status, result, errText, reason strin
 	record.ErrorText = errText
 	record.TerminationReason = reason
 	record.UpdatedAt = nowSeconds()
+	rt.emitLifecycleLocked("task_status_changed", record)
 	summary := "Worker completed."
 	message := result
 	if errText != "" {
@@ -660,6 +671,7 @@ func (rt *AgentTaskRuntime) setForegroundTaskTerminal(record *AgentTaskRecord, s
 	current.Status = status
 	current.TerminationReason = terminationReason
 	current.UpdatedAt = nowSeconds()
+	rt.emitLifecycleLocked("task_status_changed", current)
 }
 
 func (rt *AgentTaskRuntime) finishReusableIdle(taskID, result string) {
@@ -674,6 +686,7 @@ func (rt *AgentTaskRuntime) finishReusableIdle(taskID, result string) {
 	record.ErrorText = ""
 	record.TerminationReason = "completed"
 	record.UpdatedAt = nowSeconds()
+	rt.emitLifecycleLocked("task_status_changed", record)
 	rt.enqueueLocked(record, "Worker completed request.", result)
 	rt.scheduleIdleTTLLocked(taskID)
 }
@@ -684,6 +697,7 @@ func (rt *AgentTaskRuntime) setStatus(taskID, status string) {
 	if record := rt.records[taskID]; record != nil {
 		record.Status = status
 		record.UpdatedAt = nowSeconds()
+		rt.emitLifecycleLocked("task_status_changed", record)
 	}
 }
 
@@ -734,17 +748,25 @@ func (rt *AgentTaskRuntime) enqueueLocked(record *AgentTaskRecord, summary, resu
 		Usage: map[string]int{"input_tokens": record.InputTokens, "output_tokens": record.OutputTokens},
 	}
 	rt.notifications[record.ParentScopeID] = append(rt.notifications[record.ParentScopeID], notification)
+	eventType := "task_snapshot_updated"
+	if _, terminal := terminalTaskStatuses[record.Status]; terminal {
+		eventType = "task_summary_available"
+	}
 	if rt.taskEventSink != nil {
-		eventType := "task_snapshot_updated"
-		if _, terminal := terminalTaskStatuses[record.Status]; terminal {
-			eventType = "task_summary_available"
-		}
-		rt.taskEventSink.EmitTaskEvent(TaskUIEvent{
+		event := TaskUIEvent{
 			Type:       eventType,
 			TaskID:     record.TaskID,
 			Record:     record.ToMap(),
 			Summary:    summary,
 			ResultText: result,
+		}
+		rt.taskEventSink.EmitTaskEvent(event)
+		if rt.taskEventObserver != nil && rt.taskEventObserver != rt.taskEventSink {
+			rt.taskEventObserver.EmitTaskEvent(event)
+		}
+	} else if rt.taskEventObserver != nil {
+		rt.taskEventObserver.EmitTaskEvent(TaskUIEvent{
+			Type: eventType, TaskID: record.TaskID, Record: record.ToMap(), Summary: summary, ResultText: result,
 		})
 	}
 	for _, waiter := range rt.waiters[record.TaskID] {
@@ -775,6 +797,14 @@ func (rt *AgentTaskRuntime) registerRecordLocked(record *AgentTaskRecord, create
 	if createTaskScope {
 		rt.scopes[record.TaskID] = struct{}{}
 	}
+	rt.emitLifecycleLocked("task_created", record)
+}
+
+func (rt *AgentTaskRuntime) emitLifecycleLocked(eventType string, record *AgentTaskRecord) {
+	if rt.taskEventObserver == nil || record == nil {
+		return
+	}
+	rt.taskEventObserver.EmitTaskEvent(TaskUIEvent{Type: eventType, TaskID: record.TaskID, Record: record.ToMap()})
 }
 
 func (rt *AgentTaskRuntime) scheduleIdleTTLLocked(taskID string) {
@@ -801,6 +831,7 @@ func (rt *AgentTaskRuntime) scheduleIdleTTLLocked(taskID string) {
 		record.Status = "completed"
 		record.TerminationReason = "idle_ttl_expired"
 		record.UpdatedAt = nowSeconds()
+		rt.emitLifecycleLocked("task_status_changed", record)
 		rt.enqueueLocked(record, "Reusable worker expired after idling.", record.ResultText)
 		delete(rt.workers, taskID)
 		delete(rt.workerSpecs, taskID)

@@ -52,10 +52,11 @@ type exactSidecarDiagnostics struct {
 type sidecarSearchDiagnostics struct {
 	fts, dense, sparse, rrfUnion, maxSim, seeds, ppr, pprAdditions        int
 	exactEvents, exactSpans, encodeBatches                                int
+	rerankerCandidates                                                    int
 	contextExpansionContexts, contextExpandedEvents, contextExpandedSpans int
 	ledgerEvents, sidecarEvents                                           int
 	latency                                                               map[string]time.Duration
-	schema, tokenizerHash                                                 string
+	schema, tokenizerHash, rerankerRevision                               string
 	candidateSourceEvents, candidateContexts                              []string
 	exactSourceEvents, exactContexts                                      []string
 }
@@ -268,6 +269,16 @@ func (f *Fabric) searchBGERetrieval(ctx context.Context, request SearchRequest,
 	if len(shortlist) > bgeFinalLimit {
 		shortlist = shortlist[:bgeFinalLimit]
 	}
+	if f.options.Reranker != nil && len(shortlist) > 0 {
+		stage = time.Now()
+		shortlist, err = rerankSidecarCandidates(ctx, f.options.Reranker, request.Query, shortlist)
+		if err != nil {
+			return nil, diagnostics, err
+		}
+		diagnostics.rerankerCandidates = len(shortlist)
+		diagnostics.rerankerRevision = f.options.Reranker.Revision()
+		diagnostics.latency["reranker"] = time.Since(stage)
+	}
 	diagnostics.exactEvents = len(shortlist)
 	diagnostics.exactSpans = exactDiagnostics.spans + expansionDiagnostics.spans
 	diagnostics.encodeBatches = 0
@@ -365,10 +376,49 @@ func topSidecarContextIDs(candidates []*sidecarCandidate, limit int) []string {
 
 func bgeCandidateReasons(candidate *sidecarCandidate) []string {
 	reasons := []string{"bge-m3", "event-dense-sparse", "graph"}
+	if candidate != nil {
+		if _, ok := candidate.rawScores["reranker"]; ok {
+			reasons = append(reasons, "remote-reranker")
+		}
+	}
 	if candidate != nil && candidate.rawScores["bge_context_expansion"] > 0 {
 		reasons = append(reasons, "context-event-expansion")
 	}
 	return reasons
+}
+
+func rerankSidecarCandidates(ctx context.Context, reranker RetrievalReranker, query string,
+	candidates []*sidecarCandidate) ([]*sidecarCandidate, error) {
+	documents := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		documents[index] = candidate.content
+	}
+	scores, err := reranker.Rerank(ctx, query, documents)
+	if err != nil {
+		return nil, fmt.Errorf("rerank memory evidence: %w", err)
+	}
+	if len(scores) != len(candidates) {
+		return nil, fmt.Errorf("reranker returned %d scores, want %d", len(scores), len(candidates))
+	}
+	result := append([]*sidecarCandidate(nil), candidates...)
+	for index, candidate := range result {
+		if math.IsNaN(scores[index]) || math.IsInf(scores[index], 0) {
+			return nil, fmt.Errorf("reranker returned a non-finite score for candidate %d", index)
+		}
+		if candidate.rawScores == nil {
+			candidate.rawScores = map[string]float64{}
+		}
+		candidate.rawScores["bge_before_rerank"] = candidate.score
+		candidate.rawScores["reranker"] = scores[index]
+		candidate.score = scores[index]
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].score == result[right].score {
+			return result[left].eventID < result[right].eventID
+		}
+		return result[left].score > result[right].score
+	})
+	return result, nil
 }
 
 func (f *Fabric) sidecarFTS(ctx context.Context, space string, analysis queryAnalysis,
@@ -1235,6 +1285,8 @@ func applySidecarDiagnostics(target *SearchDiagnostics, source sidecarSearchDiag
 	target.ContextExpansionContexts = source.contextExpansionContexts
 	target.ContextExpandedEvents = source.contextExpandedEvents
 	target.ContextExpandedSpans = source.contextExpandedSpans
+	target.RerankerCandidates = source.rerankerCandidates
+	target.RerankerModelRevision = source.rerankerRevision
 	target.StageLatency = source.latency
 	target.RetrievalModelRevision = revision
 	target.RetrievalSidecarSchema = source.schema

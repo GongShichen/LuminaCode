@@ -21,6 +21,7 @@ import (
 
 	"LuminaCode/agent"
 	"LuminaCode/apppaths"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/security"
 	coretools "LuminaCode/tools"
@@ -30,18 +31,41 @@ import (
 
 type PushFunc func(parentSessionID string, eventType string, payload any)
 type PermissionFunc func(parentSessionID string, payload map[string]any) string
+type TenantPushFunc func(tenantID, parentSessionID, eventType string, payload any)
+type TenantPermissionFunc func(tenantID, parentSessionID string, payload map[string]any) string
 
 type Manager struct {
 	Config        config.Config
-	emit          PushFunc
-	askPermission PermissionFunc
+	engineFactory agent.QueryEngineFactory
+	emit          TenantPushFunc
+	askPermission TenantPermissionFunc
 
-	mu       sync.Mutex
-	sessions map[string]*Session
+	mu                 sync.Mutex
+	sessions           map[string]*Session
+	journalPersistence bool
 }
 
-func NewManager(cfg config.Config, emit PushFunc, ask PermissionFunc) *Manager {
-	return &Manager{Config: cfg, emit: emit, askPermission: ask, sessions: map[string]*Session{}}
+func NewManager(cfg config.Config, engineFactory agent.QueryEngineFactory, emit PushFunc, ask PermissionFunc) *Manager {
+	var tenantEmit TenantPushFunc
+	if emit != nil {
+		tenantEmit = func(_, parentSessionID, eventType string, payload any) { emit(parentSessionID, eventType, payload) }
+	}
+	var tenantAsk TenantPermissionFunc
+	if ask != nil {
+		tenantAsk = func(_, parentSessionID string, payload map[string]any) string { return ask(parentSessionID, payload) }
+	}
+	return NewTenantManager(cfg, engineFactory, tenantEmit, tenantAsk)
+}
+
+func NewTenantManager(cfg config.Config, engineFactory agent.QueryEngineFactory, emit TenantPushFunc,
+	ask TenantPermissionFunc) *Manager {
+	return &Manager{Config: cfg, engineFactory: engineFactory, emit: emit, askPermission: ask, sessions: map[string]*Session{}}
+}
+
+func (m *Manager) UseJournalPersistence(enabled bool) {
+	m.mu.Lock()
+	m.journalPersistence = enabled
+	m.mu.Unlock()
 }
 
 func (m *Manager) List() []TeamListItem {
@@ -53,10 +77,22 @@ func (m *Manager) CreateTemplate(name string) (TeamTemplateResult, error) {
 }
 
 func (m *Manager) Start(parentSessionID, teamName, cwd string) (*Session, error) {
-	return m.StartWithConfig(parentSessionID, teamName, cwd, m.Config)
+	return m.StartWithConfigFor("local", parentSessionID, teamName, cwd, m.Config)
 }
 
 func (m *Manager) StartWithConfig(parentSessionID, teamName, cwd string, base config.Config) (*Session, error) {
+	return m.StartWithConfigFor("local", parentSessionID, teamName, cwd, base)
+}
+
+func (m *Manager) StartWithConfigFor(tenantID, parentSessionID, teamName, cwd string,
+	base config.Config) (*Session, error) {
+	return m.StartWithRuntimeIdentity(cluster.RuntimeIdentity{TenantID: tenantID, SessionID: parentSessionID},
+		teamName, cwd, base)
+}
+
+func (m *Manager) StartWithRuntimeIdentity(identity cluster.RuntimeIdentity, teamName, cwd string,
+	base config.Config) (*Session, error) {
+	tenantID := identity.TenantID
 	spec, err := NewLoader(m.Config).Load(teamName)
 	if err != nil {
 		return nil, err
@@ -70,9 +106,10 @@ func (m *Manager) StartWithConfig(parentSessionID, teamName, cwd string, base co
 		}
 		applyPinnedTeamConfig(&cfg, base)
 	}
-	session := NewSession(parentSessionID, cfg, spec, m.emit, m.askPermission)
+	session := NewSessionWithIdentity(identity, cfg, spec, m.engineFactory, m.emit, m.askPermission)
 	m.mu.Lock()
-	m.sessions[session.ID] = session
+	session.persistEnabled = !m.journalPersistence
+	m.sessions[teamSessionKey(tenantID, session.ID)] = session
 	m.mu.Unlock()
 	session.persist()
 	session.emit("team.started", session.Snapshot())
@@ -80,10 +117,14 @@ func (m *Manager) StartWithConfig(parentSessionID, teamName, cwd string, base co
 }
 
 func (m *Manager) ApplyParentRuntimeConfig(parentSessionID string, cfg config.Config) {
+	m.ApplyParentRuntimeConfigFor("local", parentSessionID, cfg)
+}
+
+func (m *Manager) ApplyParentRuntimeConfigFor(tenantID, parentSessionID string, cfg config.Config) {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, session := range m.sessions {
-		if session.ParentSessionID == parentSessionID {
+		if session.TenantID == normalizedTeamTenant(tenantID) && session.ParentSessionID == parentSessionID {
 			sessions = append(sessions, session)
 		}
 	}
@@ -94,9 +135,13 @@ func (m *Manager) ApplyParentRuntimeConfig(parentSessionID string, cfg config.Co
 }
 
 func (m *Manager) Get(id string) (*Session, error) {
+	return m.GetFor("local", id)
+}
+
+func (m *Manager) GetFor(tenantID, id string) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	session := m.sessions[id]
+	session := m.sessions[teamSessionKey(tenantID, id)]
 	if session == nil {
 		return nil, fmt.Errorf("team session %s not found", id)
 	}
@@ -104,7 +149,11 @@ func (m *Manager) Get(id string) (*Session, error) {
 }
 
 func (m *Manager) Abort(id string) bool {
-	session, err := m.Get(id)
+	return m.AbortFor("local", id)
+}
+
+func (m *Manager) AbortFor(tenantID, id string) bool {
+	session, err := m.GetFor(tenantID, id)
 	if err != nil {
 		return false
 	}
@@ -124,11 +173,34 @@ func (m *Manager) Shutdown() {
 	}
 }
 
+func (m *Manager) ReleaseParentFor(tenantID, parentSessionID string) {
+	tenantID = normalizedTeamTenant(tenantID)
+	m.mu.Lock()
+	var sessions []*Session
+	for key, session := range m.sessions {
+		if session.TenantID == tenantID && session.ParentSessionID == parentSessionID {
+			sessions = append(sessions, session)
+			delete(m.sessions, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		session.Abort()
+		session.Shutdown()
+	}
+}
+
 func (m *Manager) ResolvePermission(requestID, decision string) bool {
+	return m.ResolvePermissionFor("local", requestID, decision)
+}
+
+func (m *Manager) ResolvePermissionFor(tenantID, requestID, decision string) bool {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+		if session.TenantID == normalizedTeamTenant(tenantID) {
+			sessions = append(sessions, session)
+		}
 	}
 	m.mu.Unlock()
 	for _, session := range sessions {
@@ -140,7 +212,12 @@ func (m *Manager) ResolvePermission(requestID, decision string) bool {
 }
 
 func (m *Manager) HandleA2A(ctx context.Context, teamSessionID, agentID, method string, params json.RawMessage) (any, error) {
-	session, err := m.Get(teamSessionID)
+	return m.HandleA2AFor(ctx, "local", teamSessionID, agentID, method, params)
+}
+
+func (m *Manager) HandleA2AFor(ctx context.Context, tenantID, teamSessionID, agentID, method string,
+	params json.RawMessage) (any, error) {
+	session, err := m.GetFor(tenantID, teamSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,14 +245,18 @@ func applyPinnedTeamConfig(target *config.Config, source config.Config) {
 }
 
 type Session struct {
+	TenantID        string
+	RuntimeIdentity cluster.RuntimeIdentity
 	ID              string
 	ParentSessionID string
 	Config          config.Config
 	Spec            TeamSpec
 
-	emitFn        PushFunc
-	askPermission PermissionFunc
-	rootDir       string
+	engineFactory  agent.QueryEngineFactory
+	emitFn         PushFunc
+	askPermission  PermissionFunc
+	rootDir        string
+	persistEnabled bool
 
 	mu             sync.Mutex
 	agents         map[string]*AgentRuntime
@@ -223,24 +304,54 @@ type TeamTask struct {
 	done              chan TeamTask
 }
 
-func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit PushFunc, ask PermissionFunc) *Session {
+func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, engineFactory agent.QueryEngineFactory, emit PushFunc, ask PermissionFunc) *Session {
+	var tenantEmit TenantPushFunc
+	if emit != nil {
+		tenantEmit = func(_, parentSessionID, eventType string, payload any) { emit(parentSessionID, eventType, payload) }
+	}
+	var tenantAsk TenantPermissionFunc
+	if ask != nil {
+		tenantAsk = func(_, parentSessionID string, payload map[string]any) string { return ask(parentSessionID, payload) }
+	}
+	return NewSessionFor("local", parentSessionID, cfg, spec, engineFactory, tenantEmit, tenantAsk)
+}
+
+func NewSessionFor(tenantID, parentSessionID string, cfg config.Config, spec TeamSpec,
+	engineFactory agent.QueryEngineFactory, emit TenantPushFunc, ask TenantPermissionFunc) *Session {
+	return NewSessionWithIdentity(cluster.RuntimeIdentity{TenantID: tenantID, SessionID: parentSessionID},
+		cfg, spec, engineFactory, emit, ask)
+}
+
+func NewSessionWithIdentity(identity cluster.RuntimeIdentity, cfg config.Config, spec TeamSpec,
+	engineFactory agent.QueryEngineFactory, emit TenantPushFunc, ask TenantPermissionFunc) *Session {
+	tenantID, parentSessionID := identity.TenantID, identity.SessionID
 	id := "team-" + uuid.NewString()
-	root := ""
-	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
-		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
-	if useProjectData {
-		root = filepath.Join(cfg.ProjectPaths.TeamsDir, spec.Name, id)
-	} else {
-		root = filepath.Join(cfg.SessionDir, parentSessionID, "teams", id)
+	root := teamSessionRoot(cfg, parentSessionID, spec.Name, id)
+	tenantID = normalizedTeamTenant(tenantID)
+	var sessionEmit PushFunc
+	if emit != nil {
+		sessionEmit = func(parentSessionID, eventType string, payload any) {
+			emit(tenantID, parentSessionID, eventType, payload)
+		}
+	}
+	var sessionAsk PermissionFunc
+	if ask != nil {
+		sessionAsk = func(parentSessionID string, payload map[string]any) string {
+			return ask(tenantID, parentSessionID, payload)
+		}
 	}
 	session := &Session{
+		TenantID:        tenantID,
+		RuntimeIdentity: identity,
 		ID:              id,
 		ParentSessionID: parentSessionID,
 		Config:          cfg,
 		Spec:            spec,
-		emitFn:          emit,
-		askPermission:   ask,
+		engineFactory:   engineFactory,
+		emitFn:          sessionEmit,
+		askPermission:   sessionAsk,
 		rootDir:         root,
+		persistEnabled:  true,
 		agents:          map[string]*AgentRuntime{},
 		activity:        map[string]ActivityRow{},
 		gate:            GateStatus{},
@@ -259,6 +370,26 @@ func NewSession(parentSessionID string, cfg config.Config, spec TeamSpec, emit P
 		}
 	}
 	return session
+}
+
+func normalizedTeamTenant(tenantID string) string {
+	if tenantID = strings.TrimSpace(tenantID); tenantID != "" {
+		return tenantID
+	}
+	return "local"
+}
+
+func teamSessionKey(tenantID, sessionID string) string {
+	return normalizedTeamTenant(tenantID) + "\x00" + sessionID
+}
+
+func teamSessionRoot(cfg config.Config, parentSessionID, teamName, sessionID string) string {
+	useProjectData := cfg.ProjectPaths.TeamsDir != "" && cfg.Paths.ActiveSessionsDir != "" &&
+		filepath.Clean(cfg.SessionDir) == filepath.Clean(cfg.Paths.ActiveSessionsDir)
+	if useProjectData {
+		return filepath.Join(cfg.ProjectPaths.TeamsDir, teamName, sessionID)
+	}
+	return filepath.Join(cfg.SessionDir, parentSessionID, "teams", sessionID)
 }
 
 func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
@@ -281,7 +412,7 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	} else {
 		cfg.MaxParentTurns = spec.MaxTurnsPerTask
 	}
-	engine := agent.NewQueryEngine(&cfg)
+	engine := s.engineFactory.Create(cfg, s.RuntimeIdentity)
 	engine.CoreEngine.AgentID = spec.Name
 	engine.CoreEngine.AgentType = spec.Name
 	engine.CoreEngine.TeamName = s.Spec.Name
@@ -2919,6 +3050,29 @@ func (s *Session) Snapshot() Snapshot {
 	}
 }
 
+func (s *Session) ExportRuntimeCheckpoint() RuntimeCheckpoint {
+	snapshot := s.Snapshot()
+	s.mu.Lock()
+	dialogue := append([]DialogueEntry(nil), s.dialogue...)
+	timeline := append([]TimelineEvent(nil), s.timeline...)
+	artifacts := append([]Artifact(nil), s.artifacts...)
+	agents := make(map[string]*AgentRuntime, len(s.agents))
+	for id, runtime := range s.agents {
+		agents[id] = runtime
+	}
+	s.mu.Unlock()
+	states := make(map[string]agent.AgentState, len(agents))
+	for id, runtime := range agents {
+		if runtime != nil {
+			states[id] = persistableAgentState(runtime.State)
+		}
+	}
+	return RuntimeCheckpoint{
+		Version: 1, ParentSessionID: s.ParentSessionID, TeamName: s.Spec.Name,
+		Snapshot: snapshot, Dialogue: dialogue, Timeline: timeline, Artifacts: artifacts, AgentStates: states,
+	}
+}
+
 func cloneContract(in *AcceptanceContract) *AcceptanceContract {
 	if in == nil {
 		return nil
@@ -3556,7 +3710,7 @@ func firstLineFromFile(path string) string {
 }
 
 func (s *Session) persist() {
-	if strings.TrimSpace(s.rootDir) == "" {
+	if !s.persistEnabled || strings.TrimSpace(s.rootDir) == "" {
 		return
 	}
 	s.persistMu.Lock()

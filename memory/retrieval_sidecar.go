@@ -82,6 +82,11 @@ func (f *Fabric) migrateRetrievalSidecar(ctx context.Context) error {
 // SyncRetrievalSidecar materializes event spans from the durable ledger. A
 // sidecar under construction is never eligible for Search.
 func (f *Fabric) SyncRetrievalSidecar(ctx context.Context) error {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return err
+		}
+	}
 	if f == nil || f.sidecar == nil || f.options.RetrievalEncoder == nil {
 		return errors.New("BGE retrieval sidecar is not configured")
 	}

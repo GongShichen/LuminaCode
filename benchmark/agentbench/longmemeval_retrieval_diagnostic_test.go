@@ -131,7 +131,7 @@ func runLongMemEvalPreparedRetrievalDiagnostic(ctx context.Context, baseDir stri
 		break
 	}
 	cfg := longMemEvalFabricConfig(config.GetConfig(), caseDir, fabricDir, manifest.ScopeRoot, true)
-	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
+	fabric, err := agent.NewConfiguredMemoryFabricFactory().Open(ctx, cfg, agent.MemoryOpenOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}

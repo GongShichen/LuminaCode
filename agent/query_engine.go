@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"LuminaCode/agentContext"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
+	"LuminaCode/harness"
 	"LuminaCode/memory"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
@@ -24,19 +26,34 @@ type QueryEngine struct {
 	skillPermissionCh chan bool
 }
 
-func NewQueryEngine(cfg *config.Config) *QueryEngine {
-	if cfg == nil {
-		c := config.GetConfig()
-		cfg = &c
-	}
+func NewQueryEngine(cfg config.Config, core *CoreExecutionEngine) *QueryEngine {
 	return &QueryEngine{
-		Config:     *cfg,
-		CoreEngine: NewCoreExecutionEngine(cfg),
+		Config:     cfg,
+		CoreEngine: core,
 	}
 }
 
-func CreateQueryEngine(cfg *config.Config) *QueryEngine {
-	return NewQueryEngine(cfg)
+type QueryEngineFactory interface {
+	Create(config.Config, cluster.RuntimeIdentity) *QueryEngine
+}
+
+type DefaultQueryEngineFactory struct {
+	memoryFactory MemoryFabricFactory
+}
+
+func NewQueryEngineFactory(memoryFactory MemoryFabricFactory) *DefaultQueryEngineFactory {
+	return &DefaultQueryEngineFactory{memoryFactory: memoryFactory}
+}
+
+func (f *DefaultQueryEngineFactory) Create(cfg config.Config, identity cluster.RuntimeIdentity) *QueryEngine {
+	if strings.TrimSpace(identity.TenantID) == "" {
+		identity.TenantID = "local"
+	}
+	if strings.TrimSpace(identity.ProjectID) == "" {
+		identity.ProjectID = MemoryFabricSpace(cfg)
+	}
+	core := NewCoreExecutionEngine(cfg, identity, f.memoryFactory)
+	return NewQueryEngine(cfg, core)
 }
 
 func (q *QueryEngine) Abort() { q.CoreEngine.Abort() }
@@ -188,6 +205,11 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
+			if err := q.recordSkillInvocation(ctx, *skill, execution, state.TurnCount); err != nil {
+				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				return
+			}
 			normalizedPrompt = q.normalizeSkillUserPrompt(skill.CanonicalName, args)
 			if execution.Mode == "fork" {
 				resultText := "Skill '" + skill.CanonicalName + "' completed."
@@ -196,7 +218,21 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				}
 				AddUsage(state, execution.InputTokens, execution.OutputTokens)
 				q.commitUserTurn(state, normalizedPrompt)
+				if err := q.beginRuntimeRun(ctx, state); err != nil {
+					sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+					sendStream(ctx, out, NewStreamEvent("done", "", nil))
+					return
+				}
 				AppendAssistantMessage(state, nil, resultText, nil, "")
+				if q.CoreEngine != nil && q.CoreEngine.RuntimeEvents != nil {
+					if err := q.CoreEngine.RuntimeEvents.RecordAssistant(ctx, state.Messages[len(state.Messages)-1], harness.UsageRecordedPayload{InputTokens: execution.InputTokens, OutputTokens: execution.OutputTokens}); err != nil {
+						_ = q.CoreEngine.RuntimeEvents.EndRun(ctx, "failed", err.Error())
+						sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+						sendStream(ctx, out, NewStreamEvent("done", "", nil))
+						return
+					}
+					_ = q.CoreEngine.RuntimeEvents.EndRun(ctx, "completed", "")
+				}
 				if q.CoreEngine != nil {
 					tagLastMessageWithSessionTurn(state)
 					q.CoreEngine.RecordSessionMemory(ctx, state, false)
@@ -210,14 +246,55 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 			if execution.Prompt != nil {
 				state.Messages = append(state.Messages, q.CoreEngine.skillRegistryMessage(*skill, *execution.Prompt))
 			}
-			q.recordSkillInvocation(*skill, execution, state.TurnCount)
 		}
 		q.commitUserTurn(state, normalizedPrompt)
+		if err := q.beginRuntimeRun(ctx, state); err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+			sendStream(ctx, out, NewStreamEvent("done", "", nil))
+			return
+		}
+		lastType := ""
 		for event := range q.CoreEngine.QueryLoop(ctx, state) {
+			if event.Type == "done" && q.CoreEngine.RuntimeEvents != nil {
+				status := "completed"
+				reason := event.Content
+				if ctx.Err() != nil || strings.Contains(strings.ToLower(event.Content), "abort") {
+					status = "interrupted"
+				} else if lastType == "error" {
+					status = "failed"
+				}
+				if err := q.CoreEngine.RuntimeEvents.EndRun(ctx, status, reason); err != nil {
+					sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+					return
+				}
+			}
 			sendStream(ctx, out, event)
+			if event.Type != "thinking" && event.Type != "tool_progress" {
+				lastType = event.Type
+			}
 		}
 	}()
 	return out
+}
+
+func (q *QueryEngine) beginRuntimeRun(ctx context.Context, state *AgentState) error {
+	if q == nil || q.CoreEngine == nil || q.CoreEngine.RuntimeEvents == nil || state == nil || len(state.Messages) == 0 {
+		return nil
+	}
+	message := state.Messages[len(state.Messages)-1]
+	if q.CoreEngine.Runtime != nil {
+		result, err := q.CoreEngine.Runtime.Hooks.RunStarting.Run(ctx, RunHookContext{SessionID: q.CoreEngine.SessionID, Message: message, State: state})
+		if err != nil {
+			return err
+		}
+		message = result.Value.Message
+		state.Messages[len(state.Messages)-1] = message
+		if err := q.CoreEngine.RuntimeEvents.BeginRun(ctx, message); err != nil {
+			return err
+		}
+		return q.CoreEngine.Runtime.AppendHookEvents(ctx, q.CoreEngine.RuntimeEvents, result.Events)
+	}
+	return q.CoreEngine.RuntimeEvents.BeginRun(ctx, message)
 }
 
 func (q *QueryEngine) buildOrRefreshSystemPrompt(state *AgentState) {
@@ -358,15 +435,25 @@ func (q *QueryEngine) normalizeSkillUserPrompt(skillName, skillArgs string) stri
 	return fmt.Sprintf("Use skill '%s'.", skillName)
 }
 
-func (q *QueryEngine) recordSkillInvocation(skill skills.SkillSpec, execution skills.SkillExecutionResult, turnCount int) {
-	if q.CoreEngine.skillPersistence == nil || execution.Prompt == nil || *execution.Prompt == "" {
-		return
-	}
+func (q *QueryEngine) recordSkillInvocation(ctx context.Context, skill skills.SkillSpec, execution skills.SkillExecutionResult, turnCount int) error {
 	path := skill.SkillFile
 	if path == "" {
 		path = skill.Directory
 	}
-	q.CoreEngine.skillPersistence.RecordInvocation("main", skill.CanonicalName, path, *execution.Prompt, turnCount)
+	if q.CoreEngine.RuntimeEvents != nil {
+		if err := q.CoreEngine.RuntimeEvents.AppendPending(ctx,
+			harness.PendingEvent{Type: harness.EventSkillInvoked, Audience: []harness.Audience{harness.AudienceInternal},
+				Payload: map[string]any{"name": skill.CanonicalName, "path": path, "mode": execution.Mode, "turn_count": turnCount}},
+			harness.PendingEvent{Type: harness.EventSkillContextAttached, Audience: []harness.Audience{harness.AudienceModel, harness.AudienceInternal},
+				Payload: map[string]any{"name": skill.CanonicalName, "mode": execution.Mode}},
+		); err != nil {
+			return err
+		}
+	}
+	if q.CoreEngine.skillPersistence != nil && execution.Prompt != nil && *execution.Prompt != "" {
+		q.CoreEngine.skillPersistence.RecordInvocation("main", skill.CanonicalName, path, *execution.Prompt, turnCount)
+	}
+	return nil
 }
 
 func (e *CoreExecutionEngine) skillRegistryMessage(skill skills.SkillSpec, prompt string) map[string]any {

@@ -242,9 +242,6 @@ func runLongMemEvalAnswerSuite(ctx context.Context, options RunnerOptions, datas
 	}
 
 	runner := options.LongMemEvalAnswerRunner
-	if runner == nil {
-		runner = dedicatedLongMemEvalAnswerRunner{}
-	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan longMemEvalJob)

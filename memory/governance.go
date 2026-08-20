@@ -11,6 +11,11 @@ import (
 )
 
 func (f *Fabric) Forget(ctx context.Context, selector Selector, mode ForgetMode) error {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return err
+		}
+	}
 	if f == nil || f.ledger == nil || f.index == nil {
 		return errors.New("memory fabric is closed")
 	}

@@ -22,7 +22,7 @@ func TestSendA2AWaitTimeoutDoesNotMarkTargetInterruptedByUser(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestSubmitGateVerdictCompletesActiveGateA2ATask(t *testing.T) {
 			AllowedStatuses: []string{"pass", "fail"},
 		}}},
 	}
-	session := NewSession("parent-session", cfg, spec, nil, nil)
+	session := NewSession("parent-session", cfg, spec, newTestQueryEngineFactory(), nil, nil)
 	task, started := session.beginA2ATask("a2a-gate", "team-leader", "qa", "qa-verification", nil)
 	if !started {
 		t.Fatal("expected gate task to start")
@@ -170,7 +170,7 @@ func TestSubmitGateVerdictCompletesActiveGateA2ATask(t *testing.T) {
 func TestStageViolationInvalidatesGateVerdictForAgent(t *testing.T) {
 	cfg := config.NewConfigForCWD(t.TempDir())
 	cfg.SessionDir = t.TempDir()
-	session := NewSession("parent-session", cfg, TeamSpec{Name: "test-team", EntryAgent: "team-leader"}, nil, nil)
+	session := NewSession("parent-session", cfg, TeamSpec{Name: "test-team", EntryAgent: "team-leader"}, newTestQueryEngineFactory(), nil, nil)
 	session.gateVerdicts = map[string]GateVerdict{
 		"qa":       {Role: "qa", AgentID: "qa", Status: "pass"},
 		"reviewer": {Role: "reviewer", AgentID: "reviewer", Status: "pass"},
@@ -241,7 +241,7 @@ func TestSendA2AUsesConfiguredDefaultTimeout(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestSendA2ARespectsConfiguredMinimumTimeout(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "deep-research", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "deep-research", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestTeamLoopWaitsForPendingA2ABeforeNextIteration(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestSendA2ABlocksGateAgentsBeforeContract(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestGetTeamContextToolReturnsRuntimeContract(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -925,7 +925,7 @@ func TestGenericTeamDispatchGuardDoesNotHardcodeImplementationPolicy(t *testing.
 	if _, err := loader.CreateTemplate("Generic Runtime Team"); err != nil {
 		t.Fatal(err)
 	}
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "generic-runtime-team", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "generic-runtime-team", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,7 +948,7 @@ func TestSendA2ADoesNotQueueDuplicateWorkForActiveTarget(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1028,7 @@ func TestMemberMessageToEntryAgentIsDeliveredWithoutStartingLeaderTask(t *testin
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1126,7 +1126,7 @@ func TestTeamSharedPromptIsInjectedIntoLeaderAndAgentSystemPrompts(t *testing.T)
 	if err := os.WriteFile(filepath.Join(result.Path, SharedPromptFile), []byte(shared), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "shared-prompt-team", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "shared-prompt-team", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1172,7 +1172,7 @@ func TestLeaderPromptShortensLargeSharedPromptButAgentPromptKeepsFullText(t *tes
 	if err := os.WriteFile(filepath.Join(result.Path, SharedPromptFile), []byte(shared), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "large-shared-team", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "large-shared-team", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1210,7 +1210,7 @@ func TestEmptyTeamSharedPromptDoesNotAddLeaderSection(t *testing.T) {
 	if _, err := NewLoader(cfg).CreateTemplate("Empty Shared Team"); err != nil {
 		t.Fatal(err)
 	}
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "empty-shared-team", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "empty-shared-team", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1229,7 +1229,7 @@ func TestProductDevelopmentAgentSkillsAreIsolatedAndModelInvocable(t *testing.T)
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1329,7 +1329,7 @@ func TestProductDevelopmentTeamLeaderLoopCannotModifyImplementationFiles(t *test
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1360,7 +1360,7 @@ func TestProductDevelopmentDeliveryWorkUsesExclusiveWorkspaceAudit(t *testing.T)
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = t.TempDir()
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1646,7 +1646,7 @@ func TestTeamAgentRuntimeSessionDirIsNestedUnderTeamSession(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = sessionRoot
-	session, err := NewManager(cfg, nil, nil).Start("parent-session", "product-development", workdir)
+	session, err := NewManager(cfg, newTestQueryEngineFactory(), nil, nil).Start("parent-session", "product-development", workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1678,7 +1678,7 @@ func TestRequiredArtifactDirectoryExistsUnderTeamRuntime(t *testing.T) {
 	cfg := config.NewConfigForCWD(workdir)
 	cfg.SessionDir = t.TempDir()
 	cfg.ProjectRuntimeDir = filepath.Join(t.TempDir(), "project-runtime")
-	session := NewSession("parent-session", cfg, TeamSpec{Name: "research"}, nil, nil)
+	session := NewSession("parent-session", cfg, TeamSpec{Name: "research"}, newTestQueryEngineFactory(), nil, nil)
 	if err := os.MkdirAll(filepath.Join(session.teamRuntimeDir(), "paper-notes"), 0o755); err != nil {
 		t.Fatal(err)
 	}

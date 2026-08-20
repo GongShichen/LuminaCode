@@ -1006,7 +1006,7 @@ done
 	cfg.MCPEnabled = true
 	cfg.SkillsEnabled = false
 	cfg.APIKey = ""
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": "hello"}}
@@ -1041,7 +1041,7 @@ func TestCoreExecutionEnginePromptsAndPersistsMCPTrustLikePython(t *testing.T) {
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{{"role": "user", "content": "hello"}}
 
-	engine := agent.NewCoreExecutionEngine(&cfg)
+	engine := newTestCoreExecutionEngine(cfg)
 	stream := engine.QueryLoop(context.Background(), &state)
 
 	first, ok := <-stream

@@ -9,6 +9,7 @@ param(
     [string]$ApiType = $(if ($env:LUMINA_API_TYPE) { $env:LUMINA_API_TYPE } elseif ($env:LLM_API_TYPE) { $env:LLM_API_TYPE } else { "openai_compatible" }),
     [int]$MaxTokens = $(if ($env:LUMINA_API_MAX_TOKENS) { [int]$env:LUMINA_API_MAX_TOKENS } else { 1000000 }),
     [switch]$ConfigureApi,
+    [switch]$MemoryUseApi,
     [switch]$WriteDefaults,
     [switch]$SkipNpmInstall,
     [switch]$SkipManagedComponents,
@@ -171,6 +172,24 @@ function Write-ExplicitSettings {
     Write-LuminaAtomicJson -Path $Path -Value $settings
 }
 
+function Write-MemoryModelSettings {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][bool]$UseApi)
+    $settings = Read-LuminaJsonHashtable -Path $Path
+    $hadRerankerProvider = $settings.ContainsKey("memory_reranker_provider")
+    $settings["memory_bge_provider"] = $(if ($UseApi) { "openai_compatible" } else { "local" })
+    $settings["memory_reranker_provider"] = $(if ($UseApi) { "openai_compatible" } else { "off" })
+    if (-not $UseApi) { $settings["memory_reranker_enabled"] = $false }
+    foreach ($key in @("memory_bge_api_key", "memory_bge_base_url", "memory_bge_model",
+        "memory_reranker_api_key", "memory_reranker_base_url", "memory_reranker_model")) {
+        if (-not $settings.ContainsKey($key)) { $settings[$key] = "" }
+    }
+    if (-not $settings.ContainsKey("memory_reranker_enabled") -or -not $hadRerankerProvider) {
+        $settings["memory_reranker_enabled"] = $false
+        $settings["memory_reranker_model"] = ""
+    }
+    Write-LuminaAtomicJson -Path $Path -Value $settings
+}
+
 function Disable-ManagedMemorySettings {
     param([Parameter(Mandatory = $true)][string]$Path)
     $settings = Read-LuminaJsonHashtable -Path $Path
@@ -227,7 +246,11 @@ try {
     Assert-Command node
     Assert-Command npm
     Assert-Command curl.exe
-    if ($SkipManagedComponents) {
+    $existingSettings = Read-LuminaJsonHashtable -Path $paths.Settings
+    $memoryUsesApi = $MemoryUseApi.IsPresent -or
+        ($existingSettings.ContainsKey("memory_bge_provider") -and
+            $existingSettings["memory_bge_provider"] -eq "openai_compatible")
+    if ($SkipManagedComponents -or $memoryUsesApi) {
         $env:CGO_ENABLED = "0"
         Write-Host "  native memory toolchain: skipped (CGO_ENABLED=0)"
     } else {
@@ -247,6 +270,8 @@ try {
 
     if ($SkipManagedComponents) {
         Write-Host "  managed memory runtime: skipped (SkipManagedComponents)"
+    } elseif ($memoryUsesApi) {
+        Write-Host "  memory models: remote API selected; local download skipped"
     } elseif ($env:SKIP_MEMORY_MODELS -eq "1") {
         & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action preflight-installed -AppRoot $AppRoot
         if ($LASTEXITCODE -ne 0) { throw "Preinstalled BGE-M3 preflight failed." }
@@ -276,7 +301,7 @@ try {
         if (-not (Test-Path $frontendDist)) { throw "Frontend build output was not created: $frontendDist" }
         $installStage = "Go backend build"
 	    Invoke-Native "build Go backend" { & go build -o $backendBuildPath . }
-	    if (-not $SkipManagedComponents) {
+	    if (-not $SkipManagedComponents -and -not $memoryUsesApi) {
             $installStage = "memory model installation"
 		    if ($env:SKIP_MEMORY_MODELS -eq "1") {
 			    Invoke-Native "verify preinstalled memory models" { & (Join-Path $PSScriptRoot "setup-memory-models-windows.ps1") -Action doctor -AppRoot $AppRoot -Backend $backendBuildPath }
@@ -333,6 +358,11 @@ try {
     if ($WriteDefaults) {
         Write-ExplicitSettings -Path $paths.Settings
         Write-Host "Wrote explicit settings: $($paths.Settings)"
+    }
+    Write-MemoryModelSettings -Path $paths.Settings -UseApi $memoryUsesApi
+    Write-Host "Configured memory model fields: $($paths.Settings)"
+    if ($memoryUsesApi) {
+        Write-Host "Fill memory_bge_api_key/base_url/model and optional reranker fields before using memory."
     }
     if ($SkipManagedComponents) {
         Disable-ManagedMemorySettings -Path $paths.Settings

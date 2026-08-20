@@ -56,7 +56,7 @@ func TestRestorePersistedTeamDoesNotReviveStaleRunningState(t *testing.T) {
 	cfg := config.NewConfigForCWD(root)
 	cfg.TeamDir = filepath.Join(root, ".Lumina", "TEAM")
 	cfg.SessionDir = sessionDir
-	manager := luminateam.NewManager(cfg, nil, nil)
+	manager := luminateam.NewManager(cfg, newTestQueryEngineFactory(), nil, nil)
 	snapshots := manager.RestorePersistedForParent(parentSessionID, root)
 	if len(snapshots) != 1 {
 		t.Fatalf("expected one restored team snapshot, got %d", len(snapshots))

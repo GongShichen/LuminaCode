@@ -184,6 +184,11 @@ func (f *Fabric) resolveConflict(ctx context.Context, conflictID string) (Resolu
 // after historical import compiler jobs finish so conflict cost is bounded by
 // the case rather than by the number of semantic nodes.
 func (f *Fabric) ResolvePendingConflicts(ctx context.Context, space string, limit int) (APIUsage, error) {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return APIUsage{}, err
+		}
+	}
 	batcher, ok := f.options.Adjudicator.(BatchConflictAdjudicator)
 	if !ok || f.options.RemoteProcessing == RemoteProcessingOff {
 		return APIUsage{}, nil
@@ -493,6 +498,11 @@ func (f *Fabric) loadPriorResolutions(ctx context.Context, conflict Conflict) ([
 }
 
 func (f *Fabric) PrioritizeConflicts(ctx context.Context, selector ConflictSelector) (JobRef, error) {
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return JobRef{}, err
+		}
+	}
 	space := normalizeSpace(selector.Space)
 	clauses := []string{"space=?", "status IN (?, ?)"}
 	args := []any{space, SemanticPendingResolution, SemanticUnresolved}

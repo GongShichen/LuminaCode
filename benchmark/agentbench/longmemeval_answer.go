@@ -11,6 +11,7 @@ import (
 
 	"LuminaCode/agent"
 	luminaapi "LuminaCode/api"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -35,7 +36,13 @@ Treat the latest applicable observation at or before the reference time as the c
 When the requested output is not itself a stored fact, produce a useful response grounded in demonstrated interests, preferences, experiences, constraints, and available resources. The evidence need not contain a ready-made response; supported personalization and ordinary practical synthesis are allowed. Do not mark such a response insufficient merely because live external details are unavailable.
 Resolve aliases, time, state changes, and any requested calculation from the evidence as a whole. Distinguish observed or completed facts from plans, examples, recommendations, and unrelated quantities. An explicitly negated event did not occur and must be excluded. Before writing JSON, silently inventory every directly relevant observation, remove duplicate mentions, derive the final conclusion, and verify that no relevant evidence section was omitted. The answer field must contain that final conclusion rather than a restatement of intermediate observations. Never substitute a nearby entity or metric and never invent missing facts.`
 
-type dedicatedLongMemEvalAnswerRunner struct{}
+type dedicatedLongMemEvalAnswerRunner struct {
+	memoryFactory agent.MemoryFabricFactory
+}
+
+func NewLongMemEvalAnswerRunner(memoryFactory agent.MemoryFabricFactory) LongMemEvalAnswerRunner {
+	return &dedicatedLongMemEvalAnswerRunner{memoryFactory: memoryFactory}
+}
 
 type longMemEvalQAContract struct {
 	Supports     []string        `json:"supports"`
@@ -54,7 +61,7 @@ type longMemEvalQADiagnostics struct {
 	APICalls       int                   `json:"api_calls"`
 }
 
-func (dedicatedLongMemEvalAnswerRunner) RunAnswer(ctx context.Context, cfg config.Config, question,
+func (r *dedicatedLongMemEvalAnswerRunner) RunAnswer(ctx context.Context, cfg config.Config, question,
 	sessionID string, queryTime time.Time) AgentRunResult {
 	started := time.Now()
 	if !cfg.UsesMemoryFabric() {
@@ -70,7 +77,12 @@ func (dedicatedLongMemEvalAnswerRunner) RunAnswer(ctx context.Context, cfg confi
 	state.MemoryAgentType = "main"
 	state.MemoryQueryTime = longMemEvalRetrievalReferenceTime(queryTime)
 	state.MemoryQueryTimeExplicit = !queryTime.IsZero()
-	fabric, err := agent.OpenConfiguredMemoryFabric(ctx, cfg, false)
+	if r == nil || r.memoryFactory == nil {
+		return AgentRunResult{ErrorType: "answer_memory_open_error: memory fabric factory is required"}
+	}
+	fabric, err := r.memoryFactory.Open(ctx, cfg, agent.MemoryOpenOptions{
+		Identity: cluster.RuntimeIdentity{TenantID: "local", SessionID: sessionID},
+	})
 	if err != nil {
 		return AgentRunResult{ErrorType: "answer_memory_open_error: " + err.Error()}
 	}

@@ -130,6 +130,9 @@ func TestLuminaAssetsLayoutMatchesRenamedPythonBundle(t *testing.T) {
 		if d.IsDir() {
 			return nil
 		}
+		if d.Name() == ".DS_Store" {
+			return nil
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err

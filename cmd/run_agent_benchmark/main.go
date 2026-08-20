@@ -64,6 +64,7 @@ func main() {
 		*artifactsDir = filepath.Join(rootDir, "artifacts")
 	}
 	start := time.Now()
+	runtime := initializeBenchmarkRuntime()
 	report, err := agentbench.RunSuite(context.Background(), agentbench.RunnerOptions{
 		Suite:                   *suite,
 		CasesPath:               expandHome(*casesPath),
@@ -78,6 +79,9 @@ func main() {
 		CaseParallel:            *caseParallel,
 		NoResume:                !*resume,
 		Config:                  cfg,
+		AgentRunner:             runtime.AgentRunner,
+		LongMemEvalAnswerRunner: runtime.LongMemEvalAnswerRunner,
+		MemoryFactory:           runtime.MemoryFactory,
 		HarnessCmd:              *harnessCmd,
 		SWEBenchHarnessCmd:      *swebenchHarnessCmd,
 		PreparedEnv:             *preparedEnv,

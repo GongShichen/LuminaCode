@@ -15,6 +15,8 @@ Agent Teams.
 - Runs file, shell, web, MCP, memory, and task tools with permission controls.
 - Keeps resumable sessions with transcript, state, tasks, tool results, skill
   recovery, and session memory.
+- Records runtime activity as ordered, replayable events with crash recovery and
+  idempotent submit commands.
 - Supports OpenAI-compatible and Anthropic-compatible streaming APIs.
 - Keeps visible chat separate from tool payloads, tool results, and runtime
   records.
@@ -38,16 +40,118 @@ The backend listens on `127.0.0.1`, requires an auth token, supports multiple
 sessions, and serializes submits within each session. Headless paths are handled
 by `lumina-backend`.
 
+### Durable Runtime Journal
+
+Each interactive session has one authoritative SQLite journal:
+
+```text
+<AppRoot>/data/sessions/active/{session-id}/runtime.sqlite
+```
+
+The journal uses WAL mode and records session, run, step, message, model, tool,
+task, Team, memory, usage, warning, and checkpoint events. Events have a global
+sequence and a per-stream sequence; optimistic stream checks prevent conflicting
+writes. Large payloads can be stored in a content-addressed blob table, while
+rebuildable projections and consumer offsets track replay progress.
+
+Runtime behavior is assembled through typed capabilities and deterministic
+hooks. Memory preparation, skill context, MCP registration, context compilation,
+model responses, permissions, tools, and sub-agents share the same session
+scope without being coupled to the TUI.
+
+The WebSocket protocol publishes durable v3 events with their journal sequence.
+If the TUI detects a gap, it calls `session.events` and reduces the missing
+events before applying the live event. Submit commands carry an idempotency key,
+so reconnect retries return the original result instead of starting duplicate
+runs.
+
+On resume, open runs, steps, and tools are closed with explicit interrupted
+events. Task state is rebuilt from lifecycle events, and Team child streams use
+lossless runtime checkpoints. Older JSON/JSONL session files and Team sidecars
+are imported once with a backup; new sessions do not create those sidecars.
+
+### Multi-instance cluster mode
+
+Local mode remains the default and continues to use the SQLite runtime journal
+above. Cluster mode is explicit and fail-closed:
+
+- PostgreSQL is the durable source of truth for Session streams, events,
+  checkpoints, command results, blobs, consumer offsets, Team checkpoints, and
+  Memory Fabric data.
+- Redis stores expiring instance registrations and Session leases,
+  monotonically increasing fencing tokens, Redis Streams RPC envelopes, and
+  low-latency event notifications. Pub/Sub is never treated as durable state.
+- Any Hertz gateway can accept a WebSocket and transparently forward work to
+  the Session owner. Team, sub-agent, permission, artifact, and A2A work
+  inherits the parent's owner and fencing token.
+- Every PostgreSQL runtime write checks its fencing token, so a former owner
+  cannot commit after another instance takes ownership.
+- The TUI uses UUID request IDs and `Authorization: Bearer <JWT>`. It reconnects
+  to any gateway for up to 30 seconds, resumes the Session, fills event gaps by
+  sequence, and retries confirmed mutations with the same UUID.
+- `/healthz` reports liveness. `/readyz` additionally checks Redis,
+  PostgreSQL, schema state, and instance registration.
+
+Configure cluster mode in user `settings.json` or with the corresponding
+`LUMINA_*` environment variables:
+
+```json
+{
+  "session_runtime_backend": "cluster",
+  "memory_fabric_store": "postgres",
+  "cluster_id": "production",
+  "instance_id": "backend-1",
+  "cluster_listen_addr": "0.0.0.0:8080",
+  "cluster_advertise_addr": "backend-1:8080",
+  "redis_url": "redis://...",
+  "postgres_url": "postgres://...",
+  "jwt_issuer": "https://issuer.example",
+  "jwt_audience": "lumina",
+  "jwt_jwks_url": "https://issuer.example/.well-known/jwks.json"
+}
+```
+
+Connection URLs, private keys, and JWTs must come from user settings or a
+secret manager; they are not written to defaults, endpoint files, or
+diagnostics. JWT validation accepts only RS256, ES256, and EdDSA and requires
+`exp`, `iss`, `aud`, `sub`, and the tenant claim. Reads and writes require
+`lumina:session:read` and `lumina:session:write`; shutdown and drain require
+`lumina:admin`.
+
+For a local multi-process cluster, generate an Ed25519 key pair and admin token:
+
+```sh
+lumina-backend cluster init-local --tenant local
+export LUMINA_JWT="$(cat <AppRoot>/config/cluster/admin.jwt)"
+export LUMINA_BACKEND_URL=ws://127.0.0.1:8080/v1/ws
+```
+
+PostgreSQL 15+ with pgvector 0.8.6+ and Redis 7.2+ are required. Runtime
+dependencies are pinned to Hertz 0.10.6, go-redis 9.20.0, pgx 5.10.0,
+pgvector-go 0.4.1, and golang-jwt 5.3.1. Hertz uses the Go standard transport
+and its official HTTP adaptor around the existing `gorilla/websocket` handlers.
+Repeatable schemas and deployment examples are under `deploy/`.
+Cluster instances must see the same project workspace through shared persistent
+storage or an external Git/object-storage workflow; source files and artifacts
+are intentionally not stored in Redis or PostgreSQL.
+
 ## Long-Term Memory
 
-Memory Fabric keeps durable cross-session state in two local SQLite databases
-and builds a third, replaceable BGE-M3 retrieval index:
+In local mode, Memory Fabric keeps durable cross-session state in two SQLite
+databases and builds a third, replaceable BGE-M3 retrieval index:
 
 ```text
 <AppRoot>/data/memory/fabric/ledger.sqlite
 <AppRoot>/data/memory/fabric/index.sqlite
 <AppRoot>/data/memory/fabric/retrieval-bge-m3.sqlite
 ```
+
+In cluster mode, the ledger, nodes, conflicts, resolutions, jobs, generated
+FTS, semantic `vector(1024)`, event-window `halfvec(1024)`, learned-sparse
+postings, graph edges, and index build state are tenant/project-scoped in
+PostgreSQL. Spaces below 50,000 vectors use exact cosine search; larger spaces
+use HNSW with request-scaled `ef_search`. Model changes rebuild derived indexes
+without rewriting durable evidence.
 
 ### Memory Write Flow
 
@@ -171,11 +275,10 @@ Runtime summary:
 - Stop policy: user interrupt or task complete.
 - Failures become recovery inputs for the next loop.
 - Ordinary Agent context and Team Agent contexts remain isolated.
-
-```text
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/
-<AppRoot>/data/projects/{project-id}/teams/{team_name}/{team_session_id}/agents/{agent_id}/
-```
+- Team dialogue, activity, artifacts, gates, and member state are checkpointed
+  in child streams inside the parent session's `runtime.sqlite` journal.
+- Existing file-based Team runtime data remains readable as a one-time migration
+  source; new Team sessions do not write per-Team runtime directories.
 
 ### Built-in Teams
 
@@ -344,6 +447,37 @@ hot-read at the next turn.
 compression threshold. LuminaCode does not force provider-side completion
 `max_tokens`. Runtime config is hot-read before each agent turn.
 
+### Remote Memory Models
+
+BGE-M3 embeddings and an optional reranker can use independent remote
+OpenAI-compatible credentials in `<AppRoot>/config/settings.json`:
+
+```json
+{
+  "memory_bge_provider": "openai_compatible",
+  "memory_bge_api_key": "...",
+  "memory_bge_base_url": "https://models.example.com/v1",
+  "memory_bge_model": "BAAI/bge-m3",
+  "memory_reranker_enabled": true,
+  "memory_reranker_provider": "openai_compatible",
+  "memory_reranker_api_key": "...",
+  "memory_reranker_base_url": "https://models.example.com/v1",
+  "memory_reranker_model": "BAAI/bge-reranker-v2-m3"
+}
+```
+
+The embedding service must implement `POST /v1/embeddings` and return
+1024-dimensional float embeddings. The reranker uses an OpenAI-compatible
+rerank extension with `query`, `documents`, and `top_n`; both `/rerank` and
+`/reranks` responses may use `results[].relevance_score` or `data[].score`.
+Alibaba Model Studio `compatible-mode/v1` base URLs are normalized to its
+documented `compatible-api/v1/reranks` endpoint.
+Changing the embedding endpoint or model changes the retrieval fingerprint, so
+derived vectors are rebuilt instead of mixing embedding spaces. API keys are
+never included in that fingerprint or diagnostics.
+These memory-model fields are read only from the user `settings.json`; project
+defaults and environment variables cannot override them.
+
 ## Project Instructions
 
 Read order:
@@ -408,7 +542,7 @@ Project runtime data:
 
 - `project.json`
 - `trust/mcp.json`
-- `teams/`
+- `teams/` (legacy Team runtime data, imported when encountered)
 
 Project-authored resources:
 
@@ -422,20 +556,38 @@ sessions use `<AppRoot>/data/sessions/archive`:
 {session_dir}/{session_id}/
 ```
 
-- `transcript.jsonl`
-- `transcript.md`
-- `meta.json`
-- `state.json`
-- `tasks.json`
-- `skill-recovery.json`
-- `skill-recovery.commit.json`
-- `session.sqlite`
+- `runtime.sqlite`: authoritative event journal and runtime checkpoints
+- `meta.json`: small, rebuildable session-list projection
+- `migration-v2.json`: migration report, when a legacy session was imported
+- `.migration-backup/v1/`: preserved legacy source files, when imported
+
+`runtime.sqlite-wal` and `runtime.sqlite-shm` can exist while the database is
+open. Legacy `transcript.jsonl`, `state.json`, `tasks.json`,
+`skill-recovery*.json`, and `session.sqlite` files are migration inputs rather
+than the source of truth once `runtime.sqlite` exists.
 
 Large background outputs:
 
 ```text
 <AppRoot>/state/projects/{project-id}/tool-results/{session-id}/
 ```
+
+Cluster migration is explicit and never dual-writes:
+
+```sh
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all --dry-run
+lumina-backend session migrate --from local --to cluster --tenant TENANT --all
+lumina-backend session export --from cluster --to local --tenant TENANT --session ID --output NEW_DIR
+
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT --dry-run
+lumina-backend memory migrate --from sqlite --to postgres --tenant TENANT --project PROJECT
+lumina-backend memory export --from postgres --to sqlite --tenant TENANT --project PROJECT --output NEW_DIR
+```
+
+Migration copies durable facts only, validates counts and canonical checksums,
+then rebuilds FTS/vector/sparse derived indexes with the current models. Source
+SQLite files remain in place and receive a read-only migration marker only
+after target verification. Export always requires a new directory.
 
 ## CLI Reference
 
@@ -449,6 +601,15 @@ lumina [flags]
 lumina-backend -p "Summarize this repository"
 lumina-backend --list
 lumina-backend daemon --host 127.0.0.1 --port 0
+```
+
+Inspect the runtime assembly and event journal:
+
+```sh
+lumina-backend runtime dump --session <session-id>
+lumina-backend session migrate --check [--session <session-id>]
+lumina-backend session migrate --all [--session <session-id>]
+lumina-backend session migrate --status [--session <session-id>]
 ```
 
 Common flags:
@@ -484,14 +645,25 @@ macOS/Linux:
 make install
 ```
 
+To use remote memory models and skip the local model download:
+
+```sh
+make install MEMORY_USE_API=1
+```
+
+This writes all remote memory fields to `settings.json` with empty credential
+and model values. Fill them after installation. The default local install is
+selected with `MEMORY_USE_API=0`; upgrades reuse the provider already recorded
+in settings when this argument is omitted.
+
 The default install first checks the host hardware, required toolchain, free
 space, and usable execution provider. It then downloads a revision- and
 SHA-256-pinned BGE-M3 profile from ModelScope: MLX INT8 with the managed Metal
 runtime on Apple Silicon, ONNX INT8 for CPU, or ONNX FP16 for a supported
 managed accelerator runtime. It replaces the installed application only after
 the model, tokenizer, linear heads, native runtime, and inference probe pass.
-BGE-M3 is the sole local model for memory writes and retrieval; installation
-fails without a valid model and does not fall back to another embedding space.
+In local mode, installation fails without a valid BGE-M3 model and does not
+fall back to another embedding space.
 `LUMINA_MEMORY_EMBEDDING_DEVICE` selects a device explicitly, while
 `LUMINA_MEMORY_MODEL_VARIANT=metal-int8|cpu-int8|accelerator-fp16` pins a
 packaging profile.
@@ -509,6 +681,9 @@ Windows:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
+
+Pass `-MemoryUseApi` on Windows to select the same remote-memory installation
+mode.
 
 Doctor:
 
@@ -553,7 +728,26 @@ Test:
 ```sh
 go test ./...
 npm --prefix frontend test
+make integration-test # requires Docker; starts Redis 8 and pgvector 0.8.6
 ```
+
+Compile-time dependency wiring is generated with the repository-pinned Wire
+`v0.7.0` tool:
+
+```sh
+make generate
+make wire-check
+# equivalent generation command: go tool wire gen ./...
+```
+
+Commit every `wire.go` injector together with its generated `wire_gen.go`. Run
+`make generate` after changing providers or injector signatures, and run
+`make wire-check` before submitting changes. No global Wire installation is
+required. Because the [upstream Wire repository is archived](https://github.com/google/wire),
+the version remains pinned and CI treats both `wire check` and `wire diff` as
+required consistency checks. Wire owns static application roots; session-,
+team-, and agent-scoped objects whose IDs or working directories are known only
+at runtime are created through the injected factories.
 
 Build:
 
@@ -583,17 +777,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `apppaths/`: cross-platform AppRoot, project identity, doctor, and migration
 - `api/`: streaming LLM clients and provider protocol normalization
 - `backend/`: WebSocket daemon, session manager, and frontend IPC bridge
+- `cluster/`: Redis leases, fencing ownership, command streams, and event notifications
 - `cli/`: slash command classification and completion helpers
 - `config/`: configuration loading, environment overrides, and path resolution
 - `frontend/`: TypeScript terminal frontend
+- `deploy/`: repeatable PostgreSQL schemas and container/Kubernetes examples
+- `harness/`: durable event contracts, scopes, hooks, projections, and stores
 - `mcp/`: MCP config, trust, and dynamic tool registration
-- `memory/`: auto-memory storage and recall
+- `memory/`: SQLite and PostgreSQL/pgvector Memory Fabric implementations
 - `security/`: command and path safety checks
-- `session/`: session persistence, migration, and recovery
+- `session/`: SQLite/PostgreSQL runtime stores, migration, projections, and crash recovery
 - `sessionmemory/`: per-session memory commit log and history tools
 - `skills/`: skill loading, prompt processing, discovery, and execution
 - `team/`: Agent Team configuration, runtime loop, A2A dialogue, gates, and
-  persistence
+  journal checkpoints
 - `tools/`: built-in tools
 - `ui/`: shared runtime frame model and legacy renderer tests
 - `test/`: parity and regression tests

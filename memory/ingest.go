@@ -22,6 +22,11 @@ func (e IndexLagError) Unwrap() error { return e.Cause }
 
 func (f *Fabric) AppendEvents(ctx context.Context, events []RawEvent, options IngestOptions) (IngestResult, error) {
 	result := IngestResult{SemanticStatus: SemanticEventDurable}
+	if f != nil && f.options.WriteGuard != nil {
+		if err := f.options.WriteGuard(ctx); err != nil {
+			return result, err
+		}
+	}
 	if f == nil || f.ledger == nil || f.index == nil {
 		return result, errors.New("memory fabric is closed")
 	}

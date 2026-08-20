@@ -73,11 +73,32 @@ type Config struct {
 	AnthropicCacheEditsEnabled bool
 	MaxParentTurns             int
 
-	SessionDir           string
-	SessionArchiveDir    string
-	SessionMemoryDir     string
-	SessionMemoryAgentID string
-	ProjectRuntimeDir    string
+	SessionDir            string
+	SessionArchiveDir     string
+	SessionMemoryDir      string
+	SessionMemoryAgentID  string
+	ProjectRuntimeDir     string
+	SessionRuntimeBackend string
+	MemoryFabricStore     string
+
+	ClusterID                   string
+	InstanceID                  string
+	ClusterListenAddr           string
+	ClusterAdvertiseAddr        string
+	RedisURL                    string
+	PostgresURL                 string
+	ClusterLeaseTTLSeconds      int
+	ClusterLeaseRenewSeconds    int
+	ClusterRPCTimeoutSeconds    int
+	ClusterShutdownGraceSeconds int
+	JWTIssuer                   string
+	JWTAudience                 string
+	JWTJWKSURL                  string
+	JWTPublicKeyFile            string
+	JWTTenantClaim              string
+	JWTScopeClaim               string
+	JWTClockLeewaySeconds       int
+	ClusterConfigErrors         []string
 
 	SessionMemoryEnabled             bool
 	SessionMemoryTurnInterval        int
@@ -123,6 +144,15 @@ type Config struct {
 	MemoryEmbeddingExecutionTimeout  float64
 	MemoryBGEEnabled                 bool
 	MemoryBGEModelDir                string
+	MemoryBGEProvider                string
+	MemoryBGEAPIKey                  string
+	MemoryBGEBaseURL                 string
+	MemoryBGEModel                   string
+	MemoryRerankerEnabled            bool
+	MemoryRerankerProvider           string
+	MemoryRerankerAPIKey             string
+	MemoryRerankerBaseURL            string
+	MemoryRerankerModel              string
 	MemoryConfigErrors               []string
 
 	SkillsEnabled       bool
@@ -222,9 +252,20 @@ func NewConfigForCWD(cwd string) Config {
 		AnthropicCacheEditsEnabled: false,
 		MaxParentTurns:             100,
 
-		SessionDir:        paths.ActiveSessionsDir,
-		SessionArchiveDir: paths.ArchivedSessionsDir,
-		ProjectRuntimeDir: projectPaths.StateDir,
+		SessionDir:                  paths.ActiveSessionsDir,
+		SessionArchiveDir:           paths.ArchivedSessionsDir,
+		ProjectRuntimeDir:           projectPaths.StateDir,
+		SessionRuntimeBackend:       "local",
+		MemoryFabricStore:           "sqlite",
+		ClusterID:                   "default",
+		ClusterListenAddr:           "127.0.0.1:0",
+		ClusterLeaseTTLSeconds:      15,
+		ClusterLeaseRenewSeconds:    5,
+		ClusterRPCTimeoutSeconds:    30,
+		ClusterShutdownGraceSeconds: 30,
+		JWTTenantClaim:              "tenant_id",
+		JWTScopeClaim:               "scope",
+		JWTClockLeewaySeconds:       30,
 
 		SessionMemoryEnabled:             true,
 		SessionMemoryTurnInterval:        5,
@@ -267,6 +308,11 @@ func NewConfigForCWD(cwd string) Config {
 		MemoryEmbeddingExecutionTimeout:  8,
 		MemoryBGEEnabled:                 true,
 		MemoryBGEModelDir:                paths.MemoryModelDir,
+		MemoryBGEProvider:                "local",
+		MemoryBGEModel:                   "BAAI/bge-m3",
+		MemoryRerankerEnabled:            false,
+		MemoryRerankerProvider:           "off",
+		MemoryRerankerModel:              "BAAI/bge-reranker-v2-m3",
 
 		SkillsEnabled:       true,
 		SkillsDir:           filepath.Join(apppaths.ProjectLocalDirName, apppaths.ProjectSkillsDirName),
@@ -296,9 +342,9 @@ func NewConfigForCWD(cwd string) Config {
 	if projectRootErr != nil {
 		cfg.PathErrors = append(cfg.PathErrors, projectRootErr.Error())
 	}
-	applyLuminaDefaults(&cfg, paths.SettingsFile, cwd, resourceDir)
+	applyLuminaDefaults(&cfg, paths.SettingsFile, cwd, resourceDir, true)
 	if projectDefaults := findProjectDefaults(cwd); projectDefaults != "" && filepath.Clean(projectDefaults) != filepath.Clean(paths.SettingsFile) {
-		applyLuminaDefaults(&cfg, projectDefaults, cwd, resourceDir)
+		applyLuminaDefaults(&cfg, projectDefaults, cwd, resourceDir, false)
 	}
 	if err := refreshProjectPaths(&cfg, cwd); err != nil {
 		cfg.PathErrors = append(cfg.PathErrors, err.Error())
@@ -306,20 +352,183 @@ func NewConfigForCWD(cwd string) Config {
 	applyEnvOverrides(&cfg)
 	ApplyHarnessDefaults(&cfg)
 	normalizeMemoryModelConfig(&cfg)
+	normalizeClusterConfig(&cfg)
 	return cfg
+}
+
+func normalizeClusterConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.SessionRuntimeBackend = strings.ToLower(strings.TrimSpace(cfg.SessionRuntimeBackend))
+	if cfg.SessionRuntimeBackend == "" {
+		cfg.SessionRuntimeBackend = "local"
+	}
+	if cfg.SessionRuntimeBackend != "local" && cfg.SessionRuntimeBackend != "cluster" {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors,
+			"session_runtime_backend must be local or cluster")
+	}
+	cfg.MemoryFabricStore = strings.ToLower(strings.TrimSpace(cfg.MemoryFabricStore))
+	if cfg.MemoryFabricStore == "" {
+		cfg.MemoryFabricStore = "sqlite"
+	}
+	if cfg.MemoryFabricStore != "sqlite" && cfg.MemoryFabricStore != "postgres" {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors,
+			"memory_fabric_store must be sqlite or postgres")
+	}
+	if strings.TrimSpace(cfg.ClusterID) == "" {
+		cfg.ClusterID = "default"
+	}
+	if !validClusterIdentifier(cfg.ClusterID) {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors,
+			"cluster_id may contain only letters, digits, dot, underscore, and hyphen")
+	}
+	if strings.TrimSpace(cfg.InstanceID) != "" && !validClusterIdentifier(cfg.InstanceID) {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors,
+			"instance_id may contain only letters, digits, dot, underscore, and hyphen")
+	}
+	if strings.TrimSpace(cfg.ClusterListenAddr) == "" {
+		cfg.ClusterListenAddr = "127.0.0.1:0"
+	}
+	if strings.TrimSpace(cfg.JWTTenantClaim) == "" {
+		cfg.JWTTenantClaim = "tenant_id"
+	}
+	if strings.TrimSpace(cfg.JWTScopeClaim) == "" {
+		cfg.JWTScopeClaim = "scope"
+	}
+	for _, item := range []struct {
+		name  string
+		value int
+	}{
+		{"cluster_lease_ttl_seconds", cfg.ClusterLeaseTTLSeconds},
+		{"cluster_lease_renew_seconds", cfg.ClusterLeaseRenewSeconds},
+		{"cluster_rpc_timeout_seconds", cfg.ClusterRPCTimeoutSeconds},
+		{"cluster_shutdown_grace_seconds", cfg.ClusterShutdownGraceSeconds},
+		{"jwt_clock_leeway_seconds", cfg.JWTClockLeewaySeconds},
+	} {
+		if item.value <= 0 {
+			cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors, item.name+" must be positive")
+		}
+	}
+	if cfg.ClusterLeaseRenewSeconds >= cfg.ClusterLeaseTTLSeconds {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors,
+			"cluster_lease_renew_seconds must be less than cluster_lease_ttl_seconds")
+	}
+}
+
+func validClusterIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (c Config) UsesClusterRuntime() bool {
+	return strings.EqualFold(strings.TrimSpace(c.SessionRuntimeBackend), "cluster")
+}
+
+func (c Config) UsesPostgresMemoryFabric() bool {
+	return strings.EqualFold(strings.TrimSpace(c.MemoryFabricStore), "postgres")
+}
+
+func (c Config) ValidateClusterConfig() error {
+	if len(c.ClusterConfigErrors) > 0 {
+		return fmt.Errorf("invalid cluster configuration: %s", strings.Join(c.ClusterConfigErrors, "; "))
+	}
+	if !c.UsesClusterRuntime() && !c.UsesPostgresMemoryFabric() {
+		return nil
+	}
+	var missing []string
+	if strings.TrimSpace(c.RedisURL) == "" && c.UsesClusterRuntime() {
+		missing = append(missing, "redis_url")
+	}
+	if strings.TrimSpace(c.PostgresURL) == "" {
+		missing = append(missing, "postgres_url")
+	}
+	if c.UsesClusterRuntime() {
+		if !c.UsesPostgresMemoryFabric() {
+			missing = append(missing, "memory_fabric_store=postgres")
+		}
+		if strings.TrimSpace(c.InstanceID) == "" {
+			missing = append(missing, "instance_id")
+		}
+		if strings.TrimSpace(c.JWTIssuer) == "" {
+			missing = append(missing, "jwt_issuer")
+		}
+		if strings.TrimSpace(c.JWTAudience) == "" {
+			missing = append(missing, "jwt_audience")
+		}
+		if strings.TrimSpace(c.JWTJWKSURL) == "" && strings.TrimSpace(c.JWTPublicKeyFile) == "" {
+			missing = append(missing, "jwt_jwks_url or jwt_public_key_file")
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("cluster configuration requires %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func normalizeMemoryModelConfig(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	// BGE-M3 is the single managed memory model. Legacy enable/model fields are
-	// normalized so an older settings file cannot select a different vector
-	// space or silently disable local memory encoding.
+	// BGE-M3 remains the single local memory model. A remote provider is an
+	// explicit settings.json choice and carries a distinct vector-space identity.
 	cfg.MemoryBGEEnabled = true
 	cfg.MemoryEmbeddingEnabled = true
-	cfg.MemoryEmbeddingModel = "bge-m3"
-	cfg.MemoryEmbeddingModelDir = cfg.MemoryBGEModelDir
+	cfg.MemoryBGEProvider = strings.ToLower(strings.TrimSpace(cfg.MemoryBGEProvider))
+	if cfg.MemoryBGEProvider == "" {
+		cfg.MemoryBGEProvider = "local"
+	}
+	switch cfg.MemoryBGEProvider {
+	case "local":
+		cfg.MemoryEmbeddingModel = "bge-m3"
+		cfg.MemoryEmbeddingModelDir = cfg.MemoryBGEModelDir
+	case "openai_compatible":
+		cfg.MemoryEmbeddingModel = strings.TrimSpace(cfg.MemoryBGEModel)
+		cfg.MemoryEmbeddingModelDir = ""
+		requireRemoteMemoryModelConfig(cfg, "memory_bge", cfg.MemoryBGEAPIKey,
+			cfg.MemoryBGEBaseURL, cfg.MemoryBGEModel)
+	default:
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
+			"memory_bge_provider must be local or openai_compatible")
+	}
+	cfg.MemoryRerankerProvider = strings.ToLower(strings.TrimSpace(cfg.MemoryRerankerProvider))
+	if cfg.MemoryRerankerProvider == "" {
+		cfg.MemoryRerankerProvider = "off"
+	}
+	switch cfg.MemoryRerankerProvider {
+	case "off":
+		cfg.MemoryRerankerEnabled = false
+	case "openai_compatible":
+	default:
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
+			"memory_reranker_provider must be off or openai_compatible")
+	}
+	if cfg.MemoryRerankerEnabled && cfg.MemoryRerankerProvider == "openai_compatible" {
+		requireRemoteMemoryModelConfig(cfg, "memory_reranker", cfg.MemoryRerankerAPIKey,
+			cfg.MemoryRerankerBaseURL, cfg.MemoryRerankerModel)
+	}
+}
+
+func requireRemoteMemoryModelConfig(cfg *Config, prefix, apiKey, baseURL, model string) {
+	if strings.TrimSpace(apiKey) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_api_key is required")
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_base_url is required")
+	}
+	if strings.TrimSpace(model) == "" {
+		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, prefix+"_model is required")
+	}
 }
 
 func ReloadDynamicConfig(current Config) Config {
@@ -389,6 +598,26 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.TeamTimelineMaxEntries = fresh.TeamTimelineMaxEntries
 	updated.TeamDialogueMaxEntries = fresh.TeamDialogueMaxEntries
 	updated.TeamArtifactMaxBytes = fresh.TeamArtifactMaxBytes
+	updated.SessionRuntimeBackend = fresh.SessionRuntimeBackend
+	updated.MemoryFabricStore = fresh.MemoryFabricStore
+	updated.ClusterID = fresh.ClusterID
+	updated.InstanceID = fresh.InstanceID
+	updated.ClusterListenAddr = fresh.ClusterListenAddr
+	updated.ClusterAdvertiseAddr = fresh.ClusterAdvertiseAddr
+	updated.RedisURL = fresh.RedisURL
+	updated.PostgresURL = fresh.PostgresURL
+	updated.ClusterLeaseTTLSeconds = fresh.ClusterLeaseTTLSeconds
+	updated.ClusterLeaseRenewSeconds = fresh.ClusterLeaseRenewSeconds
+	updated.ClusterRPCTimeoutSeconds = fresh.ClusterRPCTimeoutSeconds
+	updated.ClusterShutdownGraceSeconds = fresh.ClusterShutdownGraceSeconds
+	updated.JWTIssuer = fresh.JWTIssuer
+	updated.JWTAudience = fresh.JWTAudience
+	updated.JWTJWKSURL = fresh.JWTJWKSURL
+	updated.JWTPublicKeyFile = fresh.JWTPublicKeyFile
+	updated.JWTTenantClaim = fresh.JWTTenantClaim
+	updated.JWTScopeClaim = fresh.JWTScopeClaim
+	updated.JWTClockLeewaySeconds = fresh.JWTClockLeewaySeconds
+	updated.ClusterConfigErrors = append([]string(nil), fresh.ClusterConfigErrors...)
 	if !isPinned(current, "long_term_memory_enabled") {
 		updated.LongTermMemoryEnabled = fresh.LongTermMemoryEnabled
 	}
@@ -420,6 +649,15 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.MemoryEmbeddingExecutionTimeout = fresh.MemoryEmbeddingExecutionTimeout
 	updated.MemoryBGEEnabled = fresh.MemoryBGEEnabled
 	updated.MemoryBGEModelDir = fresh.MemoryBGEModelDir
+	updated.MemoryBGEProvider = fresh.MemoryBGEProvider
+	updated.MemoryBGEAPIKey = fresh.MemoryBGEAPIKey
+	updated.MemoryBGEBaseURL = fresh.MemoryBGEBaseURL
+	updated.MemoryBGEModel = fresh.MemoryBGEModel
+	updated.MemoryRerankerEnabled = fresh.MemoryRerankerEnabled
+	updated.MemoryRerankerProvider = fresh.MemoryRerankerProvider
+	updated.MemoryRerankerAPIKey = fresh.MemoryRerankerAPIKey
+	updated.MemoryRerankerBaseURL = fresh.MemoryRerankerBaseURL
+	updated.MemoryRerankerModel = fresh.MemoryRerankerModel
 	updated.MemoryConfigErrors = append([]string(nil), fresh.MemoryConfigErrors...)
 	updated.WebSearchEnabled = fresh.WebSearchEnabled
 	updated.WebSearchProvider = fresh.WebSearchProvider
@@ -708,6 +946,25 @@ type luminaDefaults struct {
 	MaxParentTurns                   *int     `json:"max_parent_turns"`
 	SessionDir                       *string  `json:"session_dir"`
 	SessionArchiveDir                *string  `json:"session_archive_dir"`
+	SessionRuntimeBackend            *string  `json:"session_runtime_backend"`
+	MemoryFabricStore                *string  `json:"memory_fabric_store"`
+	ClusterID                        *string  `json:"cluster_id"`
+	InstanceID                       *string  `json:"instance_id"`
+	ClusterListenAddr                *string  `json:"cluster_listen_addr"`
+	ClusterAdvertiseAddr             *string  `json:"cluster_advertise_addr"`
+	RedisURL                         *string  `json:"redis_url"`
+	PostgresURL                      *string  `json:"postgres_url"`
+	ClusterLeaseTTLSeconds           *int     `json:"cluster_lease_ttl_seconds"`
+	ClusterLeaseRenewSeconds         *int     `json:"cluster_lease_renew_seconds"`
+	ClusterRPCTimeoutSeconds         *int     `json:"cluster_rpc_timeout_seconds"`
+	ClusterShutdownGraceSeconds      *int     `json:"cluster_shutdown_grace_seconds"`
+	JWTIssuer                        *string  `json:"jwt_issuer"`
+	JWTAudience                      *string  `json:"jwt_audience"`
+	JWTJWKSURL                       *string  `json:"jwt_jwks_url"`
+	JWTPublicKeyFile                 *string  `json:"jwt_public_key_file"`
+	JWTTenantClaim                   *string  `json:"jwt_tenant_claim"`
+	JWTScopeClaim                    *string  `json:"jwt_scope_claim"`
+	JWTClockLeewaySeconds            *int     `json:"jwt_clock_leeway_seconds"`
 	SessionMemoryEnabled             *bool    `json:"session_memory_enabled"`
 	SessionMemoryTurnInterval        *int     `json:"session_memory_turn_interval"`
 	SessionMemorySummaryModel        *string  `json:"session_memory_summary_model"`
@@ -748,6 +1005,15 @@ type luminaDefaults struct {
 	MemoryEmbeddingExecutionTimeout  *float64 `json:"memory_embedding_execution_timeout_seconds"`
 	MemoryBGEEnabled                 *bool    `json:"memory_bge_enabled"`
 	MemoryBGEModelDir                *string  `json:"memory_bge_model_dir"`
+	MemoryBGEProvider                *string  `json:"memory_bge_provider"`
+	MemoryBGEAPIKey                  *string  `json:"memory_bge_api_key"`
+	MemoryBGEBaseURL                 *string  `json:"memory_bge_base_url"`
+	MemoryBGEModel                   *string  `json:"memory_bge_model"`
+	MemoryRerankerEnabled            *bool    `json:"memory_reranker_enabled"`
+	MemoryRerankerProvider           *string  `json:"memory_reranker_provider"`
+	MemoryRerankerAPIKey             *string  `json:"memory_reranker_api_key"`
+	MemoryRerankerBaseURL            *string  `json:"memory_reranker_base_url"`
+	MemoryRerankerModel              *string  `json:"memory_reranker_model"`
 	SkillsEnabled                    *bool    `json:"skills_enabled"`
 	SkillsDir                        *string  `json:"skills_dir"`
 	UserSkillsDir                    *string  `json:"user_skills_dir"`
@@ -776,7 +1042,8 @@ func DefaultJSONKeys() []string {
 	return keys
 }
 
-func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir string) {
+func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir string,
+	includeMemoryModelEndpoints bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -914,6 +1181,60 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.SessionArchiveDir != nil {
 		cfg.SessionArchiveDir = resolveProjectPath(cwd, *defaults.SessionArchiveDir)
 	}
+	if includeMemoryModelEndpoints {
+		if defaults.SessionRuntimeBackend != nil {
+			cfg.SessionRuntimeBackend = strings.TrimSpace(*defaults.SessionRuntimeBackend)
+		}
+		if defaults.MemoryFabricStore != nil {
+			cfg.MemoryFabricStore = strings.TrimSpace(*defaults.MemoryFabricStore)
+		}
+		if defaults.ClusterID != nil {
+			cfg.ClusterID = strings.TrimSpace(*defaults.ClusterID)
+		}
+		if defaults.InstanceID != nil {
+			cfg.InstanceID = strings.TrimSpace(*defaults.InstanceID)
+		}
+		if defaults.ClusterListenAddr != nil {
+			cfg.ClusterListenAddr = strings.TrimSpace(*defaults.ClusterListenAddr)
+		}
+		if defaults.ClusterAdvertiseAddr != nil {
+			cfg.ClusterAdvertiseAddr = strings.TrimSpace(*defaults.ClusterAdvertiseAddr)
+		}
+		if defaults.RedisURL != nil {
+			cfg.RedisURL = strings.TrimSpace(*defaults.RedisURL)
+		}
+		if defaults.PostgresURL != nil {
+			cfg.PostgresURL = strings.TrimSpace(*defaults.PostgresURL)
+		}
+		applyPositiveClusterInt(cfg, "cluster_lease_ttl_seconds", defaults.ClusterLeaseTTLSeconds,
+			&cfg.ClusterLeaseTTLSeconds)
+		applyPositiveClusterInt(cfg, "cluster_lease_renew_seconds", defaults.ClusterLeaseRenewSeconds,
+			&cfg.ClusterLeaseRenewSeconds)
+		applyPositiveClusterInt(cfg, "cluster_rpc_timeout_seconds", defaults.ClusterRPCTimeoutSeconds,
+			&cfg.ClusterRPCTimeoutSeconds)
+		applyPositiveClusterInt(cfg, "cluster_shutdown_grace_seconds", defaults.ClusterShutdownGraceSeconds,
+			&cfg.ClusterShutdownGraceSeconds)
+		if defaults.JWTIssuer != nil {
+			cfg.JWTIssuer = strings.TrimSpace(*defaults.JWTIssuer)
+		}
+		if defaults.JWTAudience != nil {
+			cfg.JWTAudience = strings.TrimSpace(*defaults.JWTAudience)
+		}
+		if defaults.JWTJWKSURL != nil {
+			cfg.JWTJWKSURL = strings.TrimSpace(*defaults.JWTJWKSURL)
+		}
+		if defaults.JWTPublicKeyFile != nil {
+			cfg.JWTPublicKeyFile = expandHome(strings.TrimSpace(*defaults.JWTPublicKeyFile))
+		}
+		if defaults.JWTTenantClaim != nil {
+			cfg.JWTTenantClaim = strings.TrimSpace(*defaults.JWTTenantClaim)
+		}
+		if defaults.JWTScopeClaim != nil {
+			cfg.JWTScopeClaim = strings.TrimSpace(*defaults.JWTScopeClaim)
+		}
+		applyPositiveClusterInt(cfg, "jwt_clock_leeway_seconds", defaults.JWTClockLeewaySeconds,
+			&cfg.JWTClockLeewaySeconds)
+	}
 	if defaults.SessionMemoryEnabled != nil {
 		cfg.SessionMemoryEnabled = *defaults.SessionMemoryEnabled
 	}
@@ -1038,6 +1359,35 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	if defaults.MemoryBGEModelDir != nil && strings.TrimSpace(*defaults.MemoryBGEModelDir) != "" {
 		cfg.MemoryBGEModelDir = expandHome(*defaults.MemoryBGEModelDir)
 	}
+	if includeMemoryModelEndpoints {
+		if defaults.MemoryBGEProvider != nil {
+			cfg.MemoryBGEProvider = strings.TrimSpace(*defaults.MemoryBGEProvider)
+		}
+		if defaults.MemoryBGEAPIKey != nil {
+			cfg.MemoryBGEAPIKey = *defaults.MemoryBGEAPIKey
+		}
+		if defaults.MemoryBGEBaseURL != nil {
+			cfg.MemoryBGEBaseURL = strings.TrimSpace(*defaults.MemoryBGEBaseURL)
+		}
+		if defaults.MemoryBGEModel != nil {
+			cfg.MemoryBGEModel = strings.TrimSpace(*defaults.MemoryBGEModel)
+		}
+		if defaults.MemoryRerankerEnabled != nil {
+			cfg.MemoryRerankerEnabled = *defaults.MemoryRerankerEnabled
+		}
+		if defaults.MemoryRerankerProvider != nil {
+			cfg.MemoryRerankerProvider = strings.TrimSpace(*defaults.MemoryRerankerProvider)
+		}
+		if defaults.MemoryRerankerAPIKey != nil {
+			cfg.MemoryRerankerAPIKey = *defaults.MemoryRerankerAPIKey
+		}
+		if defaults.MemoryRerankerBaseURL != nil {
+			cfg.MemoryRerankerBaseURL = strings.TrimSpace(*defaults.MemoryRerankerBaseURL)
+		}
+		if defaults.MemoryRerankerModel != nil {
+			cfg.MemoryRerankerModel = strings.TrimSpace(*defaults.MemoryRerankerModel)
+		}
+	}
 	if cfg.MemoryContextTargetTokens > cfg.MemoryContextMaxTokens {
 		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors,
 			"memory_context_target_tokens must not exceed memory_context_max_tokens")
@@ -1093,6 +1443,17 @@ func applyPositiveMemoryInt(cfg *Config, name string, value *int, target *int) {
 	}
 	if *value <= 0 {
 		cfg.MemoryConfigErrors = append(cfg.MemoryConfigErrors, name+" must be positive")
+		return
+	}
+	*target = *value
+}
+
+func applyPositiveClusterInt(cfg *Config, name string, value *int, target *int) {
+	if value == nil {
+		return
+	}
+	if *value <= 0 {
+		cfg.ClusterConfigErrors = append(cfg.ClusterConfigErrors, name+" must be positive")
 		return
 	}
 	*target = *value
@@ -1325,6 +1686,25 @@ func applyEnvOverrides(cfg *Config) {
 				"LUMINA_MEMORY_REMOTE_PROCESSING must be off, redacted, or allow")
 		}
 	}
+	cfg.SessionRuntimeBackend = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_SESSION_RUNTIME_BACKEND")), cfg.SessionRuntimeBackend)
+	cfg.MemoryFabricStore = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_MEMORY_FABRIC_STORE")), cfg.MemoryFabricStore)
+	cfg.ClusterID = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_CLUSTER_ID")), cfg.ClusterID)
+	cfg.InstanceID = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_INSTANCE_ID")), cfg.InstanceID)
+	cfg.ClusterListenAddr = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_CLUSTER_LISTEN_ADDR")), cfg.ClusterListenAddr)
+	cfg.ClusterAdvertiseAddr = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_CLUSTER_ADVERTISE_ADDR")), cfg.ClusterAdvertiseAddr)
+	cfg.RedisURL = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_REDIS_URL")), cfg.RedisURL)
+	cfg.PostgresURL = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_POSTGRES_URL")), cfg.PostgresURL)
+	cfg.ClusterLeaseTTLSeconds = positiveIntOrDefault(envInt("LUMINA_CLUSTER_LEASE_TTL_SECONDS", cfg.ClusterLeaseTTLSeconds), cfg.ClusterLeaseTTLSeconds)
+	cfg.ClusterLeaseRenewSeconds = positiveIntOrDefault(envInt("LUMINA_CLUSTER_LEASE_RENEW_SECONDS", cfg.ClusterLeaseRenewSeconds), cfg.ClusterLeaseRenewSeconds)
+	cfg.ClusterRPCTimeoutSeconds = positiveIntOrDefault(envInt("LUMINA_CLUSTER_RPC_TIMEOUT_SECONDS", cfg.ClusterRPCTimeoutSeconds), cfg.ClusterRPCTimeoutSeconds)
+	cfg.ClusterShutdownGraceSeconds = positiveIntOrDefault(envInt("LUMINA_CLUSTER_SHUTDOWN_GRACE_SECONDS", cfg.ClusterShutdownGraceSeconds), cfg.ClusterShutdownGraceSeconds)
+	cfg.JWTIssuer = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_ISSUER")), cfg.JWTIssuer)
+	cfg.JWTAudience = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_AUDIENCE")), cfg.JWTAudience)
+	cfg.JWTJWKSURL = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_JWKS_URL")), cfg.JWTJWKSURL)
+	cfg.JWTPublicKeyFile = expandHome(firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_PUBLIC_KEY_FILE")), cfg.JWTPublicKeyFile))
+	cfg.JWTTenantClaim = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_TENANT_CLAIM")), cfg.JWTTenantClaim)
+	cfg.JWTScopeClaim = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_JWT_SCOPE_CLAIM")), cfg.JWTScopeClaim)
+	cfg.JWTClockLeewaySeconds = positiveIntOrDefault(envInt("LUMINA_JWT_CLOCK_LEEWAY_SECONDS", cfg.JWTClockLeewaySeconds), cfg.JWTClockLeewaySeconds)
 	cfg.MaxParentTurns = envInt("LUMINA_MAX_PARENT_TURNS", cfg.MaxParentTurns)
 	cfg.WebSearchEnabled = envBool("LUMINA_WEB_SEARCH_ENABLED", cfg.WebSearchEnabled)
 	cfg.WebSearchProvider = firstNonEmpty(strings.TrimSpace(os.Getenv("LUMINA_WEB_SEARCH_PROVIDER")), cfg.WebSearchProvider)

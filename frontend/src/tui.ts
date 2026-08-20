@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { escInterruptWindowMs, spinnerFrames } from "./constants";
 import { escapeBlessedTags, formatPermissionPrompt, normalizeMenuItems } from "./formatters";
 import { isPrintableInput, setBracketedPaste } from "./input";
@@ -6,7 +8,7 @@ import { RpcClient } from "./rpc";
 import { buildHeaderContent, buildStatusContent, buildTasksContent, buildTranscriptContent, formatGateSummary } from "./rendering";
 import { getPaneScroll, isPaneAtBottom } from "./scroll";
 import { createTheme } from "./theme";
-import type { LaunchOptions, PushEvent, TranscriptEntry } from "./types";
+import type { LaunchOptions, PushEvent, RuntimeEvent, TranscriptEntry } from "./types";
 import { setBox } from "./utils";
 import { createTuiWidgets } from "./widgets";
 import type { TuiWidgets } from "./widgets";
@@ -26,6 +28,8 @@ export class LuminaTui {
   private modal: TuiWidgets["modal"];
 
   private sessionID = "";
+  private lastDurableSeq = 0;
+  private runtimeCatchup: Promise<void> = Promise.resolve();
   private transcriptEntries: TranscriptEntry[] = [];
   private taskLines: string[] = [];
   private slashItems: Array<{ name: string; description: string }> = [];
@@ -107,6 +111,7 @@ export class LuminaTui {
     this.bindKeys();
     this.prepareTerminalInput();
     this.rpc.onEvent((event) => this.handlePush(event));
+	this.rpc.onRecovery((snapshot) => this.applySnapshot(snapshot));
     this.rpc.onDisconnect((reason) => this.handleBackendDisconnect(reason));
     const snapshot = this.options.resumeSessionID
       ? await this.rpc.call("session.resume", { session_id: this.options.resumeSessionID, cwd: this.options.cwd })
@@ -607,7 +612,7 @@ export class LuminaTui {
       if (this.teamMode) {
         await this.rpc.call("team.submit", { team_session_id: this.teamSessionID, input: text });
       } else {
-        await this.rpc.call("session.submit", { session_id: this.sessionID, input: text });
+        await this.rpc.call("session.submit", { session_id: this.sessionID, command_id: randomUUID(), input: text });
       }
     } catch (err) {
       this.taskLines.push(String(err));
@@ -1023,7 +1028,15 @@ export class LuminaTui {
 
   private handlePush(push: PushEvent): void {
     if (push.session_id && push.session_id !== this.sessionID) return;
+    if (push.protocol_version === 2 && push.durable && Number(push.seq || 0) > 0) {
+      this.runtimeCatchup = this.runtimeCatchup.then(() => this.consumeRuntimePush(push)).catch((err) => {
+        this.taskLines.push(`runtime event sync failed: ${String(err)}`);
+        this.renderTasks();
+      });
+      return;
+    }
     const event = push.event;
+    if (!event) return;
     switch (event.type) {
       case "frame.snapshot":
       case "frame.shutdown":
@@ -1075,6 +1088,118 @@ export class LuminaTui {
     this.requestRender();
   }
 
+  private async consumeRuntimePush(push: PushEvent): Promise<void> {
+    const seq = Number(push.seq || 0);
+    if (seq <= this.lastDurableSeq) return;
+    if (seq > this.lastDurableSeq + 1) {
+      let hasMore = true;
+      while (hasMore && this.lastDurableSeq < seq - 1) {
+        const page = await this.rpc.call("session.events", {
+          session_id: this.sessionID,
+          after_seq: this.lastDurableSeq,
+          limit: 500,
+        });
+        for (const event of (page.events || []) as RuntimeEvent[]) {
+          this.applyRuntimeEvent(event);
+        }
+        hasMore = Boolean(page.has_more);
+        if (!Array.isArray(page.events) || page.events.length === 0) break;
+      }
+    }
+    if (seq > this.lastDurableSeq) {
+      this.applyRuntimeEvent({
+        seq,
+        stream_id: push.stream_id,
+        event_id: push.event_id,
+        type: push.event_type || "runtime.unknown",
+        schema_version: push.schema_version,
+        occurred_at: push.timestamp,
+        payload: push.payload,
+      });
+    }
+    this.renderTranscript();
+    this.renderTasks();
+    this.renderStatus();
+    this.renderInput();
+    this.requestRender();
+  }
+
+  private applyRuntimeEvent(event: RuntimeEvent): void {
+    const seq = Number(event?.seq || 0);
+    if (seq <= this.lastDurableSeq) return;
+    const payload = event.payload || {};
+    switch (event.type) {
+      case "message.user.appended":
+        this.appendRuntimeMessage("user", payload.message);
+        break;
+      case "message.assistant.appended":
+        this.appendRuntimeMessage("assistant", payload.message);
+        break;
+      case "run.started":
+        this.running = true;
+        this.inputEnabled = false;
+        this.inputPlaceholder = "Agent is responding...";
+        break;
+      case "run.completed":
+      case "run.failed":
+      case "run.interrupted":
+        this.running = false;
+        this.localSubmitPending = false;
+        this.inputEnabled = true;
+        this.inputPlaceholder = this.teamMode ? "请输入 Team 消息并回车。" : "请输入消息并回车。";
+        this.resetEscapeInterrupt();
+        if (event.type !== "run.completed" && payload.reason) {
+          this.taskLines.push(`${event.type}: ${String(payload.reason)}`);
+        }
+        break;
+      case "tool.execution.failed":
+      case "tool.execution.denied":
+      case "tool.execution.cancelled":
+      case "tool.execution.interrupted":
+        this.taskLines.push(`${event.type}: ${String(payload.name || payload.tool_call_id || "tool")}${payload.error ? ` - ${String(payload.error)}` : ""}`);
+        break;
+      case "task.created":
+      case "task.status.changed":
+      case "task.notification.appended": {
+        const record = payload.record || {};
+        const taskID = String(payload.task_id || record.task_id || "task");
+        const status = String(record.status || event.type.replace("task.", ""));
+        const summary = String(payload.summary || "");
+        this.taskLines.push(`${taskID}: ${status}${summary ? ` - ${summary}` : ""}`);
+        break;
+      }
+      case "team.created":
+      case "team.status.changed":
+      case "team.snapshot.updated":
+      case "team.loop.iteration":
+      case "team.loop.recovery":
+      case "team.agent.status.changed":
+      case "team.artifact.registered":
+        this.applyTeamSnapshot(payload);
+        break;
+      case "team.dialogue.appended":
+        this.appendTeamDialogueEntry(payload);
+        break;
+      case "team.agent.message":
+        this.appendTeamAgentDelta(payload);
+        break;
+      case "runtime.warning":
+      case "runtime.invariant.failed":
+        this.taskLines.push(`${event.type}: ${String(payload.message || payload.error || "runtime warning")}`);
+        break;
+    }
+    this.lastDurableSeq = seq;
+  }
+
+  private appendRuntimeMessage(kind: "user" | "assistant", rawMessage: any): void {
+    if (!rawMessage || typeof rawMessage !== "object") return;
+    const text = runtimeMessageText(rawMessage.content);
+    if (!text) return;
+    const previous = this.transcriptEntries[this.transcriptEntries.length - 1];
+    if (previous?.kind === kind && previous.text === text) return;
+    this.transcriptEntries.push({ kind, text });
+  }
+
   private handleBackendDisconnect(reason: string): void {
     this.localSubmitPending = false;
     this.running = false;
@@ -1088,7 +1213,10 @@ export class LuminaTui {
   }
 
   private applySnapshot(snapshot: any): void {
-    this.sessionID = snapshot.session_id || this.sessionID;
+    const nextSessionID = snapshot.session_id || this.sessionID;
+    if (nextSessionID !== this.sessionID) this.lastDurableSeq = 0;
+    this.sessionID = nextSessionID;
+    this.lastDurableSeq = Math.max(this.lastDurableSeq, Number(snapshot.last_seq || 0));
     this.applyFrame(snapshot.frame);
     if (Array.isArray(snapshot.teams) && snapshot.teams.length > 0) {
       this.applyTeamSnapshot(snapshot.teams[snapshot.teams.length - 1]);
@@ -1535,6 +1663,18 @@ export class LuminaTui {
       this.historyDraft = "";
     }
   }
+}
+
+function runtimeMessageText(content: any): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block: any) => {
+    if (typeof block === "string") return [block];
+    if (!block || typeof block !== "object") return [];
+    if (typeof block.text === "string") return [block.text];
+    if (block.type === "tool_result" && typeof block.content === "string") return [block.content];
+    return [];
+  }).join("\n");
 }
 
 function formatBytes(bytes: number): string {

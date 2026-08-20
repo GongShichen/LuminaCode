@@ -33,6 +33,7 @@ type FabricOptions struct {
 	Adjudicator          ConflictAdjudicator
 	Vectorizer           Vectorizer
 	RetrievalEncoder     RetrievalEncoder
+	Reranker             RetrievalReranker
 	RetrievalSidecarPath string
 	RemoteProcessing     RemoteProcessingPolicy
 	// CompileBatchTokens is the hard estimated token budget for the complete
@@ -58,6 +59,8 @@ type FabricOptions struct {
 	StartWorkers             bool
 	Clock                    func() time.Time
 	UsageObserver            APIUsageObserver
+	WriteGuard               func(context.Context) error
+	Cleanup                  func() error
 }
 
 func (f *Fabric) observeAPIUsage(ctx context.Context, event APIUsageEvent) error {
@@ -342,6 +345,9 @@ func (f *Fabric) Close() error {
 			errs = append(errs, f.sidecar.Close())
 			f.sidecar = nil
 			f.sidecarMu.Unlock()
+		}
+		if f.options.Cleanup != nil {
+			errs = append(errs, f.options.Cleanup())
 		}
 		closeErr = errors.Join(errs...)
 	})

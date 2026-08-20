@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
 	luminacli "LuminaCode/cli"
+	"LuminaCode/harness"
 	luminaui "LuminaCode/ui"
 
 	"github.com/google/uuid"
@@ -16,8 +18,9 @@ type permissionWaiter struct {
 }
 
 type WSRendererBridge struct {
+	tenantID  string
 	sessionID string
-	emit      func(PushEvent)
+	emit      EventEmitter
 	nextSeq   func() int64
 
 	mu          sync.Mutex
@@ -25,8 +28,9 @@ type WSRendererBridge struct {
 	selections  map[string]chan *string
 }
 
-func NewWSRendererBridge(sessionID string, emit func(PushEvent), nextSeq func() int64) *WSRendererBridge {
+func NewWSRendererBridge(tenantID, sessionID string, emit EventEmitter, nextSeq func() int64) *WSRendererBridge {
 	return &WSRendererBridge{
+		tenantID:    tenantID,
 		sessionID:   sessionID,
 		emit:        emit,
 		nextSeq:     nextSeq,
@@ -141,6 +145,7 @@ func (b *WSRendererBridge) emitEvent(eventType string, payload any) {
 		return
 	}
 	b.emit(PushEvent{
+		TenantID:  b.tenantID,
 		Type:      "event",
 		SessionID: b.sessionID,
 		Seq:       b.nextSeq(),
@@ -149,4 +154,18 @@ func (b *WSRendererBridge) emitEvent(eventType string, payload any) {
 			"payload": payload,
 		},
 	})
+}
+
+func (b *WSRendererBridge) emitRuntimeEvents(events []harness.Event) {
+	if b == nil || b.emit == nil {
+		return
+	}
+	for _, event := range events {
+		b.emit(PushEvent{
+			TenantID: b.tenantID, Type: "event", ProtocolVersion: 3, SessionID: b.sessionID, StreamID: event.StreamID,
+			Seq: event.Seq, EventID: event.ID, EventType: event.Type, SchemaVersion: event.SchemaVersion,
+			Durable: true, Timestamp: event.OccurredAt.UTC().Format(time.RFC3339Nano), Payload: json.RawMessage(event.Payload),
+			Event: map[string]any{"type": "runtime.event", "payload": event},
+		})
+	}
 }

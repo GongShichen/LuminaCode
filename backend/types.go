@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"LuminaCode/harness"
 	luminateam "LuminaCode/team"
 	luminaui "LuminaCode/ui"
 )
@@ -36,19 +37,39 @@ type RPCError struct {
 }
 
 type PushEvent struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id,omitempty"`
-	Seq       int64  `json:"seq,omitempty"`
-	Event     any    `json:"event"`
+	TenantID        string `json:"-"`
+	Type            string `json:"type"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	StreamID        string `json:"stream_id,omitempty"`
+	Seq             int64  `json:"seq,omitempty"`
+	AfterSeq        int64  `json:"after_seq,omitempty"`
+	EventID         string `json:"event_id,omitempty"`
+	EventType       string `json:"event_type,omitempty"`
+	SchemaVersion   int    `json:"schema_version,omitempty"`
+	Durable         bool   `json:"durable,omitempty"`
+	Timestamp       string `json:"timestamp,omitempty"`
+	Payload         any    `json:"payload,omitempty"`
+	Event           any    `json:"event,omitempty"`
 }
 
+type EventEmitter func(PushEvent)
+
 type SessionSnapshot struct {
-	SessionID string                `json:"session_id"`
-	Frame     luminaui.RenderFrame  `json:"frame"`
-	Busy      bool                  `json:"busy"`
-	Model     string                `json:"model"`
-	CWD       string                `json:"cwd"`
-	Teams     []luminateam.Snapshot `json:"teams,omitempty"`
+	SessionID         string                `json:"session_id"`
+	Frame             luminaui.RenderFrame  `json:"frame"`
+	Busy              bool                  `json:"busy"`
+	Model             string                `json:"model"`
+	CWD               string                `json:"cwd"`
+	Teams             []luminateam.Snapshot `json:"teams,omitempty"`
+	LastSeq           int64                 `json:"last_seq"`
+	ProjectionVersion int                   `json:"projection_version"`
+}
+
+type EventPage struct {
+	Events       []harness.Event `json:"events"`
+	NextAfterSeq int64           `json:"next_after_seq"`
+	HasMore      bool            `json:"has_more"`
 }
 
 func nowRFC3339() string {

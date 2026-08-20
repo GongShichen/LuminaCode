@@ -87,8 +87,8 @@ func TestLinuxSandboxCommandUsesWorkspaceAndNetworkPolicy(t *testing.T) {
 }
 
 func TestLinuxSandboxSkipsMissingOptionalSystemPaths(t *testing.T) {
-	cwd := "/mnt/d/File/work_space/go/LuminaCode"
-	missingRuntime := "/mnt/c/Users/zhouning/.lumina/project/luminacode"
+	cwd := "/mnt/d/workspace/project"
+	missingRuntime := "/mnt/c/Users/tester/.lumina/project/example"
 	argv := linuxSandboxArgs("echo ok", SandboxConfig{
 		Enabled: true, AllowRead: []string{cwd, missingRuntime}, AllowWrite: []string{cwd, missingRuntime}, AllowNetwork: false,
 	}, cwd, func(path string) bool {
