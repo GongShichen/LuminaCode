@@ -794,3 +794,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `tools/`: built-in tools
 - `ui/`: shared runtime frame model and legacy renderer tests
 - `test/`: parity and regression tests
+
+## License
+
+Copyright 2026 GongShichen.
+
+LuminaCode is licensed under the [Apache License, Version 2.0](LICENSE).
+See [NOTICE](NOTICE) for the project attribution. Third-party dependencies
+retain their respective licenses.

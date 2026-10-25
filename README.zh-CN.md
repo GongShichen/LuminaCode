@@ -723,3 +723,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - `tools/`：内置工具。
 - `ui/`：共享 runtime frame model 和旧 renderer 回归测试。
 - `test/`：回归测试和 parity 测试。
+
+## 许可证
+
+Copyright 2026 GongShichen.
+
+LuminaCode 采用 [Apache License 2.0](LICENSE) 开源许可证。
+项目版权声明见 [NOTICE](NOTICE)，第三方依赖保留各自的许可证。
