@@ -347,6 +347,10 @@ func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cf
 		_ = engine.CoreEngine.SessionRuntime.RestoreChildren(context.Background(), journal, cfg, sessionID)
 		engine.CoreEngine.RuntimeEvents.SetPublisher(controller.bridge.emitRuntimeEvents)
 		engine.CoreEngine.TaskRuntime.SetTaskEventObserver(engine.CoreEngine.RuntimeEvents)
+		engine.CoreEngine.SessionRuntime.SetPermissionHandler(func(ctx context.Context, event agent.StreamEvent) {
+			answer := luminaui.AskPermissionEvent(ctx, controller.bridge, controller.ui.ToUIEvent(event))
+			engine.ResolvePermissionRequest(agent.PermissionRequestID(event), answer, "")
+		})
 	}
 	return controller
 }

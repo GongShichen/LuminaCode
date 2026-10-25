@@ -140,7 +140,7 @@ func TestCoordinatorRecoversFromUnauthorizedToolAndKeepsNotificationsScopedLikeP
 	}
 }
 
-func TestSubagentStubbornUnauthorizedToolExitsAtLowMaxTurnsLikePython(t *testing.T) {
+func TestSubagentStubbornUnauthorizedToolReportsMaxTurnsFailure(t *testing.T) {
 	var messageCounter atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -163,8 +163,8 @@ func TestSubagentStubbornUnauthorizedToolExitsAtLowMaxTurnsLikePython(t *testing
 	def.MaxTurns = 3
 	sub := agent.NewSubAgent(cfg, coretools.NewToolRegistry(agent.NewAgentTool()), def, nil, "", "Coordinator", coretools.ExecutionContext{})
 	result, err := sub.Run(context.Background(), "Keep coordinating.")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || sub.Runtime.RunSnapshot().Phase != agent.AgentPhaseFailed {
+		t.Fatalf("max-turns exhaustion must report failure, got %v", err)
 	}
 	if !strings.Contains(result, "Sub-agent reached maximum turns (3).") {
 		t.Fatalf("expected max-turns termination, got %q", result)

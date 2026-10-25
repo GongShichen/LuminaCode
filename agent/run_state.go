@@ -70,6 +70,8 @@ func CanTransitionAgentPhase(from, to AgentPhase) bool {
 var ErrInvalidAgentPhase = errors.New("invalid agent phase transition")
 var ErrPermissionPending = errors.New("permission request is no longer pending")
 
+const cancelReasonUser = "aborted by user"
+
 type RunToken struct {
 	Generation uint64 `json:"generation"`
 	ID         string `json:"run_id"`
@@ -96,6 +98,7 @@ type PermissionAnswer struct {
 }
 type permissionWaiter struct {
 	PermissionWait
+	ctx    context.Context
 	answer chan PermissionAnswer
 }
 type PermissionTicket struct {
@@ -217,18 +220,24 @@ func (r *AgentRuntime) cancelWaitersLocked() {
 }
 func (r *AgentRuntime) cancelRun(token RunToken, reason string) {
 	r.mu.Lock()
-	if !r.runActiveLocked(token) || r.run.Phase == AgentPhaseCancelling {
-		r.mu.Unlock()
-		return
-	}
-	r.run.Phase = AgentPhaseCancelling
-	r.run.CancelReason = reason
-	r.cancelWaitersLocked()
-	cancel := r.run.Cancel
+	cancel := r.cancelRunLocked(token, reason)
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (r *AgentRuntime) cancelRunLocked(token RunToken, reason string) context.CancelFunc {
+	if r.runMatchesLocked(token) && (r.run.Phase == AgentPhaseCancelled || r.run.Phase == AgentPhaseCancelling) && reason == cancelReasonUser {
+		r.run.CancelReason = reason
+	}
+	if !r.runActiveLocked(token) || r.run.Phase == AgentPhaseCancelling {
+		return nil
+	}
+	r.run.Phase = AgentPhaseCancelling
+	r.run.CancelReason = reason
+	r.cancelWaitersLocked()
+	return r.run.Cancel
 }
 func (r *AgentRuntime) ObserveRunEvent(token RunToken, event StreamEvent) {
 	if event.Type != "error" || event.Metadata["recovered"] == true {
@@ -293,7 +302,7 @@ func (r *AgentRuntime) BeginPermission(ctx context.Context, token RunToken, kind
 		return PermissionTicket{}, event, ErrPermissionPending
 	}
 	request := PermissionWait{ID: uuid.NewString(), Kind: kind, ToolName: tool}
-	waiter := &permissionWaiter{PermissionWait: request, answer: make(chan PermissionAnswer, 1)}
+	waiter := &permissionWaiter{PermissionWait: request, ctx: ctx, answer: make(chan PermissionAnswer, 1)}
 	r.run.Pending[request.ID] = waiter
 	r.refreshRunPhaseLocked()
 	metadata := map[string]any{}

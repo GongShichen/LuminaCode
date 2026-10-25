@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -23,19 +24,21 @@ type WSRendererBridge struct {
 	emit      EventEmitter
 	nextSeq   func() int64
 
-	mu          sync.Mutex
-	permissions map[string]permissionWaiter
-	selections  map[string]chan *string
+	mu             sync.Mutex
+	permissions    map[string]permissionWaiter
+	selections     map[string]chan *string
+	permissionGate chan struct{}
 }
 
 func NewWSRendererBridge(tenantID, sessionID string, emit EventEmitter, nextSeq func() int64) *WSRendererBridge {
 	return &WSRendererBridge{
-		tenantID:    tenantID,
-		sessionID:   sessionID,
-		emit:        emit,
-		nextSeq:     nextSeq,
-		permissions: map[string]permissionWaiter{},
-		selections:  map[string]chan *string{},
+		tenantID:       tenantID,
+		sessionID:      sessionID,
+		emit:           emit,
+		nextSeq:        nextSeq,
+		permissions:    map[string]permissionWaiter{},
+		selections:     map[string]chan *string{},
+		permissionGate: make(chan struct{}, 1),
 	}
 }
 
@@ -52,11 +55,29 @@ func (b *WSRendererBridge) ClearModal() {
 }
 
 func (b *WSRendererBridge) AskPermission(prompt any, dangerous bool) string {
+	return b.AskPermissionContext(context.Background(), prompt, dangerous)
+}
+
+func (b *WSRendererBridge) AskPermissionContext(ctx context.Context, prompt any, dangerous bool) string {
+	select {
+	case <-ctx.Done():
+		return "deny"
+	case b.permissionGate <- struct{}{}:
+	}
+	defer func() { <-b.permissionGate }()
+	if ctx.Err() != nil {
+		return "deny"
+	}
 	requestID := uuid.NewString()
 	ch := make(chan string, 1)
 	b.mu.Lock()
 	b.permissions[requestID] = permissionWaiter{sessionID: b.sessionID, ch: ch}
 	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.permissions, requestID)
+		b.mu.Unlock()
+	}()
 	actions := luminacli.Phase1PermissionActionLabels
 	if name, _ := permissionPromptNameAndInput(prompt); name == "wsl-sandbox-setup" {
 		actions = []string{"Install sandbox", "Run locally"}
@@ -67,10 +88,19 @@ func (b *WSRendererBridge) AskPermission(prompt any, dangerous bool) string {
 		"dangerous":  dangerous,
 		"actions":    actions,
 	})
+	timer := time.NewTimer(24 * time.Hour)
+	defer timer.Stop()
 	select {
 	case decision := <-ch:
+		if ctx.Err() != nil {
+			return "deny"
+		}
 		return luminacli.NormalizePermissionAnswer(decision)
-	case <-time.After(24 * time.Hour):
+	case <-ctx.Done():
+		b.emitEvent("permission_cancelled", map[string]any{"request_id": requestID})
+		return "deny"
+	case <-timer.C:
+		b.emitEvent("permission_cancelled", map[string]any{"request_id": requestID})
 		return "deny"
 	}
 }

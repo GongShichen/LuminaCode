@@ -68,6 +68,7 @@ export class LuminaTui {
   private lastEscapeAt = 0;
   private escapeResetTimer?: NodeJS.Timeout;
   private modalKeyHandlers = new Map<string, () => void>();
+  private permissionRequestID = "";
   private teamMode = false;
   private teamSessionID = "";
   private activeTeamName = "";
@@ -1084,6 +1085,9 @@ export class LuminaTui {
       case "permission_requested":
         void this.showPermission(event.payload);
         break;
+      case "permission_cancelled":
+        if (this.permissionRequestID === (event.payload as { request_id?: string })?.request_id) this.closeModal();
+        break;
     }
     this.requestRender();
   }
@@ -1527,6 +1531,7 @@ export class LuminaTui {
   }
 
   private async showPermission(payload: any): Promise<void> {
+    this.permissionRequestID = payload.request_id;
     const source = payload?.agent_display ? `${payload.agent_display} 请求执行` : "需要权限确认";
     const details = formatPermissionPrompt(payload);
     let choices = [
@@ -1616,6 +1621,7 @@ export class LuminaTui {
   }
 
   private closeModal(): void {
+    this.permissionRequestID = "";
     this.modalKeyHandlers.clear();
     this.modal.hide();
     this.input.focus();

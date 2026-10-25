@@ -41,6 +41,7 @@ func TestUISharedHelpersMatchPython(t *testing.T) {
 	cases := map[string]string{
 		"":       "deny",
 		"yes":    "once",
+		"once":   "once",
 		"always": "always",
 		"never":  "deny",
 		"yep":    "once",
@@ -50,6 +51,9 @@ func TestUISharedHelpersMatchPython(t *testing.T) {
 	for input, want := range cases {
 		if got := luminacli.NormalizePermissionAnswer(input); got != want {
 			t.Fatalf("NormalizePermissionAnswer(%q)=%q want %q", input, got, want)
+		}
+		if luminacli.NormalizePermissionAnswer(want) != want {
+			t.Fatalf("permission answer %q is not idempotent", want)
 		}
 	}
 	if luminacli.TranslateBackendRiskLevel("normal") != "medium" || luminacli.TranslateBackendRiskLevel("weird") != "medium" {

@@ -424,6 +424,10 @@ func (e *CoreExecutionEngine) ResolvePermissionRequest(id, decision, toolName st
 	return e.SessionRuntime.ResolvePermissionRequest(id, PermissionAnswer{Decision: decision, ToolName: toolName})
 }
 
+func (e *CoreExecutionEngine) PermissionContext(id string) (context.Context, bool) {
+	return e.SessionRuntime.PermissionContext(id)
+}
+
 func (e *CoreExecutionEngine) SkillNames(cwd string) []string {
 	if e == nil || e.skillRegistry == nil {
 		return nil
@@ -616,8 +620,6 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"_skill_persistence":      e.skillPersistence,
 			"_skill_agent_scope":      "main",
 			"_turn_count":             state.TurnCount,
-			"_permission_runtime":     e,
-			"_run_permission_emitter": func(event StreamEvent) bool { return sendStream(ctx, out, event) },
 			"_memory_engine":          e.memoryEngineSnapshot(),
 		}
 		if e.Config.MCPEnabled {

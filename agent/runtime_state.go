@@ -265,6 +265,24 @@ func (r *AgentRuntime) BeginWithRunID(ctx context.Context, id string, outputLimi
 func (r *AgentRuntime) beginRun(ctx context.Context, id string, outputLimits ...int) (context.Context, *AgentState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.beginRunLocked(ctx, id, outputLimits...)
+}
+
+// A timeout finalizer continues an accepted request. An Abort in the gap after
+// its timed-out run ended must still prevent that request from starting again.
+func (r *AgentRuntime) beginRecoveryRun(ctx context.Context, previous RunToken, outputLimit int) (context.Context, *AgentState, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.runMatchesLocked(previous) {
+		return ctx, nil, ErrStaleState
+	}
+	if r.run.CancelReason == cancelReasonUser {
+		return ctx, nil, context.Canceled
+	}
+	return r.beginRunLocked(ctx, "", outputLimit)
+}
+
+func (r *AgentRuntime) beginRunLocked(ctx context.Context, id string, outputLimits ...int) (context.Context, *AgentState, error) {
 	if r.run.Phase.Active() {
 		return ctx, nil, ErrAgentBusy
 	}
@@ -293,10 +311,13 @@ func (r *AgentRuntime) beginRun(ctx context.Context, id string, outputLimits ...
 }
 
 func (r *AgentRuntime) Abort() {
-	r.mu.RLock()
+	r.mu.Lock()
 	token := RunToken{r.run.Generation, r.run.ID}
-	r.mu.RUnlock()
-	r.cancelRun(token, "aborted by user")
+	cancel := r.cancelRunLocked(token, cancelReasonUser)
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (r *AgentRuntime) persistLocked(ctx context.Context, s AgentSnapshot, extra ...harness.PendingEvent) error {
@@ -492,11 +513,17 @@ func (r *AgentRuntime) YoloEnabled() bool { return r.Snapshot().Permissions.Poli
 
 // SessionRuntime is a registry, not a second mutable copy of agent state.
 type SessionRuntime struct {
-	mu     sync.RWMutex
-	agents map[string]*AgentRuntime
+	mu                sync.RWMutex
+	agents            map[string]*AgentRuntime
+	permissionMu      sync.Mutex
+	permissions       []sessionPermission
+	permissionReady   chan struct{}
+	permissionHandler func(context.Context, StreamEvent)
 }
 
-func NewSessionRuntime() *SessionRuntime { return &SessionRuntime{agents: map[string]*AgentRuntime{}} }
+func NewSessionRuntime() *SessionRuntime {
+	return &SessionRuntime{agents: map[string]*AgentRuntime{}, permissionReady: make(chan struct{}, 1)}
+}
 func (s *SessionRuntime) Register(id string, r *AgentRuntime) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -750,8 +777,16 @@ func (r *AgentRuntime) RecordCompiled(ctx context.Context, compiled agentContext
 
 func (s *SessionRuntime) Reset(main *AgentRuntime) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	for _, runtime := range s.agents {
+		if runtime != main {
+			runtime.Abort()
+		}
+	}
 	s.agents = map[string]*AgentRuntime{"main": main}
+	s.mu.Unlock()
+	s.permissionMu.Lock()
+	s.permissions = nil
+	s.permissionMu.Unlock()
 }
 
 // Checkpoint snapshots current state under the same lock as commits and resets.

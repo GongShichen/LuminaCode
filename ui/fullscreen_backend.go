@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -232,6 +233,15 @@ func (b *FullscreenRendererBackend) Shutdown(finalSnapshot RenderFrame) {
 }
 
 func (b *FullscreenRendererBackend) AskPermission(prompt any, dangerous bool) string {
+	return b.AskPermissionContext(context.Background(), prompt, dangerous)
+}
+
+func (b *FullscreenRendererBackend) AskPermissionContext(ctx context.Context, prompt any, dangerous bool) string {
+	b.terminal.input.ctx = ctx
+	defer func() { b.terminal.input.ctx = context.Background() }()
+	if ctx.Err() != nil {
+		return "deny"
+	}
 	if b.ActiveModalState == nil {
 		b.ShowModal(b.permissionModalState(prompt, dangerous))
 	}
@@ -248,7 +258,7 @@ func (b *FullscreenRendererBackend) AskPermission(prompt any, dangerous bool) st
 		b.ClearModal()
 	}()
 	text, ok := b.readFullscreenText()
-	if !ok {
+	if !ok || ctx.Err() != nil {
 		return "deny"
 	}
 	return luminacli.NormalizePermissionAnswer(text)

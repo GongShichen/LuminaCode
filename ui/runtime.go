@@ -256,7 +256,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 			}
 			uiEvent := r.ToUIEvent(event)
 			if uiEvent.Type == "permission_requested" {
-				r.HandlePermissionEvent(uiEvent)
+				r.HandlePermissionEventContext(ctx, uiEvent)
 			} else {
 				r.ApplyUIEvent(uiEvent)
 				r.MaybeRenderEvent(event)
@@ -405,6 +405,25 @@ func (r *UiRuntime) DrainTaskEvents() {
 }
 
 func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
+	return r.HandlePermissionEventContext(context.Background(), event)
+}
+
+func (r *UiRuntime) HandlePermissionEventContext(ctx context.Context, event UiEvent) string {
+	if id := stringFromAny(event.Metadata["permission_request_id"]); id != "" {
+		if owner, ok := r.Engine.(interface {
+			PermissionContext(string) (context.Context, bool)
+		}); ok {
+			permissionCtx, pending := owner.PermissionContext(id)
+			if !pending {
+				return "deny"
+			}
+			waitCtx, cancel := context.WithCancel(ctx)
+			stop := context.AfterFunc(permissionCtx, cancel)
+			defer stop()
+			defer cancel()
+			ctx = waitCtx
+		}
+	}
 	r.Frame.ActiveModal = "permission_request"
 	r.Frame.InputEnabled = true
 	r.Frame.InputMode = "permission_modal"
@@ -414,22 +433,7 @@ func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
 	if r.UI != nil {
 		r.UI.ShowModal(r.Frame.ModalState)
 	}
-	answer := "deny"
-	if r.UI != nil {
-		if truthy(event.Metadata["sandbox_unavailable"]) {
-			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
-		} else if _, _, ok := skillShellRequestParts(event.Metadata["skill_shell_request"]); ok {
-			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
-		} else if _, ok := normalizeMCPTrustRequest(event.Metadata["mcp_trust_request"]); ok {
-			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
-		} else if _, ok := normalizeSandboxSetupRequest(event.Metadata["sandbox_setup_request"]); ok {
-			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
-		} else if tc := event.Metadata["tool_call"]; tc != nil {
-			answer = r.UI.AskPermission(tc, truthy(event.Metadata["dangerous"]) || stringFromAny(event.Metadata["risk"]) == "high")
-		} else {
-			answer = r.UI.AskPermission(permissionPromptFromEvent(event), true)
-		}
-	}
+	answer := AskPermissionEvent(ctx, r.UI, event)
 	r.resolvePermissionEvent(event, answer)
 	r.RecordPermissionAudit(event, answer)
 	r.Frame.ActiveModal = "none"
@@ -443,6 +447,29 @@ func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
 	}
 	r.Flush(true)
 	return answer
+}
+
+// AskPermissionEvent can also serve session-lived child requests without
+// touching the foreground frame, which is owned by RunSubmitMessage.
+func AskPermissionEvent(ctx context.Context, renderer RendererBackend, event UiEvent) string {
+	if renderer == nil || ctx.Err() != nil {
+		return "deny"
+	}
+	var prompt any = permissionPromptFromEvent(event)
+	dangerous := true
+	_, _, skillShell := skillShellRequestParts(event.Metadata["skill_shell_request"])
+	_, mcpTrust := normalizeMCPTrustRequest(event.Metadata["mcp_trust_request"])
+	_, sandboxSetup := normalizeSandboxSetupRequest(event.Metadata["sandbox_setup_request"])
+	if tc := event.Metadata["tool_call"]; tc != nil && !truthy(event.Metadata["sandbox_unavailable"]) && !skillShell && !mcpTrust && !sandboxSetup {
+		prompt = tc
+		dangerous = truthy(event.Metadata["dangerous"]) || stringFromAny(event.Metadata["risk"]) == "high"
+	}
+	if renderer, ok := renderer.(interface {
+		AskPermissionContext(context.Context, any, bool) string
+	}); ok {
+		return renderer.AskPermissionContext(ctx, prompt, dangerous)
+	}
+	return renderer.AskPermission(prompt, dangerous)
 }
 
 func (r *UiRuntime) BuildPermissionModalState(event UiEvent) map[string]any {

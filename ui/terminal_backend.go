@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 type TerminalRendererBackend struct {
 	*TerminalUIBackendMixin
 	in            *bufio.Reader
+	input         *contextInput
 	out           io.Writer
 	errOut        io.Writer
 	registry      *coretools.ToolRegistry
@@ -97,11 +99,8 @@ func NewTerminalRendererBackend(in io.Reader, out io.Writer, errOut io.Writer) *
 		out:    out,
 		errOut: errOut,
 	}
-	if reader, ok := in.(*bufio.Reader); ok {
-		backend.in = reader
-	} else {
-		backend.in = bufio.NewReader(in)
-	}
+	backend.input = &contextInput{source: in, ctx: context.Background()}
+	backend.in = bufio.NewReader(backend.input)
 	backend.initLineEditor(in, out, errOut)
 	backend.TerminalUIBackendMixin = NewTerminalUIBackendMixin(backend.renderTaskSnapshot)
 	return backend
@@ -686,6 +685,20 @@ func (b *TerminalRendererBackend) renderToolResult(event agent.StreamEvent) {
 }
 
 func (b *TerminalRendererBackend) AskPermission(prompt any, dangerous bool) string {
+	return b.AskPermissionContext(context.Background(), prompt, dangerous)
+}
+
+func (b *TerminalRendererBackend) AskPermissionContext(ctx context.Context, prompt any, dangerous bool) (answer string) {
+	b.input.ctx = ctx
+	defer func() { b.input.ctx = context.Background() }()
+	defer func() {
+		if ctx.Err() != nil {
+			answer = "deny"
+		}
+	}()
+	if ctx.Err() != nil {
+		return "deny"
+	}
 	name, input := permissionPromptNameAndInput(prompt)
 	if name == "mcp-project-trust" {
 		target := stringFromAny(input["command"])

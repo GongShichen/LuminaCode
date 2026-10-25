@@ -92,6 +92,7 @@ func (e *CoreExecutionEngine) QueryLoop(ctx context.Context) <-chan StreamEvent 
 			return
 		}
 		defer e.finishExecution(runCtx, state)
+		defer e.SessionRuntime.forwardPermissions(runCtx, out)()
 		for event := range e.queryDraftLoop(runCtx, state) {
 			sendStream(runCtx, out, event)
 		}

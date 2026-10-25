@@ -93,6 +93,10 @@ func (q *QueryEngine) ResolvePermissionRequest(id, decision, toolName string) bo
 	return q.CoreEngine.ResolvePermissionRequest(id, decision, toolName)
 }
 
+func (q *QueryEngine) PermissionContext(id string) (context.Context, bool) {
+	return q.CoreEngine.SessionRuntime.PermissionContext(id)
+}
+
 func (q *QueryEngine) ResolveMCPTrust(granted bool) {
 	if q.CoreEngine != nil {
 		q.CoreEngine.ResolveMCPTrust(granted)
@@ -149,6 +153,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 	go func() {
 		defer close(out)
 		defer q.CoreEngine.finishExecution(runCtx, state)
+		defer q.CoreEngine.SessionRuntime.forwardPermissions(runCtx, out)()
 		if strings.HasPrefix(userPrompt, "/") {
 			cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(userPrompt, "/")))
 			switch cmd {
@@ -341,14 +346,13 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 		sid = uuid.NewString()[:12]
 	}
 	extraContext := coretools.ExecutionContext{
-		"_session_id":             sid,
-		"_agent_id":               q.CoreEngine.sessionMemoryAgentID(),
-		"runtime_dir":             q.Config.ProjectRuntimeDir,
-		"_skill_persistence":      q.CoreEngine.skillPersistence,
-		"_skill_agent_scope":      "main",
-		"_turn_count":             state.TurnCount,
-		"_permission_runtime":     q.CoreEngine,
-		"_run_permission_emitter": func(event StreamEvent) bool { return sendStream(ctx, out, event) },
+		"_session_id":        sid,
+		"_agent_id":          q.CoreEngine.sessionMemoryAgentID(),
+		"runtime_dir":        q.Config.ProjectRuntimeDir,
+		"_skill_persistence": q.CoreEngine.skillPersistence,
+		"_skill_agent_scope": "main",
+		"_turn_count":        state.TurnCount,
+		"_session_runtime":   q.CoreEngine.SessionRuntime,
 	}
 	return executor.Execute(ctx, skill, args, sid, func(req skills.SkillShellPermissionRequest) bool {
 		_ = q.CoreEngine.AgentRuntime.Transition(state.RunToken(), AgentPhaseExecutingTools)

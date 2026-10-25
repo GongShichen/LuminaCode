@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -406,9 +407,17 @@ func (rt *AgentTaskRuntime) StopTask(taskID, scopeID string) any {
 }
 
 func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string) {
-	rt.setStatus(taskID, "running")
 	rt.mu.Lock()
-	spec := rt.workerSpecs[taskID]
+	spec, ok := rt.workerSpecs[taskID]
+	current := rt.records[taskID]
+	if !ok || current == nil || current.Status != "queued" {
+		delete(rt.workers, taskID)
+		rt.mu.Unlock()
+		return
+	}
+	current.Status = "running"
+	current.UpdatedAt = nowSeconds()
+	rt.emitLifecycleLocked("task_status_changed", current)
 	rt.mu.Unlock()
 	start := time.Now()
 	initial := NewAgentState()
@@ -416,7 +425,7 @@ func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string
 	sub := NewSubAgent(spec.cfg, spec.registry, spec.definition, &initial, spec.modelOverride, spec.agentType, spec.extraContext)
 	sessionState := spec.sessionState
 	if sessionState == nil {
-		sessionState = sub.createSessionState(ctx, prompt)
+		sessionState = sub.newSessionState()
 	} else {
 		sessionState.Messages = append(sessionState.Messages, map[string]any{
 			"role":    "user",
@@ -439,7 +448,7 @@ func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string
 	outputDelta := result.TotalOutputTokens - startOutputTokens
 	toolUseDelta := sessionState.TotalToolUseCount - startToolUseCount
 	rt.mu.Lock()
-	current := rt.records[taskID]
+	current = rt.records[taskID]
 	if current == nil {
 		rt.mu.Unlock()
 		return
@@ -465,15 +474,25 @@ func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string
 	spec.firstCompleted = true
 	rt.workerSpecs[taskID] = spec
 	delete(rt.workers, taskID)
-	if !reusable {
+	if !reusable || result.Error != nil {
 		delete(rt.workerSpecs, taskID)
 	}
 	rt.mu.Unlock()
-	if reusable {
+	if result.Error != nil {
+		status, reason := "failed", "failed"
+		if errors.Is(result.Error, context.Canceled) {
+			status, reason = "interrupted", "cancelled"
+		}
+		if errors.Is(result.Error, context.DeadlineExceeded) {
+			reason = "timeout"
+		}
+		rt.finish(taskID, status, result.FinalText, result.Error.Error(), reason)
+	} else if reusable {
 		rt.finishReusableIdle(taskID, result.FinalText)
 		return
+	} else {
+		rt.finish(taskID, "completed", result.FinalText, "", "completed")
 	}
-	rt.finish(taskID, "completed", result.FinalText, "", "completed")
 	if wt, _ := extra["worktree_path"].(string); wt != "" {
 		_ = RemoveWorktree(context.Background(), wt)
 	}
@@ -640,7 +659,7 @@ func (rt *AgentTaskRuntime) finish(taskID, status, result, errText, reason strin
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	record := rt.records[taskID]
-	if record == nil {
+	if record == nil || record.Status == "killed" || record.Status == "interrupted" {
 		return
 	}
 	record.Status = status
@@ -681,7 +700,7 @@ func (rt *AgentTaskRuntime) finishReusableIdle(taskID, result string) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	record := rt.records[taskID]
-	if record == nil {
+	if record == nil || record.Status == "killed" || record.Status == "interrupted" {
 		return
 	}
 	record.Status = "idle"
@@ -692,16 +711,6 @@ func (rt *AgentTaskRuntime) finishReusableIdle(taskID, result string) {
 	rt.emitLifecycleLocked("task_status_changed", record)
 	rt.enqueueLocked(record, "Worker completed request.", result)
 	rt.scheduleIdleTTLLocked(taskID)
-}
-
-func (rt *AgentTaskRuntime) setStatus(taskID, status string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if record := rt.records[taskID]; record != nil {
-		record.Status = status
-		record.UpdatedAt = nowSeconds()
-		rt.emitLifecycleLocked("task_status_changed", record)
-	}
 }
 
 func (rt *AgentTaskRuntime) snapshot(taskIDs []string, scopeID string) map[string]any {

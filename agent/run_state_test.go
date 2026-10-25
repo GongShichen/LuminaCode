@@ -303,10 +303,10 @@ func TestChildPermissionUsesItsOwnRunAndParentReplyRouter(t *testing.T) {
 	sub := NewSubAgent(config.Config{}, coretools.NewToolRegistry(), AgentDef{Name: "worker"}, nil, "", "worker", coretools.ExecutionContext{"scope_id": "child", "_session_runtime": registry})
 	sub.Runtime = child
 	var sent StreamEvent
-	sub.ExtraContext["_run_permission_emitter"] = func(event StreamEvent) bool {
+	registry.SetPermissionHandler(func(_ context.Context, event StreamEvent) {
 		sent = event
-		return registry.ResolvePermissionRequest(PermissionRequestID(event), PermissionAnswer{Decision: PermissionOnce})
-	}
+		registry.ResolvePermissionRequest(PermissionRequestID(event), PermissionAnswer{Decision: PermissionOnce})
+	})
 	exec := sub.buildExecutionContext(cstate.RunToken())
 	ask := exec["_request_skill_shell_permission"].(func(skills.SkillShellPermissionRequest) bool)
 	if !ask(skills.SkillShellPermissionRequest{}) {

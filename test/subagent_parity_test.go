@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -120,8 +121,8 @@ func TestSubAgentAbortCheckReturnsAbortText(t *testing.T) {
 		"abort_check": func() bool { return true },
 	})
 	result, err := sub.Run(context.Background(), "stop")
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation error, got %v", err)
 	}
 	if !strings.Contains(result, "Sub-agent aborted by user") {
 		t.Fatalf("expected abort text, got %q", result)
@@ -154,6 +155,9 @@ func TestSubAgentDeadlineReturnsPartialProgressInsteadOfToolError(t *testing.T) 
 	defer cancel()
 
 	result := sub.ExecuteOneRequest(ctx, "inspect", session)
+	if !errors.Is(result.Error, context.DeadlineExceeded) || !result.TimedOut {
+		t.Fatalf("deadline outcome lost: %+v", result)
+	}
 
 	for _, want := range []string{"300s timeout", "partial project findings", "search: found package manifest"} {
 		if !strings.Contains(result.FinalText, want) {
@@ -316,6 +320,13 @@ func TestSubAgentSystemPromptUsesPythonSectionBuilder(t *testing.T) {
 		"_memory_engine": fabric,
 	})
 	session := sub.CreateSessionState("repository exploration")
+	if session.Messages != nil || session.SystemPrompt != "" {
+		t.Fatal("session construction must defer preparation to an accepted run")
+	}
+	sub.Config.APIKey = ""
+	if result := sub.ExecuteOneRequest(context.Background(), "repository exploration", session); result.Error == nil {
+		t.Fatal("expected client setup to stop after run-owned preparation")
+	}
 	prompt := session.SystemPrompt
 	if projectRoot == "" {
 		t.Fatal("expected resolved project root")
@@ -402,6 +413,10 @@ func TestSubAgentSessionRecoversInitialSurfacedAgentMemoryIDsLikePython(t *testi
 	})
 
 	session := sub.CreateSessionState("inspect repo")
+	sub.Config.APIKey = ""
+	if result := sub.ExecuteOneRequest(context.Background(), "inspect repo", session); result.Error == nil {
+		t.Fatal("expected client setup to stop after run-owned preparation")
+	}
 	if _, ok := session.SurfacedMemoryIDs["repo-note"]; !ok {
 		t.Fatalf("expected initial long-term agent memory id to be surfaced, got %#v", session.SurfacedMemoryIDs)
 	}

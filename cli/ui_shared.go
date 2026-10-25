@@ -103,6 +103,7 @@ func NormalizePermissionAnswer(answer string) string {
 		return "deny"
 	}
 	direct := map[string]string{
+		"once":   "once",
 		"y":      "once",
 		"yes":    "once",
 		"n":      "deny",
