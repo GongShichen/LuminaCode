@@ -76,7 +76,7 @@ func (t *SkillTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 	if sessionID == "" {
 		sessionID = uuid.NewString()[:12]
 	}
-	execution, err := t.Executor.Execute(ctx, *skill, in.Args, sessionID, approve, registryFromContext(execCtx), execCtx["parent_state"], execCtx)
+	execution, err := t.Executor.Execute(ctx, *skill, in.Args, sessionID, approve, registryFromContext(execCtx), execCtx["spawn_permissions"], execCtx)
 	if err != nil {
 		return "", err
 	}

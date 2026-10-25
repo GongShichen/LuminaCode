@@ -84,7 +84,7 @@ func (e *CoreExecutionEngine) AttachRuntime(assembly *RuntimeAssembly) error {
 		key   harness.CapabilityKey
 		value any
 	}{
-		{CapabilityPermissionPolicy, e}, {CapabilityContextCompiler, e},
+		{CapabilityPermissionPolicy, e}, {CapabilityContextCompiler, e.AgentRuntime.Context},
 		{CapabilityMemory, e}, {CapabilityMCP, e},
 		{CapabilitySubagent, e.TaskRuntime},
 		{CapabilitySandbox, map[string]any{"cwd": e.Config.CWD, "runtime_dir": e.Config.ProjectRuntimeDir}},
@@ -112,10 +112,9 @@ func (e *CoreExecutionEngine) AttachRuntime(assembly *RuntimeAssembly) error {
 	})
 	assembly.Hooks.SkillPreparing.Register(0, func(ctx context.Context, input SkillPreparingHookContext) (harness.HookResult[SkillPreparingHookContext], error) {
 		e.stripSkillMessages(input.State, map[string]struct{}{skills.SkillListingSource: {}, skills.SkillRecoverySource: {}})
-		e.maybeCompressContext(ctx, input.State)
 		e.injectSkillRuntimeAttachments(input.State)
 		e.injectPendingTaskNotifications(input.State)
-		input.InlineRuntime = skills.CollectInlineSkillRuntime(input.State.Messages)
+		input.InlineRuntime = skills.CollectInlineSkillRuntime(contextSkillMessages(input.State))
 		return harness.HookResult[SkillPreparingHookContext]{Value: input}, nil
 	})
 	assembly.Hooks.MCPPreparing.Register(0, func(_ context.Context, input MCPPreparingHookContext) (harness.HookResult[MCPPreparingHookContext], error) {

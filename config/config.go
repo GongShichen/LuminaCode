@@ -68,6 +68,7 @@ type Config struct {
 	WebFetchUserAgent       string
 	WebSearchCacheScope     string
 
+	ContextInputTokenLimit     int
 	ContextCompressThreshold   float64
 	PromptCacheTTLSeconds      float64
 	AnthropicCacheEditsEnabled bool
@@ -247,6 +248,7 @@ func NewConfigForCWD(cwd string) Config {
 		WebFetchTimeoutSeconds:  20.0,
 		WebFetchUserAgent:       "LuminaCode/1.0 (+https://github.com/bugcat9/LuminaCode)",
 
+		ContextInputTokenLimit:     16000,
 		ContextCompressThreshold:   CompressionTriggerRatio,
 		PromptCacheTTLSeconds:      300,
 		AnthropicCacheEditsEnabled: false,
@@ -573,6 +575,7 @@ func ReloadDynamicConfig(current Config) Config {
 	updated.WSLSandboxImagePath = fresh.WSLSandboxImagePath
 	updated.WSLSandboxImageSHA256 = fresh.WSLSandboxImageSHA256
 	updated.WSLSandboxAllowLocalFallback = fresh.WSLSandboxAllowLocalFallback
+	updated.ContextInputTokenLimit = fresh.ContextInputTokenLimit
 	updated.ContextCompressThreshold = fresh.ContextCompressThreshold
 	updated.PromptCacheTTLSeconds = fresh.PromptCacheTTLSeconds
 	updated.AnthropicCacheEditsEnabled = fresh.AnthropicCacheEditsEnabled
@@ -806,8 +809,8 @@ func isPinned(cfg Config, field string) bool {
 }
 
 func (c Config) CompressionContextLimit() int {
-	if c.APIMaxTokens > 0 {
-		return c.APIMaxTokens
+	if c.ContextInputTokenLimit > 0 {
+		return c.ContextInputTokenLimit
 	}
 	return 16000
 }
@@ -940,6 +943,7 @@ type luminaDefaults struct {
 	WebFetchMaxChars                 *int     `json:"web_fetch_max_chars"`
 	WebFetchTimeoutSeconds           *float64 `json:"web_fetch_timeout_seconds"`
 	WebFetchUserAgent                *string  `json:"web_fetch_user_agent"`
+	ContextInputTokenLimit           *int     `json:"context_input_token_limit"`
 	ContextCompressThreshold         *float64 `json:"context_compress_threshold"`
 	PromptCacheTTLSeconds            *float64 `json:"prompt_cache_ttl_seconds"`
 	AnthropicCacheEditsEnabled       *bool    `json:"anthropic_cache_edits_enabled"`
@@ -1081,6 +1085,13 @@ func applyLuminaDefaults(cfg *Config, path string, cwd string, resourceDir strin
 	}
 	if defaults.APIMaxTokens != nil {
 		cfg.APIMaxTokens = *defaults.APIMaxTokens
+	}
+	if defaults.ContextInputTokenLimit != nil && *defaults.ContextInputTokenLimit > 0 {
+		cfg.ContextInputTokenLimit = *defaults.ContextInputTokenLimit
+	} else if defaults.APIMaxTokens != nil && *defaults.APIMaxTokens > 0 {
+		// Import legacy input budgets at the configuration boundary only.
+		cfg.ContextInputTokenLimit = *defaults.APIMaxTokens
+		_ = migrateInputBudgetSetting(path, data, cfg.ContextInputTokenLimit)
 	}
 	if defaults.APIStreamIdleTimeoutSeconds != nil && *defaults.APIStreamIdleTimeoutSeconds > 0 {
 		cfg.APIStreamIdleTimeoutSeconds = *defaults.APIStreamIdleTimeoutSeconds
@@ -1940,4 +1951,50 @@ func GetConfigPtr() *Config {
 	}
 
 	return config
+}
+
+// migrateInputBudgetSetting freezes the legacy input limit, so future changes
+// to output max_tokens cannot silently change the model working budget.
+func migrateInputBudgetSetting(path string, data []byte, limit int) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, exists := fields["context_input_token_limit"]; exists {
+		return nil
+	}
+	fields["context_input_token_limit"], _ = json.Marshal(limit)
+	updated, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return err
+	}
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".context-budget-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err = tmp.Chmod(info.Mode().Perm()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err = tmp.Write(append(updated, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }

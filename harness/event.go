@@ -71,6 +71,7 @@ const AnyStreamSeq int64 = -1
 // incompatible spellings across producers and projectors.
 const (
 	EventSessionCreated            = "session.created"
+	EventSessionReset              = "session.reset"
 	EventSessionMetadataUpdated    = "session.metadata.updated"
 	EventSessionStatusChanged      = "session.status.changed"
 	EventRunStarted                = "run.started"

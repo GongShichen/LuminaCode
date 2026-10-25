@@ -3,9 +3,11 @@ package ui
 import (
 	"context"
 	"fmt"
+	"github.com/mohae/deepcopy"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"LuminaCode/agent"
@@ -131,6 +133,7 @@ func (s *TaskEventSink) Get() TaskUiEvent {
 }
 
 type UiRuntime struct {
+	publishedFrame         atomic.Pointer[RenderFrame]
 	Engine                 any
 	UI                     RendererBackend
 	Frame                  RenderFrame
@@ -140,7 +143,7 @@ type UiRuntime struct {
 	Mounted                bool
 	FrameInterval          time.Duration
 	MaxTaskActivityEntries int
-	CurrentState           *agent.AgentState
+	mountedState           *agent.AgentState
 }
 
 func NewUiRuntime(engine any, backend RendererBackend) *UiRuntime {
@@ -155,7 +158,12 @@ func NewUiRuntime(engine any, backend RendererBackend) *UiRuntime {
 }
 
 func (r *UiRuntime) MountStateSnapshot(state *agent.AgentState) {
-	r.CurrentState = state
+	if state != nil {
+		snapshot := agent.SnapshotFromState(state).LegacyState()
+		r.mountedState = &snapshot
+	} else {
+		r.mountedState = nil
+	}
 	r.Frame = NewRenderFrame()
 	r.Frame.TranscriptEntries = TranscriptEntriesFromState(state)
 	r.Frame.InputEnabled = true
@@ -170,6 +178,7 @@ func (r *UiRuntime) MountStateSnapshot(state *agent.AgentState) {
 		r.Mounted = true
 	}
 	r.Dirty = false
+	r.publishFrame()
 }
 
 func TranscriptEntriesFromState(state *agent.AgentState) []map[string]any {
@@ -177,7 +186,11 @@ func TranscriptEntriesFromState(state *agent.AgentState) []map[string]any {
 		return []map[string]any{}
 	}
 	var entries []map[string]any
-	for _, message := range state.Messages {
+	messages := state.Transcript
+	if messages == nil {
+		messages = state.Messages
+	}
+	for _, message := range messages {
 		if shouldHideTranscriptMessage(message) {
 			continue
 		}
@@ -193,7 +206,12 @@ func TranscriptEntriesFromState(state *agent.AgentState) []map[string]any {
 }
 
 func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID string) []agent.StreamEvent {
-	r.CurrentState = state
+	if state != nil {
+		snapshot := agent.SnapshotFromState(state).LegacyState()
+		r.mountedState = &snapshot
+	} else {
+		r.mountedState = nil
+	}
 	if refresher, ok := r.Engine.(interface{ RefreshRuntimeConfig() }); ok {
 		refresher.RefreshRuntimeConfig()
 	}
@@ -217,7 +235,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 	r.markDirty()
 	r.Flush(true)
 	submitter, ok := r.Engine.(interface {
-		SubmitMessage(context.Context, string, *agent.AgentState, ...string) <-chan agent.StreamEvent
+		SubmitMessage(context.Context, string) <-chan agent.StreamEvent
 	})
 	if !ok {
 		if r.Dirty {
@@ -226,7 +244,7 @@ func (r *UiRuntime) RunSubmitMessage(ctx context.Context, userInput string, stat
 		return nil
 	}
 	var events []agent.StreamEvent
-	eventCh := submitter.SubmitMessage(ctx, userInput, state, sessionID)
+	eventCh := submitter.SubmitMessage(ctx, userInput)
 	ticker := time.NewTicker(uiAnimationInterval)
 	defer ticker.Stop()
 	for eventCh != nil {
@@ -514,8 +532,9 @@ func (r *UiRuntime) Flush(force bool) {
 		return
 	}
 	r.refreshContextWindowFrame()
+	r.publishFrame()
 	if r.UI != nil {
-		r.UI.Update(r.Frame)
+		r.UI.Update(r.SnapshotFrame())
 	}
 	r.Dirty = false
 	r.LastFlushAt = time.Now()
@@ -597,13 +616,14 @@ func (r *UiRuntime) engineConfig() (config.Config, bool) {
 }
 
 func (r *UiRuntime) latestState() *agent.AgentState {
-	if queryEngine, ok := r.Engine.(*agent.QueryEngine); ok && queryEngine != nil && queryEngine.CoreEngine != nil && queryEngine.CoreEngine.LastState != nil {
-		return queryEngine.CoreEngine.LastState
+	if q, ok := r.Engine.(*agent.QueryEngine); ok && q != nil {
+		s := q.Snapshot().LegacyState()
+		return &s
 	}
-	if coreEngine, ok := r.Engine.(*agent.CoreExecutionEngine); ok && coreEngine != nil && coreEngine.LastState != nil {
-		return coreEngine.LastState
+	if e, ok := r.Engine.(*agent.CoreExecutionEngine); ok && e != nil {
+		return e.StateSnapshot()
 	}
-	return r.CurrentState
+	return r.mountedState
 }
 
 func (r *UiRuntime) appendTranscriptEntry(kind, text string) {
@@ -1095,4 +1115,15 @@ func mapsEqual(a, b map[string]any) bool {
 		}
 	}
 	return true
+}
+
+func (r *UiRuntime) publishFrame() {
+	frame := deepcopy.Copy(r.Frame).(RenderFrame)
+	r.publishedFrame.Store(&frame)
+}
+func (r *UiRuntime) SnapshotFrame() RenderFrame {
+	if frame := r.publishedFrame.Load(); frame != nil {
+		return deepcopy.Copy(*frame).(RenderFrame)
+	}
+	return NewRenderFrame()
 }

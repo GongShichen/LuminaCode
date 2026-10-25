@@ -105,6 +105,7 @@ func TestUIContextWindowStatusShowsModelAndProgress(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.APIModel = "deepseek-v4-pro[1M]"
 	cfg.APIMaxTokens = 1000
+	cfg.ContextInputTokenLimit = 1000
 	state := agent.NewAgentState()
 	state.SystemPrompt = strings.Repeat("s", 40)
 	state.Messages = []map[string]any{{"role": "user", "content": strings.Repeat("x", 390)}}
@@ -291,7 +292,7 @@ func (e *mcpTrustResolveEngine) ResolveMCPTrust(granted bool) {
 	}
 }
 
-func (e *mcpTrustResolveEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+func (e *mcpTrustResolveEngine) SubmitMessage(ctx context.Context, userInput string) <-chan agent.StreamEvent {
 	out := make(chan agent.StreamEvent)
 	go func() {
 		defer close(out)
@@ -444,7 +445,7 @@ func (e *submitRuntimeFakeEngine) TaskRuntimeForUI() *agent.AgentTaskRuntime {
 	return e.rt
 }
 
-func (e *submitRuntimeFakeEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+func (e *submitRuntimeFakeEngine) SubmitMessage(ctx context.Context, userInput string) <-chan agent.StreamEvent {
 	out := make(chan agent.StreamEvent)
 	go func() {
 		defer close(out)
@@ -536,7 +537,7 @@ func TestUIRuntimeDrainTaskEventsFlushesWhenDueLikePython(t *testing.T) {
 
 type prepareSubmitEngine struct{}
 
-func (e *prepareSubmitEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+func (e *prepareSubmitEngine) SubmitMessage(ctx context.Context, userInput string) <-chan agent.StreamEvent {
 	out := make(chan agent.StreamEvent)
 	go func() {
 		defer close(out)
@@ -558,7 +559,7 @@ func TestUIRuntimeRunSubmitMessagePreparesBackendBeforeMountLikePython(t *testin
 
 type delayedSubmitEngine struct{}
 
-func (e *delayedSubmitEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+func (e *delayedSubmitEngine) SubmitMessage(ctx context.Context, userInput string) <-chan agent.StreamEvent {
 	out := make(chan agent.StreamEvent)
 	go func() {
 		defer close(out)
@@ -573,7 +574,7 @@ func (e *delayedSubmitEngine) SubmitMessage(ctx context.Context, userInput strin
 
 type cancelAwareSubmitEngine struct{}
 
-func (e *cancelAwareSubmitEngine) SubmitMessage(ctx context.Context, userInput string, state *agent.AgentState, sessionID ...string) <-chan agent.StreamEvent {
+func (e *cancelAwareSubmitEngine) SubmitMessage(ctx context.Context, userInput string) <-chan agent.StreamEvent {
 	out := make(chan agent.StreamEvent)
 	go func() {
 		defer close(out)

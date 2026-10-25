@@ -41,6 +41,10 @@ func RecoverInterruptedRuntime(ctx context.Context, journal RuntimeStore) error 
 		}
 		for _, event := range events {
 			switch event.Type {
+			case harness.EventSessionReset:
+				runs = map[string]openRun{}
+				steps = map[string]openStep{}
+				tools = map[string]openTool{}
 			case harness.EventRunStarted:
 				var payload harness.RunLifecyclePayload
 				if json.Unmarshal(event.Payload, &payload) == nil && payload.RunID != "" {

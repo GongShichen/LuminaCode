@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/agentContext"
 	"LuminaCode/apppaths"
 	"LuminaCode/backend"
 	luminacli "LuminaCode/cli"
@@ -889,9 +890,11 @@ func runPrompt(ctx context.Context, engine *agent.QueryEngine, prompt string, st
 	if engine.Config.Yolo && state.PermissionState != nil {
 		state.PermissionState.YoloMode = true
 	}
+	_ = engine.Restore(state)
+	engine.CoreEngine.SessionID = uuid.NewString()[:12]
 	reader := bufio.NewReader(os.Stdin)
 	var firstErr error
-	for event := range engine.SubmitMessage(ctx, prompt, state, uuid.NewString()[:12]) {
+	for event := range engine.SubmitMessage(ctx, prompt) {
 		switch event.Type {
 		case "text":
 			fmt.Fprint(os.Stdout, event.Content)
@@ -962,6 +965,53 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 	if sessionID == "" {
 		sessionID = uuid.NewString()[:12]
 	}
+	var replJournal session.RuntimeStore
+	bindSession := func() error {
+		if replJournal != nil {
+			_ = replJournal.Close()
+			replJournal = nil
+		}
+		if store != nil {
+			load, err := store.OpenRuntime(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			replJournal = load.Journal
+			if state == nil {
+				state = load.State
+			}
+		}
+		if err := engine.Restore(state); err != nil {
+			return err
+		}
+		engine.CoreEngine.SessionID = sessionID
+		if replJournal != nil {
+			engine.CoreEngine.AgentRuntime.BindStore(replJournal, sessionID)
+			recorder := agent.NewRuntimeEventRecorder(replJournal, sessionID)
+			recorder.BindRuntime(engine.CoreEngine.AgentRuntime)
+			engine.CoreEngine.RuntimeEvents = recorder
+			engine.CoreEngine.TaskRuntime.SetTaskEventObserver(recorder)
+			assembly, err := agent.NewRuntimeAssembly(sessionID, replJournal, engine.CoreEngine.Registry)
+			if err != nil {
+				return err
+			}
+			if err = engine.CoreEngine.AttachRuntime(assembly); err != nil {
+				return err
+			}
+			if err = engine.CoreEngine.SessionRuntime.RestoreChildren(ctx, replJournal, engine.Config, sessionID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := bindSession(); err != nil {
+		return err
+	}
+	defer func() {
+		if replJournal != nil {
+			_ = replJournal.Close()
+		}
+	}()
 	backend := luminaui.NewRendererBackend(engine.Config.UIBackend, os.Stdin, os.Stdout, os.Stderr)
 	configureBackendForEngine(backend, engine)
 	uiRuntime := luminaui.NewUiRuntime(engine, backend)
@@ -1002,6 +1052,9 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 				cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "/")))
 				cmdName, _, _ := strings.Cut(cmd, " ")
 				if cmd == "clear" || cmdName == "resume" {
+					if err := bindSession(); err != nil {
+						return err
+					}
 					uiRuntime.Shutdown()
 					luminaui.ResetBackendForNewSession(backend)
 					configureBackendForEngine(backend, engine)
@@ -1014,14 +1067,15 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 			}
 		}
 		uiRuntime.RunSubmitMessage(ctx, line, state, sessionID)
-		state = engine.CoreEngine.LastState
+		state = engine.CoreEngine.StateSnapshot()
 		if store != nil && sessionID != "" {
-			_ = store.SaveSnapshotWithRecovery(
-				sessionID,
-				state,
-				engine.CoreEngine.ExportSkillRecoverySnapshot(),
-				engine.CoreEngine.TaskRuntime.ExportSnapshot(),
-			)
+			snapshot, err := engine.Checkpoint(ctx)
+			if err != nil {
+				return err
+			}
+			if err = store.UpdateMetaProjection(sessionID, len(snapshot.Transcript), snapshot.Progress.TurnCount); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -1110,7 +1164,9 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 			*stateRef = nil
 		}
 		if engine != nil {
-			engine.Reset()
+			if err := engine.Reset(ctx); err != nil {
+				return true, err
+			}
 			engine.ClearMCP()
 		}
 		if sessionID != nil {
@@ -1125,7 +1181,11 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 			fmt.Fprintln(out, "No active session.")
 			return true, nil
 		}
-		if err := store.SaveSnapshotWithRecovery(*sessionID, state, engine.CoreEngine.ExportSkillRecoverySnapshot(), engine.CoreEngine.TaskRuntime.ExportSnapshot()); err != nil {
+		if engine.CoreEngine.AgentRuntime.HasDurableStore() {
+			if _, err := engine.Checkpoint(ctx); err != nil {
+				return true, err
+			}
+		} else if err := store.SaveSnapshotWithRecovery(*sessionID, state, engine.CoreEngine.ExportSkillRecoverySnapshot(), engine.CoreEngine.TaskRuntime.ExportSnapshot()); err != nil {
 			return true, err
 		}
 		fmt.Fprintf(out, "Saved %s (%d msgs, %d turns)\n", *sessionID, len(state.Messages), state.TurnCount)
@@ -1134,16 +1194,16 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 		printTokens(out, state)
 		return true, nil
 	case cmdName == "yolo":
-		if state == nil {
-			fmt.Fprintln(out, "No active session - will apply to next prompt.")
-			return true, nil
+		enabled := !engine.CoreEngine.AgentRuntime.YoloEnabled()
+		if err := engine.CoreEngine.AgentRuntime.SetYolo(ctx, enabled); err != nil {
+			return true, err
 		}
-		if state.PermissionState == nil {
-			state.PermissionState = agent.BuildSubagentState(nil, "inherit").PermissionState
+		if stateRef != nil {
+			fresh := engine.CoreEngine.StateSnapshot()
+			*stateRef = fresh
 		}
-		state.PermissionState.YoloMode = !state.PermissionState.YoloMode
 		status := "OFF"
-		if state.PermissionState.YoloMode {
+		if enabled {
 			status = "ON"
 		}
 		fmt.Fprintf(out, "YOLO mode: %s\n", status)
@@ -1242,9 +1302,14 @@ func handleREPLSlashCommand(ctx context.Context, line string, engine *agent.Quer
 			fmt.Fprintln(out, "No active session.")
 			return true, nil
 		}
-		compacted, stats := engine.Compact(state)
+		result, err := engine.Compact(ctx, agentContext.CompactManual)
+		if err != nil {
+			return true, err
+		}
+		compacted := engine.Snapshot().LegacyState()
+		stats := result.Stats
 		*state = compacted
-		if stats.LevelReached >= 1 {
+		if result.Succeeded {
 			fmt.Fprintf(out, "Context compressed: %d -> %d tokens (level %d)\n", stats.TokensBefore, stats.TokensAfter, stats.LevelReached)
 		} else {
 			fmt.Fprintln(out, "No compression needed.")

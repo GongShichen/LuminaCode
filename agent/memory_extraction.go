@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"LuminaCode/agentContext"
 	"LuminaCode/config"
 	"LuminaCode/memory"
 )
@@ -54,6 +55,9 @@ type extractionContext struct {
 	TurnCount     int
 	UserTurnCount int
 	State         *AgentState
+	Owner         *AgentRuntime
+	Generation    uint64
+	EndSeq        int64
 }
 
 func NewExtractionController(cfg config.Config, extractionConfig ...ExtractionConfig) *ExtractionController {
@@ -78,7 +82,13 @@ func (c *ExtractionController) engineSnapshot() memory.Engine {
 
 func (c *ExtractionController) ShouldExtract(state *AgentState) bool {
 	return state != nil && c.Config.LongTermMemoryEnabled && isFabricMemoryBackend(c.Config) &&
-		c.engineSnapshot() != nil && state.MemoryExtractionCursor < len(state.Messages)
+		c.engineSnapshot() != nil && func() bool {
+		state.captureTranscript()
+		if len(state.Transcript) == 0 {
+			return false
+		}
+		return messageSequence(state.Transcript[len(state.Transcript)-1]) > state.MemoryExtractionSeq
+	}()
 }
 
 func (c *ExtractionController) Schedule(_ context.Context, state *AgentState, _ string) bool {
@@ -109,11 +119,18 @@ func (c *ExtractionController) Schedule(_ context.Context, state *AgentState, _ 
 
 func (c *ExtractionController) incrementalFabricContext(state *AgentState) *extractionContext {
 	messages, messageIDs, startIndex, endIndex, sessionID, consumerID := c.incrementalFabricMessages(state)
-	return &extractionContext{
+	payload := &extractionContext{
 		Messages: messages, MessageIDs: messageIDs, StartIndex: startIndex, EndIndex: endIndex,
 		SessionID: sessionID, ConsumerID: consumerID, TurnCount: state.TurnCount,
-		UserTurnCount: state.UserTurnCount, State: state,
+		UserTurnCount: state.UserTurnCount, State: state, Owner: state.owner, Generation: state.generation,
 	}
+	if len(messages) > 0 {
+		payload.EndSeq = messageSequence(messages[len(messages)-1])
+	}
+	if state.owner != nil {
+		payload.State = nil
+	}
+	return payload
 }
 
 func (c *ExtractionController) incrementalFabricMessages(state *AgentState) ([]map[string]any, []string, int, int, string, string) {
@@ -123,11 +140,19 @@ func (c *ExtractionController) incrementalFabricMessages(state *AgentState) ([]m
 			firstNonEmptyString(c.SourceAgentID, "main")
 	}
 	consumerID := "memory-fabric-ingest:" + firstNonEmptyString(c.SourceAgentID, "main")
-	start := state.MemoryExtractionCursor
+	state.captureTranscript()
+	source := state.Transcript
+	start := 0
+	for start < len(source) && messageSequence(source[start]) <= state.MemoryExtractionSeq {
+		start++
+	}
+	if state.MemoryExtractionSeq == 0 && state.MemoryExtractionCursor > 0 {
+		start = min(state.MemoryExtractionCursor, len(source))
+	}
 	if start < 0 {
 		start = 0
 	}
-	if start >= len(state.Messages) {
+	if start >= len(source) {
 		return nil, nil, start, start - 1, sessionID, consumerID
 	}
 
@@ -138,9 +163,9 @@ func (c *ExtractionController) incrementalFabricMessages(state *AgentState) ([]m
 	messages := make([]map[string]any, 0, limit)
 	messageIDs := make([]string, 0, limit)
 	end := start - 1
-	for index := start; index < len(state.Messages); index++ {
+	for index := start; index < len(source); index++ {
 		end = index
-		message := state.Messages[index]
+		message := agentContext.CloneMessages(source[index : index+1])[0]
 		if len(StripTransientContextMessages([]map[string]any{message})) == 0 {
 			continue
 		}
@@ -416,9 +441,17 @@ func classifyFabricMemoryWrite(text string) (memory.MemoryWriteMode, int, bool) 
 }
 
 func (c *ExtractionController) advanceFabricCursor(payload *extractionContext) {
-	if payload == nil || payload.State == nil {
+	if payload == nil {
 		return
 	}
+	if payload.Owner != nil {
+		payload.Owner.AdvanceMemory(payload.Generation, payload.EndSeq)
+		return
+	}
+	if payload.State == nil {
+		return
+	}
+	payload.State.MemoryExtractionSeq = max(payload.State.MemoryExtractionSeq, payload.EndSeq)
 	payload.State.LastExtractionTurn = payload.State.TurnCount
 	payload.State.LastExtractionUserTurn = payload.State.UserTurnCount
 	payload.State.MemoryWritesSinceExtraction = false
@@ -521,3 +554,5 @@ func truncateExtractionRunes(text string, limit int) string {
 	}
 	return string(runes[:limit])
 }
+
+func messageSequence(message map[string]any) int64 { return int64(intFromAny(message["event_seq"])) }

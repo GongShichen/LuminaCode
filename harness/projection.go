@@ -18,11 +18,12 @@ type RunLifecyclePayload struct {
 }
 
 type UsageRecordedPayload struct {
-	InputTokens       int `json:"input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	CacheReadTokens   int `json:"cache_read_tokens,omitempty"`
-	CacheCreateTokens int `json:"cache_create_tokens,omitempty"`
-	ServerToolTokens  int `json:"server_tool_tokens,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	CacheReadTokens   int    `json:"cache_read_tokens,omitempty"`
+	CacheCreateTokens int    `json:"cache_create_tokens,omitempty"`
+	ServerToolTokens  int    `json:"server_tool_tokens,omitempty"`
 }
 
 type ContextCompiledPayload struct {
@@ -61,6 +62,8 @@ type ToolCallView struct {
 }
 
 type SessionProjection struct {
+	MessageIDs        map[string]bool         `json:"message_ids"`
+	UsageRequests     map[string]bool         `json:"usage_requests"`
 	Status            string                  `json:"status"`
 	LastSeq           int64                   `json:"last_seq"`
 	Messages          []json.RawMessage       `json:"messages"`
@@ -84,6 +87,8 @@ func (p *SessionProjection) Version() int { return 1 }
 
 func (p *SessionProjection) Reset() {
 	p.Status = "idle"
+	p.MessageIDs = map[string]bool{}
+	p.UsageRequests = map[string]bool{}
 	p.LastSeq = 0
 	p.Messages = []json.RawMessage{}
 	p.RunStates = map[string]string{}
@@ -102,6 +107,15 @@ func (p *SessionProjection) Apply(event Event) error {
 	switch event.Type {
 	case EventSessionCreated:
 		p.Status = "idle"
+	case EventSessionReset:
+		p.Messages = []json.RawMessage{}
+		p.MessageIDs = map[string]bool{}
+		p.InputTokens = 0
+		p.OutputTokens = 0
+		p.CacheReadTokens = 0
+		p.CacheCreateTokens = 0
+		p.ServerToolTokens = 0
+		p.UsageRequests = map[string]bool{}
 	case EventSessionStatusChanged:
 		var payload struct {
 			Status string `json:"status"`
@@ -130,11 +144,30 @@ func (p *SessionProjection) Apply(event Event) error {
 		if err := decodePayload(event, &payload); err != nil {
 			return err
 		}
-		p.Messages = append(p.Messages, append(json.RawMessage(nil), payload.Message...))
+		var identity struct {
+			ID string `json:"context_id"`
+		}
+		_ = json.Unmarshal(payload.Message, &identity)
+		if p.MessageIDs == nil {
+			p.MessageIDs = map[string]bool{}
+		}
+		if identity.ID == "" || !p.MessageIDs[identity.ID] {
+			p.Messages = append(p.Messages, append(json.RawMessage(nil), payload.Message...))
+			p.MessageIDs[identity.ID] = true
+		}
 	case EventUsageRecorded:
 		var payload UsageRecordedPayload
 		if err := decodePayload(event, &payload); err != nil {
 			return err
+		}
+		if p.UsageRequests == nil {
+			p.UsageRequests = map[string]bool{}
+		}
+		if payload.RequestID != "" && p.UsageRequests[payload.RequestID] {
+			break
+		}
+		if payload.RequestID != "" {
+			p.UsageRequests[payload.RequestID] = true
 		}
 		p.InputTokens += payload.InputTokens
 		p.OutputTokens += payload.OutputTokens

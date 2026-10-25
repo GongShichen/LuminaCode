@@ -46,10 +46,10 @@ func (s *ToolSlot) ToolName() string {
 }
 
 type StreamingToolExecutor struct {
-	Registry *coretools.ToolRegistry
-	Config   config.Config
-	State    *AgentState
-	Context  coretools.ExecutionContext
+	Registry     *coretools.ToolRegistry
+	Config       config.Config
+	replacements map[string]string
+	Context      coretools.ExecutionContext
 
 	mu             sync.Mutex
 	slots          map[string]*ToolSlot
@@ -78,7 +78,7 @@ func NewStreamingToolExecutor(registry *coretools.ToolRegistry, cfg config.Confi
 	return &StreamingToolExecutor{
 		Registry:      registry,
 		Config:        cfg,
-		State:         state,
+		replacements:  map[string]string{},
 		Context:       execCtx,
 		slots:         map[string]*ToolSlot{},
 		cancelCtx:     ctx,
@@ -523,9 +523,13 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 	}
 	execCtx := e.executionContextForSlot(abort)
 
-	if e.State != nil {
+	{
 		e.mu.Lock()
-		if cached, ok := e.State.ContentReplacements[tcID]; ok {
+		cached, ok := e.replacements[tcID]
+		if services, available := e.Context["agent_services"].(AgentServices); available {
+			cached, ok = services.Replacement(tcID)
+		}
+		if ok {
 			e.mu.Unlock()
 			e.finishResult(tcID, cached, cached, false)
 			return
@@ -560,9 +564,12 @@ func (e *StreamingToolExecutor) executeOne(ctx context.Context, tcID string, isS
 			truncated = formatted
 		}
 	}
-	if e.State != nil {
+	{
 		e.mu.Lock()
-		e.State.ContentReplacements[tcID] = truncated
+		e.replacements[tcID] = truncated
+		if services, ok := e.Context["agent_services"].(AgentServices); ok {
+			services.SetReplacement(tcID, truncated)
+		}
 		e.mu.Unlock()
 	}
 	e.finishResult(tcID, truncated, truncated, result.IsError)

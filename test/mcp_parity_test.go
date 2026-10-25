@@ -1012,7 +1012,7 @@ done
 	state.Messages = []map[string]any{{"role": "user", "content": "hello"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for range engine.QueryLoop(ctx, &state) {
+	for range engine.QueryLoopWithState(ctx, &state) {
 	}
 	if engine.Registry.GetDeferredTools()["mcp_list_resources"] == nil {
 		t.Fatalf("expected MCP resource tools to be registered before ClearMCP")
@@ -1042,7 +1042,7 @@ func TestCoreExecutionEnginePromptsAndPersistsMCPTrustLikePython(t *testing.T) {
 	state.Messages = []map[string]any{{"role": "user", "content": "hello"}}
 
 	engine := newTestCoreExecutionEngine(cfg)
-	stream := engine.QueryLoop(context.Background(), &state)
+	stream := engine.QueryLoopWithState(context.Background(), &state)
 
 	first, ok := <-stream
 	if !ok {

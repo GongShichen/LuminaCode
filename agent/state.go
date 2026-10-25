@@ -1,25 +1,37 @@
 package agent
 
 import (
+	"LuminaCode/agentContext"
 	"LuminaCode/security"
 	"LuminaCode/tools/file"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 )
 
+// AgentState is a detached execution draft and legacy import DTO. Published state lives in AgentRuntime.
 type AgentState struct {
-	Messages                       []map[string]any `json:"messages"`
-	TotalInputTokens               int              `json:"total_input_tokens"`
-	TotalOutputTokens              int              `json:"total_output_tokens"`
-	CacheReadInputTokens           int              `json:"cache_read_input_tokens"`
-	CacheCreateInputTokens         int              `json:"cache_creation_input_tokens"`
-	ServerToolUseInputTokens       int              `json:"server_tool_use_input_tokens"`
-	TurnCount                      int              `json:"turn_count"`
-	ConsecutiveAutoCompactFailures int              `json:"consecutive_autocompact_failures"`
-	LastContinueReason             string           `json:"last_continue_reason"`
+	snapshotRevision               uint64
+	permissionRevision             uint64
+	owner                          *AgentRuntime
+	generation                     uint64
+	Transcript                     []map[string]any              `json:"transcript,omitempty"`
+	ContextSnapshot                *agentContext.ContextSnapshot `json:"context_snapshot,omitempty"`
+	HistoryIncomplete              bool                          `json:"history_incomplete,omitempty"`
+	MemoryExtractionSeq            int64                         `json:"memory_extraction_seq,omitempty"`
+	UsageRequests                  map[string]bool               `json:"usage_requests,omitempty"`
+	Messages                       []map[string]any              `json:"messages"`
+	TotalInputTokens               int                           `json:"total_input_tokens"`
+	TotalOutputTokens              int                           `json:"total_output_tokens"`
+	CacheReadInputTokens           int                           `json:"cache_read_input_tokens"`
+	CacheCreateInputTokens         int                           `json:"cache_creation_input_tokens"`
+	ServerToolUseInputTokens       int                           `json:"server_tool_use_input_tokens"`
+	TurnCount                      int                           `json:"turn_count"`
+	ConsecutiveAutoCompactFailures int                           `json:"consecutive_autocompact_failures"`
+	LastContinueReason             string                        `json:"last_continue_reason"`
 
 	// permission tracking
 	PermissionState *security.PermissionState `json:"permission_state"`
@@ -123,6 +135,20 @@ func (s AgentState) ToMap() (map[string]any, error) {
 }
 
 func GetAgentStateFromMap(m map[string]any) (AgentState, error) {
+	if _, ok := m["context"]; ok {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			return AgentState{}, err
+		}
+		var snapshot AgentSnapshot
+		if err = json.Unmarshal(raw, &snapshot); err != nil {
+			return AgentState{}, err
+		}
+		if snapshot.Version != AgentSnapshotVersion {
+			return AgentState{}, fmt.Errorf("unsupported agent state version %d", snapshot.Version)
+		}
+		return snapshot.LegacyState(), nil
+	}
 	rawCacheBreakpoints, hasCacheBreakpoints := m["cache_breakpoints"]
 	if !hasCacheBreakpoints {
 		rawCacheBreakpoints = m["cache_break_points"]
@@ -234,3 +260,9 @@ func intFromStateAny(value any) (int, bool) {
 	}
 	return 0, false
 }
+
+func (s *AgentState) ContextFailures() int                  { return s.ConsecutiveAutoCompactFailures }
+func (s *AgentState) SetContextFailures(n int)              { s.ConsecutiveAutoCompactFailures = n }
+func (s *AgentState) ContextTaskBudget() *int               { return s.TaskBudgetRemaining }
+func (s *AgentState) ContextMessages() []map[string]any     { return s.Messages }
+func (s *AgentState) SetContextMessages(m []map[string]any) { s.Messages = m }

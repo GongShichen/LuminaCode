@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/cluster"
 	"LuminaCode/config"
 )
 
@@ -569,7 +570,7 @@ func TestRequestPermissionAutoAllowsInYoloMode(t *testing.T) {
 	state.PermissionState.YoloMode = true
 	session := &Session{
 		agents: map[string]*AgentRuntime{
-			"qa": {State: &state},
+			"qa": {Engine: newTestQueryEngineFactory().Create(config.Config{Yolo: true}, cluster.RuntimeIdentity{TenantID: "local"})},
 		},
 		emitFn: func(string, string, any) {
 			t.Fatal("yolo permission should not be emitted")
@@ -1154,8 +1155,8 @@ func TestTeamSharedPromptIsInjectedIntoLeaderAndAgentSystemPrompts(t *testing.T)
 	if strings.Index(text, "# Shared Team Prompt") > strings.Index(text, "# Team Leader") {
 		t.Fatalf("shared prompt should appear before agent prompt:\n%s", text)
 	}
-	if len(runtime.State.Messages) != 0 {
-		t.Fatalf("shared prompt should not be injected into conversation messages, got %#v", runtime.State.Messages)
+	if len(runtime.Engine.Snapshot().Context.Messages) != 0 {
+		t.Fatalf("shared prompt should not be injected into conversation messages, got %#v", runtime.Engine.Snapshot().Context.Messages)
 	}
 }
 

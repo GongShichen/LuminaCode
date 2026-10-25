@@ -187,7 +187,7 @@ func (t *EditFileTool) ValidateInput(execCtx ExecutionContext, input any) (bool,
 		return false, formatEditError(editNotebookRedirect, fmt.Sprintf("Notebook files must use notebook_edit tool: %s", in.FilePath))
 	}
 	if in.OldString != "" && !truthy(execCtx["skip_read_before_edit"]) {
-		owner, _ := execCtx["parent_state"].(readFileStateOwner)
+		owner, _ := execCtx["agent_services"].(readFileStateOwner)
 		if owner == nil {
 			return false, formatEditError(editUnreadFile, "File has not been read yet. Read it first before editing.")
 		}
@@ -1240,7 +1240,7 @@ func detectLineEndings(content string) string {
 }
 
 func updateReadState(execCtx ExecutionContext, path, content, lineEndings string, isPartial bool) {
-	owner, _ := execCtx["parent_state"].(readFileStateOwner)
+	owner, _ := execCtx["agent_services"].(readFileStateOwner)
 	if owner == nil {
 		return
 	}
@@ -1688,7 +1688,7 @@ func toolResultsDirFromContext(execCtx ExecutionContext, cwd string) string {
 
 func bashYoloEnabled(execCtx ExecutionContext) bool {
 	if execCtx != nil {
-		if state, ok := execCtx["parent_state"].(interface{ YoloEnabled() bool }); ok && state.YoloEnabled() {
+		if state, ok := execCtx["agent_services"].(interface{ YoloEnabled() bool }); ok && state.YoloEnabled() {
 			return true
 		}
 		if cfg, ok := execCtx["config"].(config.Config); ok && cfg.Yolo {

@@ -58,9 +58,7 @@ func (f *DefaultQueryEngineFactory) Create(cfg config.Config, identity cluster.R
 
 func (q *QueryEngine) Abort() { q.CoreEngine.Abort() }
 
-func (q *QueryEngine) Reset() {
-	q.CoreEngine.Reset()
-}
+func (q *QueryEngine) Reset(ctx context.Context) error { return q.CoreEngine.Reset(ctx) }
 
 func (q *QueryEngine) RefreshRuntimeConfig() {
 	if q == nil {
@@ -115,42 +113,42 @@ func (q *QueryEngine) SkillRegistry() *skills.SkillRegistry {
 	return q.CoreEngine.skillRegistry
 }
 
-func (q *QueryEngine) Compact(state *AgentState) (AgentState, agentContext.CompressionStats) {
-	if state == nil {
-		empty := NewAgentState()
-		return empty, *agentContext.DefaultCompressionStats()
+func (q *QueryEngine) Compact(ctx context.Context, mode agentContext.CompactMode) (agentContext.CompactionResult, error) {
+	runCtx, state, err := q.CoreEngine.AgentRuntime.Begin(ctx)
+	if err != nil {
+		return agentContext.CompactionResult{}, err
 	}
-	state.Messages = StripTransientContextMessages(state.Messages)
-	currentTokens := agentContext.TokenCountWithEstimation(state.Messages)
-	pipeline := agentContext.DefaultContextPipeline()
-	pipeline.Config = q.Config
-	compressed, stats := pipeline.Compress(
-		state.Messages,
-		currentTokens,
-		state.SystemPrompt,
-		q.Config.CompressionContextLimit(),
-		q.Config.CompressionThreshold(),
-		state,
-		nil,
-		true,
-	)
-	if stats.LevelReached >= 1 {
-		state.Messages = compressed
-		if state.CacheBreakPoints != nil {
-			state.CacheBreakPoints.Clear()
-		}
-		if q.CoreEngine != nil {
-			q.CoreEngine.MarkSkillHistoryCompacted("main")
-		}
+	defer q.CoreEngine.AgentRuntime.End(state.generation)
+	q.buildOrRefreshSystemPrompt(state)
+	result, err := q.CoreEngine.prepareContextResult(runCtx, state, q.CoreEngine.Registry.GetAPISchemas(), mode, q.Config.APIModel)
+	if publishErr := q.CoreEngine.publishDraft(context.WithoutCancel(ctx), state); publishErr != nil && err == nil {
+		err = publishErr
 	}
-	return *state, stats
+	return result, err
 }
 
-func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, state *AgentState, sessionID ...string) <-chan StreamEvent {
-	q.RefreshRuntimeConfig()
+func (q *QueryEngine) Snapshot() AgentSnapshot { return q.CoreEngine.AgentRuntime.Snapshot() }
+func (q *QueryEngine) Restore(state *AgentState) error {
+	if state == nil {
+		fresh := NewAgentState()
+		fresh.PermissionState.YoloMode = q.Config.Yolo
+		state = &fresh
+	}
+	return q.CoreEngine.AgentRuntime.Restore(SnapshotFromState(state))
+}
+
+func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-chan StreamEvent {
 	out := make(chan StreamEvent)
+	runCtx, state, beginErr := q.CoreEngine.AgentRuntime.Begin(ctx)
+	if beginErr != nil {
+		go func() { defer close(out); sendStream(ctx, out, NewStreamEvent("error", beginErr.Error(), nil)) }()
+		return out
+	}
+	q.RefreshRuntimeConfig()
 	go func() {
 		defer close(out)
+		defer q.CoreEngine.AgentRuntime.End(state.generation)
+		defer func() { _ = q.CoreEngine.publishDraft(context.WithoutCancel(runCtx), state) }()
 		if strings.HasPrefix(userPrompt, "/") {
 			cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(userPrompt, "/")))
 			switch cmd {
@@ -160,35 +158,12 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				return
 			}
 		}
-		if state == nil {
-			s := NewAgentState()
-			state = &s
-		}
-		if q.Config.Yolo && state.PermissionState != nil {
-			state.PermissionState.YoloMode = true
-		}
-		if state.PermissionState != nil && state.PermissionState.YoloMode {
-			q.Config.Yolo = true
-			if q.CoreEngine != nil {
-				q.CoreEngine.Config.Yolo = true
-			}
-		}
-		sid := ""
-		if len(sessionID) > 0 {
-			sid = sessionID[0]
-		}
-		if q.CoreEngine != nil {
-			q.CoreEngine.SessionID = sid
-			agentID := "main"
-			if len(sessionID) > 1 && strings.TrimSpace(sessionID[1]) != "" {
-				agentID = strings.TrimSpace(sessionID[1])
-			}
-			q.CoreEngine.AgentID = agentID
-			if strings.TrimSpace(q.CoreEngine.AgentType) == "" {
-				q.CoreEngine.AgentType = agentID
-			}
-		}
+		ctx = runCtx
+
 		state.Messages = StripTransientContextMessages(state.Messages)
+		if state.ContextSnapshot != nil {
+			state.ContextSnapshot.Attachments = nil
+		}
 		state.MemoryQueryText = strings.TrimSpace(userPrompt)
 		q.buildOrRefreshSystemPrompt(state)
 		normalizedPrompt := userPrompt
@@ -199,7 +174,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
-			execution, err := q.executeSlashSkill(ctx, out, *skill, args, state, sessionID)
+			execution, err := q.executeSlashSkill(ctx, out, *skill, args, state, []string{q.CoreEngine.SessionID, q.CoreEngine.AgentID})
 			if err != nil {
 				sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
@@ -216,7 +191,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 				if execution.ResultText != nil && *execution.ResultText != "" {
 					resultText = *execution.ResultText
 				}
-				AddUsage(state, execution.InputTokens, execution.OutputTokens)
+				// Fork usage belongs to its child runtime and is included in session totals.
 				q.commitUserTurn(state, normalizedPrompt)
 				if err := q.beginRuntimeRun(ctx, state); err != nil {
 					sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
@@ -238,7 +213,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 					q.CoreEngine.RecordSessionMemory(ctx, state, false)
 				}
 				state.TurnCount++
-				q.CoreEngine.LastState = state
+				_ = q.CoreEngine.publishDraft(context.Background(), state)
 				sendStream(ctx, out, NewStreamEvent("text", resultText, nil))
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
@@ -254,7 +229,7 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string, stat
 			return
 		}
 		lastType := ""
-		for event := range q.CoreEngine.QueryLoop(ctx, state) {
+		for event := range q.CoreEngine.queryDraftLoop(ctx, state) {
 			if event.Type == "done" && q.CoreEngine.RuntimeEvents != nil {
 				status := "completed"
 				reason := event.Content
@@ -375,11 +350,11 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 	}
 	return executor.Execute(ctx, skill, args, sid, func(req skills.SkillShellPermissionRequest) bool {
 		return q.requestSkillShellPermission(ctx, out, req)
-	}, q.CoreEngine.Registry, state, extraContext)
+	}, q.CoreEngine.Registry, ClonePermissionState(state.PermissionState), extraContext)
 }
 
 func (q *QueryEngine) requestSkillShellPermission(ctx context.Context, out chan<- StreamEvent, req skills.SkillShellPermissionRequest) bool {
-	if q != nil && q.Config.Yolo {
+	if q != nil && q.CoreEngine.AgentRuntime.YoloEnabled() {
 		return true
 	}
 	ch := make(chan bool, 1)
@@ -473,7 +448,7 @@ func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string)
 	if stateHasConsecutiveUserPrompt(state, normalizedPrompt) {
 		state.LastQuery = normalizedPrompt
 		if q.CoreEngine != nil {
-			q.CoreEngine.LastState = state
+			_ = q.CoreEngine.publishDraft(context.Background(), state)
 		}
 		return
 	}
@@ -490,7 +465,7 @@ func (q *QueryEngine) commitUserTurn(state *AgentState, normalizedPrompt string)
 	}
 	state.Messages = append(state.Messages, msg)
 	if q.CoreEngine != nil {
-		q.CoreEngine.LastState = state
+		_ = q.CoreEngine.publishDraft(context.Background(), state)
 	}
 }
 
@@ -555,4 +530,13 @@ func userMessagePlainText(content any) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(filtered, "\n\n"))
+}
+
+func (q *QueryEngine) Checkpoint(ctx context.Context) (AgentSnapshot, error) {
+	recovery := q.CoreEngine.ExportSkillRecoverySnapshot()
+	var tasks []map[string]any
+	if q.CoreEngine.TaskRuntime != nil {
+		tasks = q.CoreEngine.TaskRuntime.ExportSnapshot()
+	}
+	return q.CoreEngine.AgentRuntime.Checkpoint(ctx, recovery, tasks)
 }

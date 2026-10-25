@@ -354,10 +354,10 @@ func (e *CoreExecutionEngine) flushAndSealMemory(ctx context.Context) {
 		flushCtx, cancel = context.WithTimeout(ctx, 10*time.Second)
 	}
 	defer cancel()
-	if e.extraction != nil && e.LastState != nil {
+	if e.extraction != nil && e.StateSnapshot() != nil {
 		e.extraction.SetEngine(engine)
 		for batch := 0; batch < 256; batch++ {
-			count, err := e.extraction.IngestMessages(flushCtx, e.LastState)
+			count, err := e.extraction.IngestMessages(flushCtx, e.StateSnapshot())
 			if err != nil {
 				var lag memory.IndexLagError
 				if !errors.As(err, &lag) {
@@ -371,8 +371,8 @@ func (e *CoreExecutionEngine) flushAndSealMemory(ctx context.Context) {
 		}
 	}
 	sessionID := strings.TrimSpace(e.SessionID)
-	if sessionID == "" && e.LastState != nil {
-		sessionID = strings.TrimSpace(e.LastState.MemorySessionID)
+	if sessionID == "" && e.StateSnapshot() != nil {
+		sessionID = strings.TrimSpace(e.StateSnapshot().MemorySessionID)
 	}
 	if sessionID == "" {
 		return

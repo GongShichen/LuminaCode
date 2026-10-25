@@ -3,13 +3,17 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
 	"strings"
+	"sync"
 	"time"
 
 	"LuminaCode/agentContext"
 	"LuminaCode/api"
 	"LuminaCode/config"
+	"LuminaCode/harness"
 	"LuminaCode/memory"
+	"LuminaCode/security"
 	"LuminaCode/skills"
 	coretools "LuminaCode/tools"
 )
@@ -26,6 +30,8 @@ const (
 var truncatedStopReasons = stringSet("max_tokens", "length", "token_limit")
 
 type SubAgentSessionState struct {
+	Runtime                *AgentRuntime
+	draft                  *AgentState
 	Messages               []map[string]any
 	SystemPrompt           string
 	SurfacedMemoryIDs      map[string]struct{}
@@ -49,16 +55,19 @@ type SubAgent struct {
 	Config            config.Config
 	Registry          *coretools.ToolRegistry
 	Definition        AgentDef
-	ParentState       *AgentState
+	Permissions       *security.PermissionState
+	Runtime           *AgentRuntime
 	Model             string
 	AgentType         string
 	ExtraContext      coretools.ExecutionContext
 	ThinkingBudget    *int
 	MaxTurns          int
 	Aborted           bool
+	abortMu           sync.RWMutex
 	TotalInputTokens  int
 	TotalOutputTokens int
 	TimeoutSeconds    int
+	scopeID           string
 }
 
 func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition AgentDef, parentState *AgentState, modelOverride, agentType string, extraContext coretools.ExecutionContext, thinkingBudgetTokens ...*int) *SubAgent {
@@ -81,11 +90,22 @@ func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = DefaultSubagentTimeoutSeconds
 	}
-	return &SubAgent{Config: cfg, Registry: registry, Definition: definition, ParentState: parentState, Model: model, AgentType: agentType, ExtraContext: extraContext, ThinkingBudget: thinkingBudget, MaxTurns: maxTurns, TimeoutSeconds: timeoutSeconds}
+	return &SubAgent{Config: cfg, Registry: registry, Definition: definition, Permissions: ClonePermissionState(func() *security.PermissionState {
+		if parentState != nil {
+			return parentState.PermissionState
+		}
+		return nil
+	}()), Model: model, AgentType: agentType, ExtraContext: extraContext, ThinkingBudget: thinkingBudget, MaxTurns: maxTurns, TimeoutSeconds: timeoutSeconds, scopeID: "subagent:" + uuid.NewString()}
 }
 
 func (s *SubAgent) Abort() {
+	s.abortMu.Lock()
 	s.Aborted = true
+	runtime := s.Runtime
+	s.abortMu.Unlock()
+	if runtime != nil {
+		runtime.Abort()
+	}
 }
 
 func (s *SubAgent) Run(ctx context.Context, prompt string) (string, error) {
@@ -123,7 +143,7 @@ func (s *SubAgent) createSessionState(ctx context.Context, prompt string) *SubAg
 		Messages:          messages,
 		SystemPrompt:      s.buildSystemPrompt(),
 		SurfacedMemoryIDs: memory.RecalledMemoryIDs(messages),
-		ScopeID:           stringFromContext(s.ExtraContext, "scope_id", ""),
+		ScopeID:           stringFromContext(s.ExtraContext, "scope_id", s.scopeID),
 		CurrentTaskID:     stringFromContext(s.ExtraContext, "current_task_id", ""),
 		AbortCheck:        abortCheck,
 	}
@@ -139,17 +159,55 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 	if sessionState.SurfacedMemoryIDs == nil {
 		sessionState.SurfacedMemoryIDs = map[string]struct{}{}
 	}
+	if sessionState.Runtime == nil {
+		initial := NewAgentState()
+		initial.Messages = sessionState.Messages
+		initial.SystemPrompt = sessionState.SystemPrompt
+		initial.PermissionState = ClonePermissionState(s.Permissions)
+		initial.MemorySessionID = s.sessionIDForMemoryUse()
+		initial.MemoryAgentID = firstNonEmptyString(sessionState.ScopeID, s.AgentType)
+		initial.MemoryAgentType = s.AgentType
+		sessionState.Runtime = NewAgentRuntime(s.Config, &initial)
+		if registry, ok := s.ExtraContext["_session_runtime"].(*SessionRuntime); ok {
+			registry.Register(initial.MemoryAgentID, sessionState.Runtime)
+		}
+		if store, ok := s.ExtraContext["_runtime_store"].(harness.EventStore); ok {
+			sessionState.Runtime.BindStore(store, firstNonEmptyString(sessionState.ScopeID, initial.MemoryAgentID))
+		}
+	}
+	s.abortMu.Lock()
+	s.Runtime = sessionState.Runtime
+	s.abortMu.Unlock()
+	runCtx, draft, beginErr := s.Runtime.Begin(ctx)
+	if beginErr != nil {
+		return SubAgentRequestResult{FinalText: beginErr.Error()}
+	}
+	ctx = runCtx
+	sessionState.draft = draft
+	// Run-scoped hints expire between reusable-worker requests. New inline hints
+	// remain in sessionState.Messages and are collected into this run below.
+	draft.ContextSnapshot.Attachments = nil
+	defer s.Runtime.End(draft.generation)
+	defer func() {
+		draft.Messages = sessionState.Messages
+		draft.SystemPrompt = sessionState.SystemPrompt
+		draft.TotalInputTokens = sessionState.TotalInputTokens
+		draft.TotalOutputTokens = sessionState.TotalOutputTokens
+		_ = s.Runtime.Commit(context.WithoutCancel(ctx), draft)
+	}()
 	messages := sessionState.Messages
 	systemPrompt := sessionState.SystemPrompt
 	continuationRetries := 0
 	shouldDrainNotifications := true
 	fullText := ""
 
+	reactiveRetries := 0
+requestLoop:
 	for turn := 0; turn < s.MaxTurns; turn++ {
 		if ctx.Err() != nil {
 			return s.contextStopResult(sessionState, fullText, ctx.Err())
 		}
-		if s.Aborted || sessionState.AbortCheck() {
+		if s.aborted() || sessionState.AbortCheck() {
 			return SubAgentRequestResult{
 				FinalText:         "Sub-agent aborted by user.",
 				TotalInputTokens:  sessionState.TotalInputTokens,
@@ -158,10 +216,12 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 		}
 		if shouldDrainNotifications {
 			s.drainPendingNotifications(sessionState)
+			messages = sessionState.Messages
 		}
 		shouldDrainNotifications = true
 
-		runtime := skills.CollectInlineSkillRuntime(messages)
+		draft.Messages = messages
+		runtime := skills.CollectInlineSkillRuntime(contextSkillMessages(draft))
 		activeRegistry := s.Registry
 		if runtime.HasAllowedTools {
 			allow := map[string]struct{}{}
@@ -183,6 +243,40 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 			}
 		}
 		toolSchemas := activeRegistry.GetAPISchemas()
+		draft.Messages = messages
+		draft.TotalInputTokens = sessionState.TotalInputTokens
+		draft.TotalOutputTokens = sessionState.TotalOutputTokens
+		draft.SystemPrompt = systemPrompt
+		if err := s.Runtime.Commit(ctx, draft); err != nil {
+			return SubAgentRequestResult{FinalText: err.Error()}
+		}
+		cfg := s.Config
+		cfg.APIModel = model
+		s.Runtime.Context.Configure(cfg)
+		prepared, prepareErr := s.Runtime.Context.Build(ctx, agentContext.BuildInput{SystemPrompt: systemPrompt, ToolSchemas: toolSchemas, Evidence: s.Runtime.Snapshot().Transcript, Normalize: prepareSubagentAPIMessages})
+		if prepared.HistoryReplaced {
+			systemPrompt = s.buildSystemPrompt()
+			sessionState.SystemPrompt = systemPrompt
+			prepared.Next.SystemPrompt = systemPrompt
+			prepared.Compiled.SystemPrompt = systemPrompt
+			prepared.Compiled, prepareErr = s.Runtime.Context.Validate(prepared.Compiled)
+			prepared.Next.Budget = prepared.Compiled.Budget
+		}
+		if ctx.Err() != nil {
+			return s.contextStopResult(sessionState, fullText, ctx.Err())
+		}
+		if err := s.Runtime.CommitContext(ctx, prepared, draft); err != nil {
+			return SubAgentRequestResult{FinalText: err.Error()}
+		}
+		sessionState.TotalInputTokens = draft.TotalInputTokens
+		sessionState.TotalOutputTokens = draft.TotalOutputTokens
+		if prepareErr != nil {
+			return SubAgentRequestResult{FinalText: "Sub-agent context failed: " + prepareErr.Error(), TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens}
+		}
+		messages = draft.Messages
+		sessionState.Messages = messages
+		requestID := uuid.NewString()
+		usageRecorded := false
 		var toolCalls []coretools.ToolCall
 		fullText = ""
 		var thinkingBlocks []map[string]any
@@ -190,8 +284,17 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 		outputTruncated := false
 
 		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(s.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
-		for result := range client.StreamChat(streamCtx, systemPrompt, prepareSubagentAPIMessages(messages), toolSchemas, nil) {
+		for result := range client.StreamChat(streamCtx, systemPrompt, prepared.Compiled.Messages, toolSchemas, nil) {
 			if result.Err != nil {
+				if ctx.Err() == nil && IsPTLErrorMessage(result.Err.Error()) && reactiveRetries < 3 {
+					reactiveRetries++
+					recovery, recoveryErr := s.Runtime.Context.Compact(ctx, agentContext.CompactReactive)
+					if recoveryErr == nil && recovery.Succeeded && s.Runtime.CommitContext(ctx, recovery, draft) == nil {
+						messages = draft.Messages
+						sessionState.Messages = messages
+						continue requestLoop
+					}
+				}
 				if ctx.Err() != nil {
 					return s.contextStopResult(sessionState, fullText, ctx.Err())
 				}
@@ -236,6 +339,14 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 					outputTruncated = true
 				}
 			case "usage":
+				if usageRecorded {
+					continue
+				}
+				usageRecorded = true
+				if draft.UsageRequests == nil {
+					draft.UsageRequests = map[string]bool{}
+				}
+				draft.UsageRequests[requestID] = true
 				sessionState.TotalInputTokens += intFromAny(event["input_tokens"])
 				sessionState.TotalOutputTokens += intFromAny(event["output_tokens"])
 			case "error":
@@ -243,6 +354,15 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 					return s.contextStopResult(sessionState, fullText, ctx.Err())
 				}
 				msg := stringFromAny(event["message"])
+				if IsPTLErrorMessage(msg) && reactiveRetries < 3 {
+					reactiveRetries++
+					recovery, recoveryErr := s.Runtime.Context.Compact(ctx, agentContext.CompactReactive)
+					if recoveryErr == nil && recovery.Succeeded && s.Runtime.CommitContext(ctx, recovery, draft) == nil {
+						messages = draft.Messages
+						sessionState.Messages = messages
+						continue requestLoop
+					}
+				}
 				return SubAgentRequestResult{
 					FinalText:         "Sub-agent error: " + msg,
 					TotalInputTokens:  sessionState.TotalInputTokens,
@@ -373,6 +493,33 @@ func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessi
 	client, err := CreateConfiguredLLMClient(s.Config, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr())
 	if err != nil {
 		return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
+	}
+	if sessionState.Runtime != nil {
+		runCtx, draft, beginErr := sessionState.Runtime.Begin(ctx)
+		if beginErr != nil {
+			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
+		}
+		ctx = runCtx
+		defer sessionState.Runtime.End(draft.generation)
+		draft.Messages = messages
+		draft.SystemPrompt = sessionState.SystemPrompt
+		if err = sessionState.Runtime.Commit(ctx, draft); err != nil {
+			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
+		}
+		prepared, prepareErr := sessionState.Runtime.Context.Build(ctx, agentContext.BuildInput{SystemPrompt: sessionState.SystemPrompt, Normalize: prepareSubagentAPIMessages, Evidence: sessionState.Runtime.Snapshot().Transcript})
+		if prepareErr != nil {
+			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
+		}
+		if err = sessionState.Runtime.CommitContext(ctx, prepared, draft); err != nil {
+			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
+		}
+		messages = prepared.Compiled.Messages
+		defer func() {
+			draft.Messages = sessionState.Messages
+			draft.TotalInputTokens = sessionState.TotalInputTokens
+			draft.TotalOutputTokens = sessionState.TotalOutputTokens
+			_ = sessionState.Runtime.Commit(context.WithoutCancel(ctx), draft)
+		}()
 	}
 	fullText := ""
 	streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(s.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
@@ -539,13 +686,24 @@ func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
 		"web_search_scope":        s.Config.WebSearchCacheScope,
 		"allowed_read_roots":      compactToolRoots(s.Config.CWD, s.Config.ProjectRuntimeDir),
 		"allowed_write_roots":     compactToolRoots(s.Config.CWD, s.Config.ProjectRuntimeDir),
-		"parent_state":            s.ParentState,
+		"agent_services":          s.Runtime,
+		"spawn_permissions":       ClonePermissionState(s.Permissions),
 		"_registry":               s.Registry,
 		"_pending_skill_messages": []map[string]any{},
 	}
 	for key, value := range s.ExtraContext {
 		execCtx[key] = value
 	}
+	scope := stringFromContext(s.ExtraContext, "scope_id", s.scopeID)
+	if s.Runtime != nil {
+		snapshot := s.Runtime.Snapshot()
+		scope = firstNonEmptyString(snapshot.Identity.AgentID, scope)
+		execCtx["agent_services"] = s.Runtime.Services(snapshot.Generation)
+		execCtx["spawn_permissions"] = ClonePermissionState(snapshot.Permissions.Policy)
+	}
+	execCtx["scope_id"] = scope
+	execCtx["_agent_id"] = scope
+	execCtx["_skill_agent_scope"] = scope
 	if wt, _ := s.ExtraContext["worktree_cwd"].(string); wt != "" {
 		execCtx["cwd"] = wt
 	}
@@ -584,3 +742,5 @@ func prepareSubagentAPIMessages(messages []map[string]any) []map[string]any {
 	}
 	return cleaned
 }
+
+func (s *SubAgent) aborted() bool { s.abortMu.RLock(); defer s.abortMu.RUnlock(); return s.Aborted }

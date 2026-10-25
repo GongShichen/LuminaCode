@@ -40,7 +40,7 @@ Read carefully: $ARGUMENTS
 	state := agent.NewAgentState()
 
 	var events []agent.StreamEvent
-	for event := range engine.SubmitMessage(context.Background(), "/reader target", &state, "session-1") {
+	for event := range engine.SubmitMessageWithState(context.Background(), "/reader target", &state, "session-1") {
 		events = append(events, event)
 	}
 	for _, event := range events {
@@ -48,14 +48,22 @@ Read carefully: $ARGUMENTS
 			t.Fatalf("slash skill should not be treated as unknown: %#v", events)
 		}
 	}
-	if len(state.Messages) < 2 {
+	messages := append([]map[string]any{}, state.Messages...)
+	if state.ContextSnapshot != nil {
+		for _, attachment := range state.ContextSnapshot.Attachments {
+			if attachment.Source == skills.SkillInlineSource {
+				messages = append([]map[string]any{attachment.Message.Map()}, messages...)
+			}
+		}
+	}
+	if len(messages) < 2 {
 		t.Fatalf("expected skill context and normalized user turn, got %#v", state.Messages)
 	}
-	metadata, _ := state.Messages[0]["metadata"].(map[string]any)
+	metadata, _ := messages[0]["metadata"].(map[string]any)
 	if metadata["source"] != skills.SkillInlineSource {
 		t.Fatalf("expected inline skill context to survive commit, got %#v", state.Messages)
 	}
-	content := state.Messages[0]["content"].([]map[string]any)
+	content := messages[0]["content"].([]map[string]any)
 	if !strings.Contains(content[0]["text"].(string), "Read carefully: target") {
 		t.Fatalf("expected rendered skill prompt, got %#v", content)
 	}
@@ -122,7 +130,7 @@ func TestCoreQueryLoopInlineSkillIntegerLikeEffortSetsThinkingBudgetLikePython(t
 	}
 
 	var sawDone bool
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		if event.Type == "done" {
 			sawDone = true
 		}
@@ -160,7 +168,7 @@ Inline output: !` + "`printf shell-ok`" + `
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2_000_000_000)
 	defer cancel()
-	events := engine.SubmitMessage(ctx, "/sheller", &state, "session-shell")
+	events := engine.SubmitMessageWithState(ctx, "/sheller", &state, "session-shell")
 	first, ok := <-events
 	if !ok {
 		t.Fatal("expected permission event before skill execution finished")
@@ -204,7 +212,7 @@ func TestQueryEngineManualCompactUsesPythonPipeline(t *testing.T) {
 		}},
 	}
 
-	compacted, stats := engine.Compact(&state)
+	compacted, stats := engine.CompactWithState(&state)
 	if stats.LevelReached < 1 {
 		t.Fatalf("expected manual compact to reach at least L1, got %#v", stats)
 	}
@@ -236,7 +244,7 @@ Lumina identity.
 	state := agent.NewAgentState()
 	state.SystemPrompt = "stale prompt"
 
-	for range engine.SubmitMessage(context.Background(), "hello", &state, "session-memory-prompt") {
+	for range engine.SubmitMessageWithState(context.Background(), "hello", &state, "session-memory-prompt") {
 	}
 
 	if !strings.Contains(state.SystemPrompt, "Lumina identity.") ||
@@ -294,7 +302,7 @@ func TestCoreQueryLoopPrefetchesRecalledMemoriesBeforeFirstRequestLikePython(t *
 	state.Messages = []map[string]any{
 		{"role": "user", "content": []map[string]any{{"type": "text", "text": state.LastQuery}}},
 	}
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 
 	if requestCount.Load() != 1 {
@@ -365,7 +373,7 @@ func TestCoreQueryLoopFollowupRecallAppendsAfterToolResultsLikePython(t *testing
 	state.Messages = []map[string]any{
 		{"role": "user", "content": []map[string]any{{"type": "text", "text": state.LastQuery}}},
 	}
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 
 	if streamCalls.Load() != 2 {

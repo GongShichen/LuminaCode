@@ -2,6 +2,7 @@ package team
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -79,9 +80,10 @@ func (m *Manager) RestorePersistedForParentFor(tenantID, parentSessionID, cwd st
 			session.activity[row.AgentID] = row
 		}
 		for id, runtime := range session.agents {
-			var state agent.AgentState
-			if readJSON(filepath.Join(root, "agents", id, "state.json"), &state) {
-				runtime.State = &state
+			if state, err := readAgentState(filepath.Join(root, "agents", id, "state.json")); err == nil {
+				if err = runtime.Engine.Restore(state); err != nil {
+					session.appendRecovery("Unable to restore agent state: " + err.Error())
+				}
 			}
 		}
 		m.mu.Lock()
@@ -159,9 +161,14 @@ func (m *Manager) RestoreRuntimeCheckpointsWithIdentity(identity cluster.Runtime
 			session.activity[row.AgentID] = row
 		}
 		for id, runtime := range session.agents {
-			if state, ok := checkpoint.AgentStates[id]; ok {
-				stateCopy := state
-				runtime.State = &stateCopy
+			if snapshot, ok := checkpoint.AgentSnapshots[id]; ok {
+				if err := runtime.Engine.CoreEngine.AgentRuntime.Restore(snapshot); err != nil {
+					session.appendRecovery("Unable to restore agent snapshot: " + err.Error())
+				}
+			} else if state, ok := checkpoint.AgentStates[id]; ok {
+				if err := runtime.Engine.Restore(&state); err != nil {
+					session.appendRecovery("Unable to restore legacy agent state: " + err.Error())
+				}
 			}
 		}
 		m.mu.Lock()
@@ -245,4 +252,19 @@ func readJSONL[T any](path string) []T {
 		}
 	}
 	return out
+}
+
+func readAgentState(path string) (*agent.AgentState, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var fields map[string]any
+	if err = decoder.Decode(&fields); err != nil {
+		return nil, err
+	}
+	state, err := agent.GetAgentStateFromMap(fields)
+	return &state, err
 }

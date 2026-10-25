@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"LuminaCode/config"
+	"LuminaCode/security"
 	coretools "LuminaCode/tools"
 
 	"github.com/google/uuid"
@@ -123,7 +124,7 @@ type workerSpec struct {
 	cfg            config.Config
 	registry       *coretools.ToolRegistry
 	definition     AgentDef
-	parentState    *AgentState
+	permissions    *security.PermissionState
 	agentType      string
 	modelOverride  string
 	extraContext   coretools.ExecutionContext
@@ -329,7 +330,7 @@ func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, 
 	rt.registerRecordLocked(record, true)
 	rt.workers[taskID] = cancel
 	rt.workerSpecs[taskID] = workerSpec{
-		cfg: cfg, registry: registry, definition: definition, parentState: &workerState,
+		cfg: cfg, registry: registry, definition: definition, permissions: ClonePermissionState(workerState.PermissionState),
 		agentType: agentType, modelOverride: modelOverride, extraContext: workerExtraContext,
 	}
 	result := *record
@@ -410,7 +411,9 @@ func (rt *AgentTaskRuntime) runWorker(ctx context.Context, taskID, prompt string
 	spec := rt.workerSpecs[taskID]
 	rt.mu.Unlock()
 	start := time.Now()
-	sub := NewSubAgent(spec.cfg, spec.registry, spec.definition, spec.parentState, spec.modelOverride, spec.agentType, spec.extraContext)
+	initial := NewAgentState()
+	initial.PermissionState = ClonePermissionState(spec.permissions)
+	sub := NewSubAgent(spec.cfg, spec.registry, spec.definition, &initial, spec.modelOverride, spec.agentType, spec.extraContext)
 	sessionState := spec.sessionState
 	if sessionState == nil {
 		sessionState = sub.createSessionState(ctx, prompt)

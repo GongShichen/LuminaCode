@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"LuminaCode/agent"
+	"LuminaCode/agentContext"
 	luminacli "LuminaCode/cli"
 	"LuminaCode/cluster"
 	"LuminaCode/config"
 	"LuminaCode/harness"
 	"LuminaCode/maintenance"
-	"LuminaCode/security"
 	"LuminaCode/session"
 	luminateam "LuminaCode/team"
 	luminaui "LuminaCode/ui"
@@ -306,6 +306,7 @@ type SessionController struct {
 	commandMu    sync.Mutex
 	submitMu     sync.Mutex
 	submitCancel context.CancelFunc
+	submitDone   chan struct{}
 
 	busy atomic.Bool
 	seq  atomic.Int64
@@ -331,11 +332,19 @@ func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cf
 		journal:    journal,
 		state:      state,
 	}
+	if engine != nil && engine.CoreEngine != nil {
+		if state != nil {
+			_ = engine.Restore(state)
+		}
+		engine.CoreEngine.AgentRuntime.BindStore(journal, sessionID)
+		engine.CoreEngine.SessionID = sessionID
+	}
 	controller.bridge = NewWSRendererBridge(identity.TenantID, sessionID, emit, controller.nextSeq)
 	controller.ui = luminaui.NewUiRuntime(engine, controller.bridge)
 	if engine != nil && engine.CoreEngine != nil {
-		engine.CoreEngine.StateObserver = controller.observeState
 		engine.CoreEngine.RuntimeEvents = agent.NewRuntimeEventRecorder(journal, sessionID)
+		engine.CoreEngine.RuntimeEvents.BindRuntime(engine.CoreEngine.AgentRuntime)
+		_ = engine.CoreEngine.SessionRuntime.RestoreChildren(context.Background(), journal, cfg, sessionID)
 		engine.CoreEngine.RuntimeEvents.SetPublisher(controller.bridge.emitRuntimeEvents)
 		engine.CoreEngine.TaskRuntime.SetTaskEventObserver(engine.CoreEngine.RuntimeEvents)
 	}
@@ -356,9 +365,9 @@ func (c *SessionController) RuntimeIdentity() cluster.RuntimeIdentity {
 
 func (c *SessionController) RuntimeConfig() config.Config {
 	c.stateMu.Lock()
-	state := c.state
-	c.stateMu.Unlock()
+	state := c.engine.CoreEngine.StateSnapshot()
 	cfg := c.cfg
+	c.stateMu.Unlock()
 	if state != nil && state.YoloEnabled() {
 		cfg.Yolo = true
 	}
@@ -366,6 +375,10 @@ func (c *SessionController) RuntimeConfig() config.Config {
 }
 
 func (c *SessionController) Mount() {
+	if c.busy.Load() {
+		c.bridge.Mount(c.ui.SnapshotFrame())
+		return
+	}
 	c.stateMu.Lock()
 	state := c.state
 	c.stateMu.Unlock()
@@ -381,7 +394,7 @@ func (c *SessionController) Snapshot() SessionSnapshot {
 	}
 	return SessionSnapshot{
 		SessionID:         c.id,
-		Frame:             c.ui.Frame,
+		Frame:             c.ui.SnapshotFrame(),
 		Busy:              c.busy.Load(),
 		Model:             c.cfg.APIModel,
 		CWD:               c.cfg.CWD,
@@ -579,6 +592,8 @@ func (c *SessionController) submit(ctx context.Context, input string, beforeStar
 	runCtx, cancel := context.WithCancel(ctx)
 	c.submitMu.Lock()
 	c.submitCancel = cancel
+	done := make(chan struct{})
+	c.submitDone = done
 	c.submitMu.Unlock()
 	go func() {
 		defer func() {
@@ -590,6 +605,7 @@ func (c *SessionController) submit(ctx context.Context, input string, beforeStar
 			c.submitCancel = nil
 			c.submitMu.Unlock()
 			c.busy.Store(false)
+			close(done)
 		}()
 		c.stateMu.Lock()
 		state := c.state
@@ -598,7 +614,7 @@ func (c *SessionController) submit(ctx context.Context, input string, beforeStar
 		c.ui.RunSubmitMessage(runCtx, input, state, c.id)
 		if c.engine.CoreEngine != nil {
 			c.stateMu.Lock()
-			c.state = c.engine.CoreEngine.LastState
+			c.state = c.engine.CoreEngine.StateSnapshot()
 			c.stateMu.Unlock()
 		}
 		if err := c.Save(); err != nil {
@@ -635,64 +651,47 @@ func (c *SessionController) Shutdown() {
 	}
 }
 
-func (c *SessionController) Clear() {
+func (c *SessionController) Clear() error {
 	c.Abort()
-	c.engine.Reset()
-	fresh := agent.NewAgentState()
-	c.stateMu.Lock()
-	c.state = &fresh
-	c.stateMu.Unlock()
-	if c.engine != nil && c.engine.CoreEngine != nil {
-		c.engine.CoreEngine.LastState = &fresh
+	if err := c.engine.Reset(context.Background()); err != nil {
+		return err
 	}
-	c.ui.MountStateSnapshot(nil)
-	_ = c.Save()
-}
-
-func (c *SessionController) Save() error {
-	c.stateMu.Lock()
-	state := c.state
-	c.stateMu.Unlock()
-	if state == nil {
-		return nil
+	c.submitMu.Lock()
+	done := c.submitDone
+	c.submitMu.Unlock()
+	if done != nil {
+		<-done
 	}
-	return c.persistStateSnapshot(state)
-}
-
-func (c *SessionController) observeState(state *agent.AgentState) {
-	if state == nil {
-		return
-	}
+	state := c.engine.CoreEngine.StateSnapshot()
 	c.stateMu.Lock()
 	c.state = state
 	c.stateMu.Unlock()
-	_ = c.persistStateSnapshot(state)
+	c.ui.MountStateSnapshot(state)
+	return c.Save()
 }
 
-func (c *SessionController) persistStateSnapshot(state *agent.AgentState) error {
-	var recovery map[string]any
-	var tasks []map[string]any
-	if c.engine.CoreEngine != nil {
-		recovery = c.engine.CoreEngine.ExportSkillRecoverySnapshot()
-		if c.engine.CoreEngine.TaskRuntime != nil {
-			tasks = c.engine.CoreEngine.TaskRuntime.ExportSnapshot()
-		}
-	}
-	if c.journal == nil {
+func (c *SessionController) Save() error {
+	if c.engine == nil || c.journal == nil {
 		return errors.New("runtime journal is unavailable")
 	}
-	if err := session.AppendRuntimeState(context.Background(), c.journal, state, recovery, tasks); err != nil {
+	snapshot, err := c.engine.Checkpoint(context.Background())
+	if err != nil {
 		return err
 	}
-	return c.repository.UpdateMetaProjection(context.Background(), c.tenantID, c.id, c.fenceToken,
-		len(state.Messages), state.TurnCount)
+	return c.repository.UpdateMetaProjection(context.Background(), c.tenantID, c.id, c.fenceToken, len(snapshot.Transcript), snapshot.Progress.TurnCount)
 }
 
 func (c *SessionController) Compact() map[string]any {
 	c.stateMu.Lock()
 	state := c.state
 	c.stateMu.Unlock()
-	compressed, stats := c.engine.Compact(state)
+	_ = state
+	result, compactErr := c.engine.Compact(context.Background(), agentContext.CompactManual)
+	if compactErr != nil {
+		return map[string]any{"error": compactErr.Error(), "level_reached": result.Stats.LevelReached}
+	}
+	compressed := c.engine.Snapshot().LegacyState()
+	stats := result.Stats
 	c.stateMu.Lock()
 	c.state = &compressed
 	c.stateMu.Unlock()
@@ -701,17 +700,19 @@ func (c *SessionController) Compact() map[string]any {
 	payload, _ := json.Marshal(stats)
 	out := map[string]any{}
 	_ = json.Unmarshal(payload, &out)
+	if compactErr != nil {
+		out["error"] = compactErr.Error()
+	}
 	return out
 }
 
 func (c *SessionController) Tokens() map[string]any {
-	c.stateMu.Lock()
-	state := c.state
-	c.stateMu.Unlock()
+	state := c.engine.CoreEngine.StateSnapshot()
 	input, output := 0, 0
 	turns := 0
 	if state != nil {
-		input, output = state.TokenTotals()
+		usage := c.engine.CoreEngine.SessionRuntime.Usage()
+		input, output = usage.InputTokens, usage.OutputTokens
 		turns = state.TurnCountValue()
 	}
 	return map[string]any{
@@ -731,27 +732,19 @@ func (c *SessionController) SetYolo(enabled bool) map[string]any {
 }
 
 func (c *SessionController) setYolo(enabled bool) map[string]any {
+	if err := c.engine.CoreEngine.AgentRuntime.SetYolo(context.Background(), enabled); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	state := c.engine.CoreEngine.StateSnapshot()
 	c.stateMu.Lock()
-	state := c.state
-	if state == nil {
-		s := agent.NewAgentState()
-		state = &s
-		c.state = state
-	}
-	if state.PermissionState == nil {
-		state.PermissionState = security.DefaultPermissionState()
-	}
-	state.PermissionState.YoloMode = enabled
+	c.state = state
 	c.cfg.Yolo = enabled
-	if c.engine != nil {
-		c.engine.Config.Yolo = enabled
-		if c.engine.CoreEngine != nil {
-			c.engine.CoreEngine.Config.Yolo = enabled
-		}
-	}
+
 	c.stateMu.Unlock()
 	_ = c.Save()
-	c.ui.MountStateSnapshot(state)
+	if !c.busy.Load() {
+		c.ui.MountStateSnapshot(state)
+	}
 	return map[string]any{"yolo": enabled}
 }
 

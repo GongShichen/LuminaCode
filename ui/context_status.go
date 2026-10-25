@@ -20,6 +20,9 @@ func BuildContextWindowSnapshot(cfg config.Config, state *agent.AgentState) Cont
 	used := 0
 	if state != nil {
 		used = agentContext.TokenCountWithEstimation(state.Messages)
+		if state.ContextSnapshot != nil && state.ContextSnapshot.Budget.Limit > 0 {
+			return ContextWindowSnapshot{ModelName: cfg.APIModel, UsedTokens: state.ContextSnapshot.Budget.Total, LimitTokens: state.ContextSnapshot.Budget.Limit}
+		}
 		if state.SystemPrompt != "" {
 			used += agentContext.RoughEstimate(state.SystemPrompt)
 		}

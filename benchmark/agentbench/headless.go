@@ -47,7 +47,9 @@ func (r *HeadlessAgentRunner) RunAt(ctx context.Context, cfg config.Config, prom
 	var final strings.Builder
 	var sawText bool
 	var sawTool bool
-	for event := range engine.SubmitMessage(ctx, prompt, &state, sessionID) {
+	_ = engine.Restore(&state)
+	engine.CoreEngine.SessionID = sessionID
+	for event := range engine.SubmitMessage(ctx, prompt) {
 		result.Events = append(result.Events, event)
 		switch event.Type {
 		case "text":

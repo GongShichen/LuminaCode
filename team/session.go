@@ -23,7 +23,6 @@ import (
 	"LuminaCode/apppaths"
 	"LuminaCode/cluster"
 	"LuminaCode/config"
-	"LuminaCode/security"
 	coretools "LuminaCode/tools"
 
 	"github.com/google/uuid"
@@ -287,7 +286,6 @@ type Session struct {
 type AgentRuntime struct {
 	Spec   TeamAgentSpec
 	Engine *agent.QueryEngine
-	State  *agent.AgentState
 	mu     sync.Mutex
 	busy   bool
 }
@@ -429,14 +427,7 @@ func (s *Session) newAgentRuntime(spec TeamAgentSpec) *AgentRuntime {
 	if s.isGateAgent(spec.Name) {
 		engine.CoreEngine.Registry.Register(NewSubmitGateVerdictTool(s, spec.Name))
 	}
-	state := agent.NewAgentState()
-	if cfg.Yolo {
-		if state.PermissionState == nil {
-			state.PermissionState = security.DefaultPermissionState()
-		}
-		state.PermissionState.YoloMode = true
-	}
-	return &AgentRuntime{Spec: spec, Engine: engine, State: &state}
+	return &AgentRuntime{Spec: spec, Engine: engine}
 }
 
 func (s *Session) refreshAgentSystemPrompts() {
@@ -481,20 +472,16 @@ func (s *Session) materializeAgentSystemPrompt(spec TeamAgentSpec) string {
 func (s *Session) ApplyRuntimeConfig(cfg config.Config) {
 	s.mu.Lock()
 	s.Config = cfg
-	s.mu.Unlock()
+	runtimes := make([]*AgentRuntime, 0, len(s.agents))
 	for _, runtime := range s.agents {
-		if runtime == nil || runtime.Engine == nil {
-			continue
-		}
-		runtime.Engine.Config.Yolo = cfg.Yolo
-		if runtime.Engine.CoreEngine != nil {
-			runtime.Engine.CoreEngine.Config.Yolo = cfg.Yolo
-		}
-		if runtime.State != nil {
-			if runtime.State.PermissionState == nil {
-				runtime.State.PermissionState = security.DefaultPermissionState()
+		runtimes = append(runtimes, runtime)
+	}
+	s.mu.Unlock()
+	for _, runtime := range runtimes {
+		if runtime != nil && runtime.Engine != nil {
+			if err := runtime.Engine.CoreEngine.AgentRuntime.SetYolo(context.Background(), cfg.Yolo); err != nil {
+				s.appendRecovery("Unable to update agent permission policy: " + err.Error())
 			}
-			runtime.State.PermissionState.YoloMode = cfg.Yolo
 		}
 	}
 	s.appendTimeline("team.runtime_config_updated", map[string]any{"yolo": cfg.Yolo})
@@ -559,10 +546,10 @@ func (s *Session) AgentSkillNames(agentID string) []string {
 
 func (s *Session) AgentYoloEnabled(agentID string) bool {
 	runtime := s.agents[agentID]
-	if runtime == nil || runtime.State == nil {
+	if runtime == nil || runtime.Engine == nil {
 		return false
 	}
-	return runtime.State.YoloEnabled()
+	return runtime.Engine.CoreEngine.AgentRuntime.YoloEnabled()
 }
 
 func (s *Session) Submit(ctx context.Context, input string) error {
@@ -1179,7 +1166,9 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 	if strings.TrimSpace(agentSessionID) == "" {
 		agentSessionID = agentID
 	}
-	for event := range runtime.Engine.SubmitMessage(ctx, agentPrompt, runtime.State, agentSessionID, agentID) {
+	runtime.Engine.CoreEngine.SessionID = agentSessionID
+	runtime.Engine.CoreEngine.AgentID = agentID
+	for event := range runtime.Engine.SubmitMessage(ctx, agentPrompt) {
 		switch event.Type {
 		case "text":
 			text.WriteString(event.Content)
@@ -1220,9 +1209,7 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 			runtime.Engine.ResolvePermission(decision, toolNameFromPermissionEvent(event))
 		}
 	}
-	if runtime.Engine.CoreEngine != nil && runtime.Engine.CoreEngine.LastState != nil {
-		runtime.State = runtime.Engine.CoreEngine.LastState
-	}
+
 	if ctx.Err() != nil {
 		s.setActivity(agentID, "interrupted", "interrupted by user", taskID)
 		s.persist()
@@ -3062,14 +3049,16 @@ func (s *Session) ExportRuntimeCheckpoint() RuntimeCheckpoint {
 	}
 	s.mu.Unlock()
 	states := make(map[string]agent.AgentState, len(agents))
+	typedStates := make(map[string]agent.AgentSnapshot, len(agents))
 	for id, runtime := range agents {
-		if runtime != nil {
-			states[id] = persistableAgentState(runtime.State)
+		if runtime != nil && runtime.Engine != nil {
+			typedStates[id] = runtime.Engine.Snapshot()
+			states[id] = typedStates[id].LegacyState()
 		}
 	}
 	return RuntimeCheckpoint{
 		Version: 1, ParentSessionID: s.ParentSessionID, TeamName: s.Spec.Name,
-		Snapshot: snapshot, Dialogue: dialogue, Timeline: timeline, Artifacts: artifacts, AgentStates: states,
+		Snapshot: snapshot, Dialogue: dialogue, Timeline: timeline, Artifacts: artifacts, AgentStates: states, AgentSnapshots: typedStates,
 	}
 }
 
@@ -3740,9 +3729,9 @@ func (s *Session) persist() {
 	for id, runtime := range agents {
 		dir := filepath.Join(s.rootDir, "agents", id)
 		_ = os.MkdirAll(dir, 0o700)
-		state := persistableAgentState(runtime.State)
-		writeJSON(filepath.Join(dir, "state.json"), state)
-		writeJSONL(filepath.Join(dir, "transcript.jsonl"), state.Messages)
+		state := persistableAgentState(runtime.Engine.CoreEngine.StateSnapshot())
+		writeJSON(filepath.Join(dir, "state.json"), runtime.Engine.Snapshot())
+		writeJSONL(filepath.Join(dir, "transcript.jsonl"), state.Transcript)
 	}
 }
 
@@ -3828,14 +3817,7 @@ func appendTextFile(path, text string) {
 }
 
 func persistableAgentState(state *agent.AgentState) agent.AgentState {
-	if state == nil {
-		empty := agent.NewAgentState()
-		return empty
-	}
-	clone := *state
-	clone.CacheBreakPoints = nil
-	clone.Messages = persistableMessages(state.Messages)
-	return clone
+	return agent.SnapshotFromState(state).LegacyState()
 }
 
 func persistableMessages(messages []map[string]any) []map[string]any {

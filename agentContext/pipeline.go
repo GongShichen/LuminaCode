@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"strings"
 
 	"github.com/mohae/deepcopy"
@@ -152,7 +151,7 @@ func (p *ContextPipeline) Compress(
 	stats.CollapsedRegions = regions
 	projectedCurrent := ProjectCollapsedView(current, regions)
 	stats.CollapseCount = MaxInt(0, len(current)-len(projectedCurrent))
-	if suppressAuto {
+	if suppressAuto && TokenCountWithEstimation(projectedCurrent) <= softLimit {
 		stats.LevelReached = 3
 		stats.CollapsedTokensFreed = postL2Tokens - TokenCountWithEstimation(projectedCurrent)
 		stats.TokensAfter = TokenCountWithEstimation(projectedCurrent)
@@ -212,76 +211,35 @@ func (p *ContextPipeline) Compress(
 	return current, stats
 }
 
+type compressionState interface {
+	ContextFailures() int
+	SetContextFailures(int)
+	ContextTaskBudget() *int
+}
+
 func getIntField(state any, field string, fallback int) int {
-	if value, ok := getIntFieldOK(state, field); ok {
-		return value
+	v, ok := getIntFieldOK(state, field)
+	if ok {
+		return v
 	}
 	return fallback
 }
-
 func getIntFieldOK(state any, field string) (int, bool) {
-	value := reflectValue(state)
-	if !value.IsValid() {
-		return 0, false
+	if s, ok := state.(compressionState); ok && field == "ConsecutiveAutoCompactFailures" {
+		return s.ContextFailures(), true
 	}
-	fieldValue := value.FieldByName(field)
-	if !fieldValue.IsValid() {
-		return 0, false
-	}
-	switch fieldValue.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return int(fieldValue.Int()), true
-	default:
-		return 0, false
-	}
+	return 0, false
 }
-
 func setIntField(state any, field string, value int) {
-	target := reflectValue(state)
-	if !target.IsValid() {
-		return
-	}
-	fieldValue := target.FieldByName(field)
-	if !fieldValue.IsValid() || !fieldValue.CanSet() {
-		return
-	}
-	switch fieldValue.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		fieldValue.SetInt(int64(value))
+	if s, ok := state.(compressionState); ok && field == "ConsecutiveAutoCompactFailures" {
+		s.SetContextFailures(value)
 	}
 }
-
 func getIntPointerField(state any, field string) *int {
-	value := reflectValue(state)
-	if !value.IsValid() {
-		return nil
+	if s, ok := state.(compressionState); ok && field == "TaskBudgetRemaining" {
+		return s.ContextTaskBudget()
 	}
-	fieldValue := value.FieldByName(field)
-	if !fieldValue.IsValid() || fieldValue.Kind() != reflect.Ptr || fieldValue.IsNil() {
-		return nil
-	}
-	if fieldValue.Type().Elem().Kind() != reflect.Int {
-		return nil
-	}
-	ptr, _ := fieldValue.Interface().(*int)
-	return ptr
-}
-
-func reflectValue(state any) reflect.Value {
-	if state == nil {
-		return reflect.Value{}
-	}
-	value := reflect.ValueOf(state)
-	if value.Kind() == reflect.Ptr {
-		if value.IsNil() {
-			return reflect.Value{}
-		}
-		value = value.Elem()
-	}
-	if value.Kind() != reflect.Struct {
-		return reflect.Value{}
-	}
-	return value
+	return nil
 }
 
 func EstimateTokens(messages []map[string]any) int {
@@ -321,8 +279,7 @@ func (p *ContextPipeline) autoCompact(
 	ch := client.StreamChat(ctx, compactSystem, msgs, []map[string]any{}, nil)
 	for item := range ch {
 		if item.Err != nil {
-			slog.Warn("L4 auto compact API error", "error", item.Err)
-			break
+			return "", item.Err
 		}
 
 		eventType, _ := item.Event["type"].(string)
@@ -334,11 +291,13 @@ func (p *ContextPipeline) autoCompact(
 
 		case "error":
 			message, _ := item.Event["message"].(string)
-			slog.Warn("L4 auto compact API error", "message", message)
-			break
+			return "", fmt.Errorf("compactor stream: %s", message)
 		}
 	}
 
+	if strings.TrimSpace(fullText.String()) == "" {
+		return "", ErrEmptySummary
+	}
 	return strings.TrimSpace(fullText.String()), nil
 }
 

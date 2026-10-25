@@ -66,12 +66,7 @@ func ShouldCommitFinalTextAfterStreamError(turn *ModelTurn) bool {
 		strings.TrimSpace(turn.FullText) != ""
 }
 
-type RuntimeCacheEditState struct {
-	Pending          []api.CacheEdit
-	Pinned           []api.CacheEdit
-	ConsumedInFlight []api.CacheEdit
-	CreatedAt        float64
-}
+type RuntimeCacheEditState = agentContext.CacheState
 
 type CoreExecutionEngine struct {
 	Config config.Config
@@ -79,7 +74,8 @@ type CoreExecutionEngine struct {
 	mu                     sync.Mutex
 	aborted                bool
 	Registry               *coretools.ToolRegistry
-	LastState              *AgentState
+	AgentRuntime           *AgentRuntime
+	SessionRuntime         *SessionRuntime
 	permissionFuture       chan permissionDecision
 	skillPermissionCh      chan bool
 	mcpTrustCh             chan bool
@@ -99,18 +95,17 @@ type CoreExecutionEngine struct {
 	skillDiscovery         *skills.SkillDiscovery
 	skillPersistence       *skills.SkillPersistence
 	skillRecoveryReady     map[string]bool
-	l3Regions              []agentContext.CollapsedRegion
-	cacheEditState         RuntimeCacheEditState
-	SessionID              string
-	AgentID                string
-	AgentType              string
-	TeamName               string
-	TeamSessionID          string
-	TeamAgentID            string
-	sessionMemory          *sessionmemory.Manager
-	StateObserver          func(*AgentState)
-	RuntimeEvents          *RuntimeEventRecorder
-	Runtime                *RuntimeAssembly
+
+	SessionID     string
+	AgentID       string
+	AgentType     string
+	TeamName      string
+	TeamSessionID string
+	TeamAgentID   string
+	sessionMemory *sessionmemory.Manager
+	StateObserver func(*AgentState)
+	RuntimeEvents *RuntimeEventRecorder
+	Runtime       *RuntimeAssembly
 }
 
 type permissionDecision struct {
@@ -134,12 +129,15 @@ func newCoreExecutionEngine(cfg config.Config, identity cluster.RuntimeIdentity,
 	memoryEngine memory.Engine, injected bool) *CoreExecutionEngine {
 	e := &CoreExecutionEngine{
 		Config:          cfg,
+		AgentRuntime:    NewAgentRuntime(cfg, nil),
+		SessionRuntime:  NewSessionRuntime(),
 		Registry:        coretools.NewToolRegistry(),
 		TaskRuntime:     NewAgentTaskRuntime(),
 		sessionMemory:   sessionmemory.NewManager(),
 		memoryFactory:   memoryFactory,
 		runtimeIdentity: identity,
 	}
+	e.SessionRuntime.Register("main", e.AgentRuntime)
 	e.RegisterDefaultTools()
 	e.extraction = NewExtractionController(e.Config)
 	if injected {
@@ -218,9 +216,18 @@ func (e *CoreExecutionEngine) runForkSkill(ctx context.Context, skill skills.Ski
 		MaxTurns:       50,
 		PermissionMode: "inherit",
 	}
-	var state *AgentState
-	if typed, ok := parentState.(*AgentState); ok {
-		state = typed
+	state := NewAgentState()
+	switch parent := parentState.(type) {
+	case *security.PermissionState:
+		state.PermissionState = ClonePermissionState(parent)
+	case *AgentState:
+		if parent != nil {
+			state.PermissionState = ClonePermissionState(parent.PermissionState)
+		}
+	default:
+		if policy, ok := extraContext["spawn_permissions"].(*security.PermissionState); ok {
+			state.PermissionState = ClonePermissionState(policy)
+		}
 	}
 	modelOverride := ""
 	if skill.Frontmatter.Model != nil {
@@ -233,7 +240,12 @@ func (e *CoreExecutionEngine) runForkSkill(ctx context.Context, skill skills.Ski
 		extraContext["_memory_engine"] = e.memoryEngineSnapshot()
 	}
 	extraContext["_skill_agent_scope"] = subagentScope
-	sub := NewSubAgent(e.Config, baseRegistry, definition, state, modelOverride, agentName, extraContext, thinkingBudgetTokens)
+	extraContext["scope_id"] = subagentScope
+	extraContext["_session_runtime"] = e.SessionRuntime
+	if e.RuntimeEvents != nil {
+		extraContext["_runtime_store"] = e.RuntimeEvents.EventStore()
+	}
+	sub := NewSubAgent(e.Config, baseRegistry, definition, &state, modelOverride, agentName, extraContext, thinkingBudgetTokens)
 	result, err := sub.Run(ctx, prompt)
 	return result, sub.TotalInputTokens, sub.TotalOutputTokens, err
 }
@@ -264,7 +276,7 @@ func (e *CoreExecutionEngine) maybePromptMCPTrust(ctx context.Context, out chan<
 		e.mcpMu.Unlock()
 		return
 	}
-	if e.Config.Yolo {
+	if e.AgentRuntime.YoloEnabled() {
 		e.mcpMu.Unlock()
 		e.applyMCPTrustDecision(pending, true)
 		return
@@ -344,6 +356,7 @@ func mergeExecutionContext(dst, src coretools.ExecutionContext) {
 }
 
 func (e *CoreExecutionEngine) Abort() {
+	e.AgentRuntime.Abort()
 	e.mu.Lock()
 	e.aborted = true
 	if e.permissionFuture != nil {
@@ -367,7 +380,16 @@ func (e *CoreExecutionEngine) Abort() {
 	e.mu.Unlock()
 }
 
-func (e *CoreExecutionEngine) Reset() {
+func (e *CoreExecutionEngine) Reset(contexts ...context.Context) error {
+	resetCtx := context.Background()
+	if len(contexts) > 0 {
+		resetCtx = contexts[0]
+	}
+	if err := e.AgentRuntime.Reset(resetCtx); err != nil {
+		return err
+	}
+	e.TaskRuntime.Shutdown()
+	e.SessionRuntime.Reset(e.AgentRuntime)
 	e.disconnectMCP(context.Background())
 	if e.extraction != nil {
 		e.extraction.Cancel()
@@ -379,11 +401,10 @@ func (e *CoreExecutionEngine) Reset() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.aborted = false
-	e.LastState = nil
-	e.skillRecoveryReady = map[string]bool{}
-	e.l3Regions = nil
-}
 
+	e.skillRecoveryReady = map[string]bool{}
+	return nil
+}
 func (e *CoreExecutionEngine) Shutdown() {
 	e.disconnectMCP(context.Background())
 	if e.TaskRuntime != nil {
@@ -406,7 +427,6 @@ func (e *CoreExecutionEngine) Shutdown() {
 	e.mcpTrustCh = nil
 	e.skillPermissionQ = nil
 	e.skillRecoveryReady = map[string]bool{}
-	e.l3Regions = nil
 	e.TaskRuntime = NewAgentTaskRuntime()
 }
 
@@ -498,7 +518,7 @@ func (e *CoreExecutionEngine) ResolveMCPTrust(granted bool) {
 	}
 }
 
-func (e *CoreExecutionEngine) QueryLoop(ctx context.Context, state *AgentState) <-chan StreamEvent {
+func (e *CoreExecutionEngine) queryDraftLoop(ctx context.Context, state *AgentState) <-chan StreamEvent {
 	out := make(chan StreamEvent)
 	go func() {
 		defer close(out)
@@ -556,7 +576,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 
 	for {
 		if e.isAborted() {
-			e.LastState = state
+			_ = e.publishDraft(context.WithoutCancel(ctx), state)
 			sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
 			return
 		}
@@ -565,7 +585,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			maxTurns = MaxParentTurns
 		}
 		if state.TurnCount >= maxTurns {
-			e.LastState = state
+			_ = e.publishDraft(context.WithoutCancel(ctx), state)
 			sendStream(ctx, out, NewStreamEvent("error", fmt.Sprintf("Reached maximum turns (%d). The task may be too complex or stuck in a loop. Try breaking it into smaller steps.", maxTurns), nil))
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
 			return
@@ -590,6 +610,10 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			state = result.Value.State
 		}
 
+		if err := e.publishDraft(ctx, state); err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
+			return
+		}
 		inlineRuntime := skills.InlineSkillRuntime{}
 		if e.Runtime != nil {
 			result, err := e.Runtime.Hooks.SkillPreparing.Run(ctx, SkillPreparingHookContext{SessionID: e.SessionID, State: state})
@@ -602,10 +626,9 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			inlineRuntime = result.Value.InlineRuntime
 		} else {
 			e.stripSkillMessages(state, map[string]struct{}{skills.SkillListingSource: {}, skills.SkillRecoverySource: {}})
-			e.maybeCompressContext(ctx, state)
 			e.injectSkillRuntimeAttachments(state)
 			e.injectPendingTaskNotifications(state)
-			inlineRuntime = skills.CollectInlineSkillRuntime(state.Messages)
+			inlineRuntime = skills.CollectInlineSkillRuntime(contextSkillMessages(state))
 		}
 		activeRegistry := e.Registry
 		if e.Config.MCPEnabled {
@@ -629,17 +652,25 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 
 		turn := &ModelTurn{}
 		execCtx := coretools.ExecutionContext{
-			"cwd":                     e.Config.CWD,
-			"config":                  e.Config,
-			"runtime_dir":             e.Config.ProjectRuntimeDir,
-			"web_search_scope":        e.Config.WebSearchCacheScope,
-			"_session_id":             e.SessionID,
-			"_agent_id":               e.sessionMemoryAgentID(),
-			"allowed_read_roots":      compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
-			"allowed_write_roots":     compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
-			"_registry":               activeRegistry,
-			"parent_state":            state,
-			"task_runtime":            e.TaskRuntime,
+			"cwd":                 e.Config.CWD,
+			"config":              e.Config,
+			"runtime_dir":         e.Config.ProjectRuntimeDir,
+			"web_search_scope":    e.Config.WebSearchCacheScope,
+			"_session_id":         e.SessionID,
+			"_agent_id":           e.sessionMemoryAgentID(),
+			"allowed_read_roots":  compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
+			"allowed_write_roots": compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
+			"_registry":           activeRegistry,
+			"agent_services":      e.AgentRuntime.Services(state.generation),
+			"spawn_permissions":   ClonePermissionState(state.PermissionState),
+			"task_runtime":        e.TaskRuntime,
+			"_session_runtime":    e.SessionRuntime,
+			"_runtime_store": func() any {
+				if e.RuntimeEvents != nil {
+					return e.RuntimeEvents.EventStore()
+				}
+				return nil
+			}(),
 			"scope_id":                "main",
 			"current_task_id":         nil,
 			"parent_task_id":          nil,
@@ -683,8 +714,14 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			return
 		}
 
-		messages := e.BuildMessages(state)
 		toolSchemas := activeRegistry.GetAPISchemas()
+		compiled, err := e.prepareContext(ctx, state, toolSchemas, agentContext.CompactAuto, firstNonEmptyString(modelOverride, e.Config.APIModel))
+		if err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
+			sendStream(ctx, out, NewStreamEvent("done", "", nil))
+			return
+		}
+		messages := compiled.Messages
 		if e.Runtime != nil {
 			result, err := e.Runtime.Hooks.ContextBuilding.Run(ctx, ContextBuildHookContext{
 				SessionID: e.SessionID, State: state, Messages: messages, ToolSchemas: toolSchemas,
@@ -700,6 +737,27 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			messages = result.Value.Messages
 			toolSchemas = result.Value.ToolSchemas
 		}
+		compiled.Messages = StripMessageMetadata(NormalizeMessages(RepairOrphanTools(messages), firstNonEmptyString(modelOverride, e.Config.APIModel), state.RecentApiErrors))
+		compiled.ToolSchemas = toolSchemas
+		compiled, err = e.AgentRuntime.Context.Validate(compiled)
+		if err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
+			sendStream(ctx, out, NewStreamEvent("done", "", nil))
+			return
+		}
+		messages = e.applyRollingCache(compiled.Messages, state, firstNonEmptyString(modelOverride, e.Config.APIModel))
+		withCache := compiled
+		withCache.Messages = messages
+		if validated, cacheErr := e.AgentRuntime.Context.Validate(withCache); cacheErr == nil {
+			compiled = validated
+		} else {
+			messages = compiled.Messages
+		}
+		if err = e.AgentRuntime.RecordCompiled(ctx, compiled, state); err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
+			sendStream(ctx, out, NewStreamEvent("done", "", nil))
+			return
+		}
 		if e.RuntimeEvents != nil {
 			if err := e.RuntimeEvents.RecordCompiledContext(ctx, state.SystemPrompt, messages, toolSchemas); err != nil {
 				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
@@ -712,7 +770,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				return
 			}
 		}
-		requestOptions := e.consumeCacheEditsForRequest(VisibleToolResultIDs(messages))
+		requestOptions := e.AgentRuntime.Context.ConsumeCacheEditsForGeneration(VisibleToolResultIDs(messages), firstNonEmptyString(modelOverride, e.Config.APIModel), state.generation)
 		if len(requestOptions.AnthropicCacheEdits) == 0 {
 			requestOptions = nil
 		}
@@ -720,16 +778,16 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		for result := range client.StreamChat(streamCtx, state.SystemPrompt, messages, toolSchemas, requestOptions) {
 			if result.Err != nil {
 				if ctx.Err() != nil || e.isAborted() {
-					e.restoreInFlightCacheEdits()
-					e.LastState = state
+					e.restoreInFlightCacheEdits(state.generation)
+					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
 					return
 				}
 				msg := result.Err.Error()
 				if IsFatalAPIError(msg) {
-					e.restoreInFlightCacheEdits()
+					e.restoreInFlightCacheEdits(state.generation)
 					e.rememberAPIError(state, msg)
-					e.LastState = state
+					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("error", msg, api.ErrorMetadata(result.Err)))
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
 					return
@@ -742,9 +800,9 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				consecutiveAPIErrors++
 				e.rememberAPIError(state, msg)
 				if consecutiveAPIErrors >= MaxAPIErrorRetries {
-					e.restoreInFlightCacheEdits()
+					e.restoreInFlightCacheEdits(state.generation)
 					sendStream(ctx, out, e.apiErrorEvent(msg, api.ErrorMetadata(result.Err)))
-					e.LastState = state
+					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
 					return
 				}
@@ -755,8 +813,8 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				break
 			}
 			if ctx.Err() != nil || e.isAborted() {
-				e.restoreInFlightCacheEdits()
-				e.LastState = state
+				e.restoreInFlightCacheEdits(state.generation)
+				_ = e.publishDraft(context.WithoutCancel(ctx), state)
 				sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
 				return
 			}
@@ -766,7 +824,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				sendStream(ctx, out, *action.Event)
 			}
 			if action.Return {
-				e.restoreInFlightCacheEdits()
+				e.restoreInFlightCacheEdits(state.generation)
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
@@ -776,9 +834,9 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 
 		if turn.StreamHadError || turn.PTLDetected {
-			e.restoreInFlightCacheEdits()
+			e.restoreInFlightCacheEdits(state.generation)
 		} else {
-			e.pinConsumedCacheEdits()
+			e.pinConsumedCacheEdits(state.generation)
 		}
 
 		if ShouldCommitFinalTextAfterStreamError(turn) {
@@ -792,7 +850,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			continue
 		}
 		if turn.PTLDetected {
-			action, event := ptlRecovery.Recover(state, turn.PTLErrorMsg)
+			action, event := ptlRecovery.RecoverContext(ctx, state, turn.PTLErrorMsg)
 			if action == "retry" {
 				e.clearRuntimeCompressionStateAfterHistoryReplace(state)
 				outputRecovery.ResetAfterHistoryReplace(e.Config.APIMaxTokens)
@@ -801,7 +859,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			if event != nil {
 				sendStream(ctx, out, *event)
 			}
-			e.LastState = state
+			_ = e.publishDraft(context.WithoutCancel(ctx), state)
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
 			return
 		}
@@ -814,7 +872,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				if recovery.Event != nil {
 					sendStream(ctx, out, *recovery.Event)
 				}
-				e.LastState = state
+				_ = e.publishDraft(context.WithoutCancel(ctx), state)
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
@@ -857,7 +915,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				e.extraction.SourceTeamAgentID = e.TeamAgentID
 				e.extraction.Schedule(ctx, state, "")
 			}
-			e.LastState = state
+			_ = e.publishDraft(context.WithoutCancel(ctx), state)
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
 			return
 		}
@@ -869,9 +927,10 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				if state != nil && state.PermissionState != nil {
 					state.PermissionState.YoloMode = true
 				}
-				e.Config.Yolo = true
+				_ = e.publishDraft(ctx, state)
 				if e.StateObserver != nil {
-					e.StateObserver(state)
+					snapshot := e.AgentRuntime.Snapshot().LegacyState()
+					e.StateObserver(&snapshot)
 				}
 			},
 			RequestDecision: func(ctx context.Context, event StreamEvent) (string, string) {
@@ -910,6 +969,10 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			sendStream(ctx, out, event)
 		}
 
+		if err := e.publishDraft(ctx, state); err != nil {
+			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
+			return
+		}
 		e.executeAndCommitTools(ctx, state, executor, out)
 		e.RecordSessionMemory(ctx, state, false)
 		state.TurnCount++
@@ -1029,7 +1092,7 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 		if IsFatalAPIError(msg) {
 			e.rememberAPIError(state, msg)
 			ev := NewStreamEvent("error", msg, metadata)
-			e.LastState = state
+			_ = e.publishDraft(context.Background(), state)
 			return StreamAction{Return: true, Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
 		}
 		if IsPTLErrorMessage(msg) && !IsFatalAPIError(msg) {
@@ -1045,7 +1108,7 @@ func (e *CoreExecutionEngine) HandleStreamEvent(event map[string]any, turn *Mode
 		e.rememberAPIError(state, msg)
 		ev := NewStreamEvent("error", msg, metadata)
 		if consecutiveAPIErrors >= MaxAPIErrorRetries {
-			e.LastState = state
+			_ = e.publishDraft(context.Background(), state)
 			return StreamAction{Return: true, Event: &ev, ConsecutiveAPIErrors: consecutiveAPIErrors}
 		}
 		metadata["recovered"] = true
@@ -1154,7 +1217,7 @@ func toolMemoryRecallQuery(original string, toolResults []map[string]any, execut
 }
 
 func (e *CoreExecutionEngine) requestSkillShellPermission(ctx context.Context, executor *StreamingToolExecutor, req skills.SkillShellPermissionRequest) bool {
-	if e != nil && e.Config.Yolo {
+	if e != nil && e.AgentRuntime.YoloEnabled() {
 		return true
 	}
 	ch := make(chan bool, 1)
@@ -1211,8 +1274,10 @@ func (e *CoreExecutionEngine) PostToolUse(tc coretools.ToolCall, state *AgentSta
 
 func (e *CoreExecutionEngine) BuildMessages(state *AgentState) []map[string]any {
 	messages := state.Messages
-	if len(e.l3Regions) > 0 {
-		messages = agentContext.ProjectCollapsedView(messages, e.l3Regions)
+	if state.ContextSnapshot != nil {
+		snapshot := *state.ContextSnapshot
+		snapshot.Messages = agentContext.MessagesFromMaps("working", state.Messages)
+		messages = agentContext.Render(snapshot)
 	}
 	repaired := RepairOrphanTools(messages)
 	normalized := NormalizeMessages(repaired, e.Config.APIModel, state.RecentApiErrors)
@@ -1220,14 +1285,18 @@ func (e *CoreExecutionEngine) BuildMessages(state *AgentState) []map[string]any 
 	return e.applyRollingCache(apiReady, state)
 }
 
-func (e *CoreExecutionEngine) applyRollingCache(messages []map[string]any, state *AgentState) []map[string]any {
+func (e *CoreExecutionEngine) applyRollingCache(messages []map[string]any, state *AgentState, models ...string) []map[string]any {
 	if state == nil {
 		return messages
 	}
 	if state.CacheBreakPoints == nil {
 		state.CacheBreakPoints = mapset.NewSet[int]()
 	}
-	if !strings.HasPrefix(strings.ToLower(e.Config.APIModel), "claude-") {
+	model := e.Config.APIModel
+	if len(models) > 0 {
+		model = models[0]
+	}
+	if !strings.HasPrefix(strings.ToLower(model), "claude-") {
 		state.CacheBreakPoints.Clear()
 		return messages
 	}
@@ -1324,142 +1393,24 @@ func VisibleToolResultIDs(messages []map[string]any) map[string]struct{} {
 }
 
 func (e *CoreExecutionEngine) QueueCacheEdits(edits []agentContext.CacheEdit) {
-	if len(edits) == 0 {
-		return
-	}
-	for _, edit := range edits {
-		action := "delete"
-		if edit.Action != nil && *edit.Action != "" {
-			action = *edit.Action
-		}
-		if edit.ToolUseID != "" {
-			e.cacheEditState.Pending = append(e.cacheEditState.Pending, api.CacheEdit{ToolUseID: edit.ToolUseID, Action: action})
-		}
-	}
+	e.AgentRuntime.Context.QueueCacheEdits(edits)
 }
-
 func (e *CoreExecutionEngine) CacheEditStateSnapshot() RuntimeCacheEditState {
-	return RuntimeCacheEditState{
-		Pending:          append([]api.CacheEdit(nil), e.cacheEditState.Pending...),
-		Pinned:           append([]api.CacheEdit(nil), e.cacheEditState.Pinned...),
-		ConsumedInFlight: append([]api.CacheEdit(nil), e.cacheEditState.ConsumedInFlight...),
-		CreatedAt:        e.cacheEditState.CreatedAt,
-	}
+	return e.AgentRuntime.Context.CacheEditStateSnapshot()
 }
-
-func (e *CoreExecutionEngine) ConsumeCacheEditsForRequest(visibleToolResultIDs map[string]struct{}) *api.LLMRequestOptions {
-	return e.consumeCacheEditsForRequest(visibleToolResultIDs)
+func (e *CoreExecutionEngine) ConsumeCacheEditsForRequest(ids map[string]struct{}) *api.LLMRequestOptions {
+	return e.consumeCacheEditsForRequest(ids)
 }
-
-func (e *CoreExecutionEngine) PinConsumedCacheEdits() {
-	e.pinConsumedCacheEdits()
+func (e *CoreExecutionEngine) PinConsumedCacheEdits()     { e.pinConsumedCacheEdits() }
+func (e *CoreExecutionEngine) RestoreInFlightCacheEdits() { e.restoreInFlightCacheEdits() }
+func (e *CoreExecutionEngine) consumeCacheEditsForRequest(ids map[string]struct{}, models ...string) *api.LLMRequestOptions {
+	return e.AgentRuntime.Context.ConsumeCacheEditsForRequest(ids, models...)
 }
-
-func (e *CoreExecutionEngine) RestoreInFlightCacheEdits() {
-	e.restoreInFlightCacheEdits()
+func (e *CoreExecutionEngine) pinConsumedCacheEdits(generations ...uint64) {
+	e.AgentRuntime.Context.PinConsumedCacheEdits(generations...)
 }
-
-func (e *CoreExecutionEngine) consumeCacheEditsForRequest(visibleToolResultIDs map[string]struct{}) *api.LLMRequestOptions {
-	if !strings.HasPrefix(strings.ToLower(e.Config.APIModel), "claude-") {
-		e.cacheEditState = RuntimeCacheEditState{}
-		return &api.LLMRequestOptions{}
-	}
-	if !e.Config.AnthropicCacheEditsEnabled {
-		return &api.LLMRequestOptions{}
-	}
-
-	pinned := filterVisibleCacheEdits(e.cacheEditState.Pinned, visibleToolResultIDs)
-	pending := filterVisibleCacheEdits(e.cacheEditState.Pending, visibleToolResultIDs)
-	e.cacheEditState.Pinned = pinned
-	e.cacheEditState.Pending = nil
-	e.cacheEditState.ConsumedInFlight = pending
-
-	edits := make([]api.CacheEdit, 0, len(pinned)+len(pending))
-	edits = append(edits, pinned...)
-	edits = append(edits, pending...)
-	return &api.LLMRequestOptions{AnthropicCacheEdits: edits}
-}
-
-func (e *CoreExecutionEngine) pinConsumedCacheEdits() {
-	if len(e.cacheEditState.ConsumedInFlight) == 0 {
-		return
-	}
-	existing := map[string]struct{}{}
-	for _, edit := range e.cacheEditState.Pinned {
-		existing[edit.ToolUseID] = struct{}{}
-	}
-	for _, edit := range e.cacheEditState.ConsumedInFlight {
-		if _, ok := existing[edit.ToolUseID]; ok {
-			continue
-		}
-		e.cacheEditState.Pinned = append(e.cacheEditState.Pinned, edit)
-		existing[edit.ToolUseID] = struct{}{}
-	}
-	e.cacheEditState.ConsumedInFlight = nil
-}
-
-func (e *CoreExecutionEngine) restoreInFlightCacheEdits() {
-	if len(e.cacheEditState.ConsumedInFlight) == 0 {
-		return
-	}
-	restored := make([]api.CacheEdit, 0, len(e.cacheEditState.ConsumedInFlight)+len(e.cacheEditState.Pending))
-	restored = append(restored, e.cacheEditState.ConsumedInFlight...)
-	restored = append(restored, e.cacheEditState.Pending...)
-	e.cacheEditState.Pending = restored
-	e.cacheEditState.ConsumedInFlight = nil
-}
-
-func filterVisibleCacheEdits(edits []api.CacheEdit, visibleToolResultIDs map[string]struct{}) []api.CacheEdit {
-	if len(edits) == 0 {
-		return nil
-	}
-	out := make([]api.CacheEdit, 0, len(edits))
-	for _, edit := range edits {
-		if _, ok := visibleToolResultIDs[edit.ToolUseID]; ok {
-			out = append(out, edit)
-		}
-	}
-	return out
-}
-
-func (e *CoreExecutionEngine) maybeCompressContext(ctx context.Context, state *AgentState) {
-	if state == nil || len(state.Messages) == 0 {
-		return
-	}
-	contextLimit := e.Config.CompressionContextLimit()
-	threshold := e.Config.CompressionThreshold()
-	compressionCheckMessages := state.Messages
-	if len(e.l3Regions) > 0 {
-		compressionCheckMessages = agentContext.ProjectCollapsedView(state.Messages, e.l3Regions)
-	}
-	currentAPITokens := agentContext.TokenCountWithEstimation(compressionCheckMessages)
-	if currentAPITokens <= e.Config.CompressionTriggerTokens() {
-		return
-	}
-	e.RecordSessionMemory(ctx, state, false)
-	pipeline := agentContext.DefaultContextPipeline()
-	pipeline.Config = e.Config
-	compressed, stats := pipeline.Compress(
-		state.Messages,
-		agentContext.TokenCountWithEstimation(state.Messages),
-		state.SystemPrompt,
-		contextLimit,
-		threshold,
-		state,
-		e.l3Regions,
-		true,
-	)
-	state.Messages = compressed
-	if stats.LevelReached >= 1 {
-		e.MarkSkillHistoryCompacted("main")
-	}
-	if stats.AutoTriggered {
-		agentContext.RunPostCompactCleanUp(ctx, state, recentReadFilesForPostCompact(state, 5))
-		e.rebuildSystemPromptAfterHistoryReplace(state)
-		e.clearRuntimeCompressionStateAfterHistoryReplace(state)
-		return
-	}
-	e.l3Regions = append([]agentContext.CollapsedRegion(nil), stats.CollapsedRegions...)
+func (e *CoreExecutionEngine) restoreInFlightCacheEdits(generations ...uint64) {
+	e.AgentRuntime.Context.RestoreInFlightCacheEdits(generations...)
 }
 
 func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *AgentState, force bool) {
@@ -1478,7 +1429,8 @@ func (e *CoreExecutionEngine) RecordSessionMemory(ctx context.Context, state *Ag
 		slog.Warn("session memory observe failed", "session_id", e.SessionID, "error", err)
 	}
 	if e.StateObserver != nil {
-		e.StateObserver(state)
+		snapshot := e.AgentRuntime.Snapshot().LegacyState()
+		e.StateObserver(&snapshot)
 	}
 }
 
@@ -1525,8 +1477,7 @@ func (e *CoreExecutionEngine) rebuildSystemPromptAfterHistoryReplace(state *Agen
 }
 
 func (e *CoreExecutionEngine) clearRuntimeCompressionStateAfterHistoryReplace(state *AgentState) {
-	e.l3Regions = nil
-	e.cacheEditState = RuntimeCacheEditState{}
+	e.AgentRuntime.Context.ResetCache()
 	if state != nil && state.CacheBreakPoints != nil {
 		state.CacheBreakPoints.Clear()
 	}

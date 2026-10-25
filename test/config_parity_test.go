@@ -251,9 +251,10 @@ func TestConfigLoadsDirectLuminaResourceRoot(t *testing.T) {
 	}
 }
 
-func TestCompressionTriggerUsesConfiguredMaxTokensAndThreshold(t *testing.T) {
+func TestCompressionTriggerUsesIndependentInputBudgetAndThreshold(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.APIMaxTokens = 1000
+	cfg.ContextInputTokenLimit = 1000
 
 	if cfg.CompressionContextLimit() != 1000 {
 		t.Fatalf("compression context limit=%d want 1000", cfg.CompressionContextLimit())

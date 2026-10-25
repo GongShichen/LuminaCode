@@ -217,12 +217,13 @@ type TimelineEvent struct {
 // session journal. UI snapshots remain small projections; this checkpoint is
 // sufficient to resume member agents without consulting Team sidecar files.
 type RuntimeCheckpoint struct {
-	Version         int                         `json:"version"`
-	ParentSessionID string                      `json:"parent_session_id"`
-	TeamName        string                      `json:"team_name"`
-	Snapshot        Snapshot                    `json:"snapshot"`
-	Dialogue        []DialogueEntry             `json:"dialogue"`
-	Timeline        []TimelineEvent             `json:"timeline"`
-	Artifacts       []Artifact                  `json:"artifacts"`
-	AgentStates     map[string]agent.AgentState `json:"agent_states"`
+	Version         int                            `json:"version"`
+	ParentSessionID string                         `json:"parent_session_id"`
+	TeamName        string                         `json:"team_name"`
+	Snapshot        Snapshot                       `json:"snapshot"`
+	Dialogue        []DialogueEntry                `json:"dialogue"`
+	Timeline        []TimelineEvent                `json:"timeline"`
+	Artifacts       []Artifact                     `json:"artifacts"`
+	AgentStates     map[string]agent.AgentState    `json:"agent_states"`
+	AgentSnapshots  map[string]agent.AgentSnapshot `json:"agent_snapshots,omitempty"`
 }

@@ -26,7 +26,7 @@ func TestEditFileRequiresFullReadAndPreservesCRLF(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "edit-1", Name: "edit_file",
@@ -144,7 +144,7 @@ func TestEditFileDetectsStaleRead(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-1", Name: "read_file",
 		Input: map[string]any{"file_path": path},
@@ -173,7 +173,7 @@ func TestEditFileReturnsUnifiedDiffLikePython(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-diff", Name: "read_file", Input: map[string]any{"file_path": path},
 	}, ctx)
@@ -254,7 +254,7 @@ func TestEditFileQuoteNormalizationAndStylePreservation(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-quotes", Name: "read_file", Input: map[string]any{"file_path": path},
 	}, ctx)
@@ -289,7 +289,7 @@ func TestEditFileQuoteNormalizationAfterUnicodePrefix(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-quotes-prefix", Name: "read_file", Input: map[string]any{"file_path": path},
 	}, ctx)
@@ -328,7 +328,7 @@ func TestEditFileTrailingWhitespacePolicyMatchesPython(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	for _, path := range []string{txtPath, mdPath} {
 		read := registry.Execute(context.Background(), coretools.ToolCall{
 			ID: "read-" + filepath.Base(path), Name: "read_file", Input: map[string]any{"file_path": path},
@@ -375,7 +375,7 @@ func TestEditFileStripsUnicodeTrailingWhitespaceLikePython(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-unicode-space", Name: "read_file", Input: map[string]any{"file_path": path},
 	}, ctx)
@@ -406,7 +406,7 @@ func TestEditFileDeleteLineHeuristicAndFailureSnippetMatchPython(t *testing.T) {
 	}
 	registry := coretools.NewToolRegistry(coretools.NewReadFileTool(), coretools.NewEditFileTool())
 	state := agent.NewAgentState()
-	ctx := coretools.ExecutionContext{"cwd": dir, "parent_state": &state}
+	ctx := coretools.ExecutionContext{"cwd": dir, "agent_services": &state}
 	read := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-lines", Name: "read_file", Input: map[string]any{"file_path": path},
 	}, ctx)
@@ -458,7 +458,7 @@ func TestReadFileLimitZeroReturnsFullContentLikePython(t *testing.T) {
 	state := agent.NewAgentState()
 	result := registry.Execute(context.Background(), coretools.ToolCall{
 		ID: "read-zero", Name: "read_file", Input: map[string]any{"file_path": path, "limit": 0},
-	}, coretools.ExecutionContext{"cwd": dir, "parent_state": &state})
+	}, coretools.ExecutionContext{"cwd": dir, "agent_services": &state})
 	if result.IsError {
 		t.Fatalf("read failed: %s", result.Content)
 	}

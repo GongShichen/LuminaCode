@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"github.com/google/uuid"
 
 	coretools "LuminaCode/tools"
 )
@@ -40,8 +41,16 @@ func AddUsage(state *AgentState, usageOrInput any, outputTokens ...int) {
 }
 
 func CommitAssistantTurn(state *AgentState, thinkingContent []map[string]any, fullText string, toolCalls []coretools.ToolCall, messageID string, inputTokens, outputTokens int) {
-	AddUsage(state, inputTokens, outputTokens)
-	AppendAssistantMessage(state, thinkingContent, fullText, toolCalls, messageID)
+	msg := BuildAssistantMessage(thinkingContent, fullText, toolCalls, messageID)
+	id := stringFromAny(msg["context_id"])
+	if state.UsageRequests == nil {
+		state.UsageRequests = map[string]bool{}
+	}
+	if !state.UsageRequests[id] {
+		AddUsage(state, inputTokens, outputTokens)
+		state.UsageRequests[id] = true
+	}
+	state.Messages = append(state.Messages, msg)
 	tagLastMessageWithSessionTurn(state)
 }
 
@@ -59,7 +68,7 @@ func BuildAssistantMessage(thinkingContent []map[string]any, fullText string, to
 			"input": tc.Input,
 		})
 	}
-	msg := map[string]any{"role": "assistant", "content": content}
+	msg := map[string]any{"role": "assistant", "content": content, "context_id": uuid.NewString()}
 	if messageID != "" {
 		msg["id"] = messageID
 	}

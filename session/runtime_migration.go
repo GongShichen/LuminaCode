@@ -212,10 +212,16 @@ func (s *Store) writeMigrationFailure(sessionID string, report runtimeMigrationR
 
 func AppendRuntimeState(ctx context.Context, journal RuntimeStore, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
 	return journal.WithProjectionLock(ctx, func() error {
-		// Checkpoint facts can follow any concurrently committed lifecycle event;
-		// their total order is the event sequence, so no stale read/write decision
-		// is involved here.
-		events, err := appendRuntimeState(ctx, journal, harness.AnyStreamSeq, state, recovery, tasks, harness.EventRuntimeStateCheckpointed)
+		// Capture the root head before validation. A concurrent owner write
+		// makes the compare-and-append fail instead of publishing a stale DTO.
+		expected, err := journal.StreamHead(ctx, journal.SessionID())
+		if err != nil {
+			return err
+		}
+		if err = validateSnapshotFreshness(ctx, journal, agent.SnapshotFromState(state)); err != nil {
+			return err
+		}
+		events, err := appendRuntimeState(ctx, journal, expected, state, recovery, tasks, harness.EventRuntimeStateCheckpointed)
 		if err != nil {
 			return err
 		}
@@ -247,7 +253,8 @@ func AppendRuntimeState(ctx context.Context, journal RuntimeStore, state *agent.
 }
 
 func appendRuntimeState(ctx context.Context, journal RuntimeStore, expectedStreamSeq int64, state *agent.AgentState, recovery map[string]any, tasks []map[string]any, eventType string) ([]harness.Event, error) {
-	stateJSON, err := json.Marshal(state)
+	snapshot := agent.SnapshotFromState(state)
+	stateJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +274,9 @@ func appendRuntimeState(ctx context.Context, journal RuntimeStore, expectedStrea
 
 func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentState, map[string]any, []map[string]any, error) {
 	var latest *harness.RuntimeStateCheckpointedPayload
+	var latestSeq int64
+	var allEvents []harness.Event
+	var savedRecovery, savedTasks json.RawMessage
 	taskRecords := map[string]map[string]any{}
 	after := int64(0)
 	for {
@@ -275,13 +285,24 @@ func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentSt
 			return nil, nil, nil, err
 		}
 		for _, event := range events {
+			allEvents = append(allEvents, event)
 			switch event.Type {
 			case harness.EventRuntimeStateCheckpointed, harness.EventLegacySnapshotImported:
+				if event.StreamID != journal.SessionID() {
+					continue
+				}
 				var payload harness.RuntimeStateCheckpointedPayload
 				if err := json.Unmarshal(event.Payload, &payload); err != nil {
 					return nil, nil, nil, err
 				}
 				latest = &payload
+				latestSeq = event.Seq
+				if len(payload.SkillRecovery) > 0 && string(payload.SkillRecovery) != "null" {
+					savedRecovery = payload.SkillRecovery
+				}
+				if len(payload.Tasks) > 0 && string(payload.Tasks) != "null" {
+					savedTasks = payload.Tasks
+				}
 			case harness.EventTaskCreated, harness.EventTaskStatusChanged, harness.EventTaskNotificationAppended:
 				var payload struct {
 					TaskID string         `json:"task_id"`
@@ -313,7 +334,9 @@ func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentSt
 		return left < right
 	})
 	if latest == nil {
-		return nil, nil, projectedTasks, nil
+		fresh := agent.NewAgentState()
+		raw, _ := json.Marshal(fresh)
+		latest = &harness.RuntimeStateCheckpointedPayload{State: raw}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(latest.State))
 	decoder.UseNumber()
@@ -328,6 +351,18 @@ func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentSt
 	if state.PermissionState == nil {
 		fresh := agent.NewAgentState()
 		state.PermissionState = fresh.PermissionState
+	}
+	latest.SkillRecovery = savedRecovery
+	latest.Tasks = savedTasks
+	before := agent.SnapshotFromState(&state)
+	rebuilt := agent.ReplayAgentState(before, allEvents, latestSeq, journal.SessionID())
+	state = rebuilt.LegacyState()
+	// Upgrade once; the next load recognizes the typed snapshot.
+	if _, typed := stateMap["context"]; !typed {
+		raw, _ := json.Marshal(rebuilt)
+		if _, err := journal.Append(ctx, harness.AnyStreamSeq, harness.PendingEvent{StreamID: journal.SessionID(), Type: harness.EventLegacySnapshotImported, SchemaVersion: 3, Payload: harness.RuntimeStateCheckpointedPayload{State: raw, SkillRecovery: savedRecovery, Tasks: savedTasks}}); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	var recovery map[string]any
 	if len(latest.SkillRecovery) > 0 && string(latest.SkillRecovery) != "null" {
@@ -345,4 +380,58 @@ func LoadRuntimeState(ctx context.Context, journal RuntimeStore) (*agent.AgentSt
 		tasks = projectedTasks
 	}
 	return &state, recovery, tasks, nil
+}
+
+// Compatibility writers may checkpoint a detached DTO only while its source
+// version remains current. Normal execution checkpoints through AgentRuntime.
+func validateSnapshotFreshness(ctx context.Context, journal RuntimeStore, incoming agent.AgentSnapshot) error {
+	head, err := journal.StreamHead(ctx, journal.SessionID())
+	if err != nil {
+		return err
+	}
+	for upper := head; upper > 0; {
+		lower := max(int64(0), upper-500)
+		events, err := journal.LoadStream(ctx, journal.SessionID(), lower, 500)
+		if err != nil {
+			return err
+		}
+		for i := len(events) - 1; i >= 0; i-- {
+			event := events[i]
+			if event.StreamSeq > upper {
+				continue
+			}
+			if event.Type == harness.EventSessionReset {
+				var reset struct {
+					Generation uint64 `json:"generation"`
+				}
+				if err := json.Unmarshal(event.Payload, &reset); err != nil {
+					return err
+				}
+				if incoming.Generation < reset.Generation {
+					return agent.ErrStaleState
+				}
+			}
+			if event.Type != harness.EventRuntimeStateCheckpointed && event.Type != harness.EventLegacySnapshotImported {
+				continue
+			}
+			var payload harness.RuntimeStateCheckpointedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return err
+			}
+			var version struct {
+				Version    int    `json:"version"`
+				Generation uint64 `json:"generation"`
+				Revision   uint64 `json:"revision"`
+			}
+			if err := json.Unmarshal(payload.State, &version); err != nil {
+				return err
+			}
+			if version.Version == 3 && (incoming.Generation < version.Generation || (incoming.Generation == version.Generation && incoming.Revision < version.Revision)) {
+				return agent.ErrStaleState
+			}
+			return nil
+		}
+		upper = lower
+	}
+	return nil
 }

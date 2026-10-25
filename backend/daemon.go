@@ -688,7 +688,9 @@ func (s *DaemonServer) dispatchResult(ctx context.Context, client *wsClient, req
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
-		controller.Clear()
+		if err := controller.Clear(); err != nil {
+			return nil, toRPCError("session_clear_failed", err)
+		}
 		return controller.Snapshot(), nil
 	case "session.compact":
 		controller, rpcErr := s.controllerFromParams(client.principal, req.Params)

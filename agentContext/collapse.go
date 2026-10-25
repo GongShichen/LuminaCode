@@ -56,6 +56,7 @@ func partitionExchanges(messages []map[string]any) [][]map[string]any {
 		if role != lastRole && current != nil {
 			exchanges = append(exchanges, current)
 			current = []map[string]any{msg}
+			lastRole = role
 		} else {
 			current = append(current, msg)
 		}
@@ -83,6 +84,10 @@ func projectExchange(exchange []map[string]any) *ProjectedExchange {
 		}
 
 		content, ok := contentBlocks(msg["content"])
+		if text, isText := msg["content"].(string); isText {
+			content = []map[string]any{{"type": "text", "text": text}}
+			ok = true
+		}
 		if !ok {
 			continue
 		}

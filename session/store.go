@@ -111,6 +111,9 @@ func (s *Store) Load(sessionID string) []map[string]any {
 }
 
 func (s *Store) SaveStateWithRecovery(sessionID string, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
+	if _, err := os.Stat(RuntimeJournalPath(s.dir, sessionID)); err == nil {
+		return s.saveRuntimeSnapshot(sessionID, state, recovery, tasks)
+	}
 	if err := s.requireWritable(sessionID); err != nil {
 		return err
 	}
@@ -157,6 +160,9 @@ func (s *Store) SaveStateWithRecovery(sessionID string, state *agent.AgentState,
 }
 
 func (s *Store) SaveSnapshotWithRecovery(sessionID string, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
+	if _, err := os.Stat(RuntimeJournalPath(s.dir, sessionID)); err == nil {
+		return s.saveRuntimeSnapshot(sessionID, state, recovery, tasks)
+	}
 	if state == nil {
 		return nil
 	}
@@ -888,4 +894,25 @@ func anySlice(value any) []any {
 		return values
 	}
 	return nil
+}
+
+func (s *Store) saveRuntimeSnapshot(id string, state *agent.AgentState, recovery map[string]any, tasks []map[string]any) error {
+	if err := s.requireWritable(id); err != nil {
+		return err
+	}
+	journal, err := OpenRuntimeJournal(context.Background(), s.dir, id)
+	if err != nil {
+		return err
+	}
+	defer journal.Close()
+	if err = AppendRuntimeState(context.Background(), journal, state, recovery, tasks); err != nil {
+		return err
+	}
+	count := 0
+	turn := 0
+	if state != nil {
+		count = len(state.Transcript)
+		turn = state.TurnCount
+	}
+	return s.UpdateMetaProjection(id, count, turn)
 }

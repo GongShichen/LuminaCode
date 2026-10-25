@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 
 	"LuminaCode/agentContext"
@@ -29,6 +30,19 @@ type PTLRecoveryManager struct {
 }
 
 func (m *PTLRecoveryManager) Recover(state *AgentState, errorMsg string) (string, *StreamEvent) {
+	return m.RecoverContext(context.Background(), state, errorMsg)
+}
+
+func (m *PTLRecoveryManager) RecoverContext(ctx context.Context, state *AgentState, errorMsg string) (string, *StreamEvent) {
+	if state.owner != nil {
+		result, err := state.owner.Context.Compact(ctx, agentContext.CompactReactive)
+		if err == nil && result.Succeeded && state.owner.CommitContext(ctx, result, state) == nil {
+			state.LastContinueReason = string(ContinueReasonReactiveCompactRetry)
+			return "retry", nil
+		}
+		event := NewStreamEvent("error", "Prompt too long: unable to reduce required context", nil)
+		return "fail", &event
+	}
 	if m.TryCollapseDrain(state) {
 		return "retry", nil
 	}
@@ -71,24 +85,18 @@ func (m *PTLRecoveryManager) ReactiveCompact(state *AgentState) bool {
 	if before == 0 {
 		return false
 	}
-	pipeline := agentContext.DefaultContextPipeline()
-	pipeline.Config = m.Config
-	compressed, stats := pipeline.Compress(
-		state.Messages,
-		before,
-		state.SystemPrompt,
-		m.Config.CompressionContextLimit(),
-		m.Config.CompressionThreshold(),
-		state,
-		nil,
-		true,
-	)
-	if stats.LevelReached >= 3 {
-		state.Messages = RepairOrphanTools(compressed)
+	manager := agentContext.NewContextManager(m.Config, nil)
+	snapshot := SnapshotFromState(state).Context
+	_ = manager.Restore(snapshot)
+	result, err := manager.Compact(context.Background(), agentContext.CompactReactive, agentContext.BuildInput{SystemPrompt: state.SystemPrompt})
+	if err == nil && result.Succeeded {
+		state.Messages = agentContext.MessageMaps(result.Next.Messages)
+		state.ContextSnapshot = &result.Next
 		m.Regions = nil
 		state.CacheBreakPoints.Clear()
 		state.LastContinueReason = string(ContinueReasonReactiveCompactRetry)
 		return true
 	}
+
 	return false
 }

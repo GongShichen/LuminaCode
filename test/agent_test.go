@@ -206,7 +206,7 @@ func TestCoreQueryLoopOutputTokenEscalationOmitsRequestMaxTokens(t *testing.T) {
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 	}
 	if len(events) == 0 || events[len(events)-1].Type != "done" {
@@ -317,7 +317,7 @@ func TestCoreQueryLoopTruncatedToolUseExecutesBeforeNextModelTurnLikePython(t *t
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "read file"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 	}
 
@@ -437,7 +437,7 @@ func TestCoreQueryLoopFatalStreamErrorEventDoesNotRetryLikePython(t *testing.T) 
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 	}
 	if calls.Load() != 1 {
@@ -475,7 +475,7 @@ func TestCoreQueryLoopNonFatalStreamErrorWithoutToolCallsRetriesUntilSuccessLike
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "hello"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 	}
 	if calls.Load() != 2 {
@@ -515,7 +515,7 @@ func TestCoreQueryLoopParentTurnLimitUsesConfigValueLikePython(t *testing.T) {
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "loop"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 	}
 	errorText := strings.Join(streamContentsOfType(events, "error"), "\n")
@@ -552,6 +552,7 @@ func TestPTLCollapseDrainUsesContextCollapsePipeline(t *testing.T) {
 func TestPTLReactiveCompactUsesContextPipeline(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.APIMaxTokens = 1000
+	cfg.ContextInputTokenLimit = 4000
 	state := agent.NewAgentState()
 	state.CacheBreakPoints.Add(2)
 	for i := 0; i < 18; i++ {
@@ -775,7 +776,7 @@ func TestTaskRuntimeStopUnknown(t *testing.T) {
 	}
 }
 
-func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *testing.T) {
+func TestCoreQueryLoopAutoCompressionUsesContextInputBudgetEightyPercentTrigger(t *testing.T) {
 	var requestBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(r.Body)
@@ -795,9 +796,11 @@ func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *tes
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 1000
+	cfg.ContextInputTokenLimit = 1000
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := newTestCoreExecutionEngine(cfg)
+	engine.Registry = coretools.NewToolRegistry()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 	state.Messages = []map[string]any{
@@ -808,7 +811,7 @@ func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *tes
 		{"role": "user", "content": []map[string]any{{"type": "text", "text": "continue"}}},
 	}
 
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 	if requestBody == nil {
 		t.Fatal("server did not receive request")
@@ -825,7 +828,7 @@ func TestCoreQueryLoopAutoCompressionUsesAPIMaxTokensEightyPercentTrigger(t *tes
 		}
 	}
 	if !foundClearedOld {
-		t.Fatalf("old tool result should be compressed before API request when APIMaxTokens*0.8 is exceeded, messages=%#v", messages)
+		t.Fatalf("old tool result should be compressed before API request when ContextInputTokenLimit*0.8 is exceeded, messages=%#v", messages)
 	}
 	if state.ConsecutiveAutoCompactFailures != 0 {
 		t.Fatalf("test should verify pre-request L1/L2 compression without L4 failure, state=%#v", state)
@@ -852,9 +855,11 @@ func TestCoreQueryLoopProjectsL3RegionsForRequestWithoutRewritingStateLikePython
 	cfg.APIKey = "test-key"
 	cfg.APIModel = "custom-router-model"
 	cfg.APIMaxTokens = 1000
+	cfg.ContextInputTokenLimit = 14000
 	cfg.MCPEnabled = false
 	cfg.SkillsEnabled = false
 	engine := newTestCoreExecutionEngine(cfg)
+	engine.Registry = coretools.NewToolRegistry()
 	state := agent.NewAgentState()
 	state.SystemPrompt = "system"
 
@@ -871,7 +876,7 @@ func TestCoreQueryLoopProjectsL3RegionsForRequestWithoutRewritingStateLikePython
 		t.Fatal(err)
 	}
 
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 	if requestBody == nil {
 		t.Fatal("server did not receive request")
@@ -890,7 +895,7 @@ func TestCoreQueryLoopProjectsL3RegionsForRequestWithoutRewritingStateLikePython
 	if !foundProjection {
 		t.Fatalf("provider request should include projected L3 summary like Python, messages=%#v", messages)
 	}
-	statePrefixJSON, err := json.Marshal(state.Messages[:len(original)])
+	statePrefixJSON, err := json.Marshal(agent.StripMessageMetadata(state.Messages[:len(original)]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +946,7 @@ func TestCoreQueryLoopInjectsPendingTaskNotificationsLikePython(t *testing.T) {
 	state.SystemPrompt = "system"
 	state.LastQuery = "main query"
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "main query"}}}}
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 
 	if mainBody == nil {
@@ -1202,7 +1207,7 @@ func TestQueryLoopStripsLegacyMemoryIndexContextBeforeRequest(t *testing.T) {
 		{"role": "user", "content": "current task"},
 	}
 
-	for range engine.QueryLoop(context.Background(), &state) {
+	for range engine.QueryLoopWithState(context.Background(), &state) {
 	}
 
 	for _, message := range state.Messages {
@@ -1261,7 +1266,7 @@ Inline output: !` + "`printf shell-ok`" + `
 	state.Messages = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "use skill"}}}}
 
 	var events []agent.StreamEvent
-	for event := range engine.QueryLoop(context.Background(), &state) {
+	for event := range engine.QueryLoopWithState(context.Background(), &state) {
 		events = append(events, event)
 		if event.Type == "permission_needed" {
 			if _, ok := event.Metadata["skill_shell_request"]; !ok {

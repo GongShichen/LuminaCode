@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"reflect"
 	"regexp"
 	"strings"
 
@@ -386,29 +385,21 @@ func RunPostCompactCleanUp(ctx context.Context, state any, recentReadFiles []map
 	setStateMessages(state, append(messages, recoverMsg))
 }
 
-func getStateMessages(state any) []map[string]any {
-	value := reflectValue(state)
-	if !value.IsValid() {
-		return nil
-	}
-	fieldValue := value.FieldByName("Messages")
-	if !fieldValue.IsValid() || fieldValue.IsNil() {
-		return nil
-	}
-	messages, _ := fieldValue.Interface().([]map[string]any)
-	return messages
+type messageState interface {
+	ContextMessages() []map[string]any
+	SetContextMessages([]map[string]any)
 }
 
+func getStateMessages(state any) []map[string]any {
+	if s, ok := state.(messageState); ok {
+		return s.ContextMessages()
+	}
+	return nil
+}
 func setStateMessages(state any, messages []map[string]any) {
-	value := reflectValue(state)
-	if !value.IsValid() {
-		return
+	if s, ok := state.(messageState); ok {
+		s.SetContextMessages(messages)
 	}
-	fieldValue := value.FieldByName("Messages")
-	if !fieldValue.IsValid() || !fieldValue.CanSet() {
-		return
-	}
-	fieldValue.Set(reflect.ValueOf(messages))
 }
 
 func MinInt(a, b int) int {

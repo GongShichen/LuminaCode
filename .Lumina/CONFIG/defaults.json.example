@@ -36,6 +36,7 @@
   "web_fetch_max_chars": 80000,
   "web_fetch_timeout_seconds": 20,
   "web_fetch_user_agent": "LuminaCode/1.0",
+  "context_input_token_limit": 16000,
   "context_compress_threshold": 0.8,
   "prompt_cache_ttl_seconds": 300,
   "anthropic_cache_edits_enabled": false,

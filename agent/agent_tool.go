@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"LuminaCode/config"
+	"LuminaCode/security"
 	coretools "LuminaCode/tools"
 
 	"github.com/google/uuid"
@@ -82,7 +83,10 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 	if taskRuntime == nil {
 		return "Error: AgentTool requires task runtime support in the execution context.", nil
 	}
-	parentState, _ := execCtx["parent_state"].(*AgentState)
+	parentState := NewAgentState()
+	if policy, ok := execCtx["spawn_permissions"].(*security.PermissionState); ok {
+		parentState.PermissionState = ClonePermissionState(policy)
+	}
 	definition := GetAgentDefinition(in.SubagentType)
 	model := in.Model
 	if model == "" {
@@ -139,7 +143,7 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 			extraContext["worktree_path"] = worktreePath
 			extraContext["worktree_cwd"] = worktreePath
 		}
-		record := taskRuntime.SpawnWorker(ctx, childCfg, filteredRegistry, definition, parentState, in.Description, in.Prompt, in.SubagentType, model, workerLabel, in.Reusable, parentScopeID, parentTaskID, extraContext)
+		record := taskRuntime.SpawnWorker(ctx, childCfg, filteredRegistry, definition, &parentState, in.Description, in.Prompt, in.SubagentType, model, workerLabel, in.Reusable, parentScopeID, parentTaskID, extraContext)
 		return fmt.Sprintf("Background worker launched.\ntask_id: %s\nworker_label: %s\nstatus: %s\nreusable: %t", record.TaskID, record.WorkerLabel, record.Status, record.Reusable), nil
 	}
 	subagentScopeID := "scope-" + uuid.NewString()[:12]
@@ -157,7 +161,7 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 	if worktreePath != "" {
 		extraContext["worktree_cwd"] = worktreePath
 	}
-	childState := BuildSubagentState(parentState, definition.PermissionMode)
+	childState := BuildSubagentState(&parentState, definition.PermissionMode)
 	sub := NewSubAgent(childCfg, filteredRegistry, definition, &childState, model, in.SubagentType, extraContext)
 	result, err := sub.Run(ctx, in.Prompt)
 	if err != nil {
@@ -260,7 +264,7 @@ func stringFromContext(ctx coretools.ExecutionContext, key, fallback string) str
 func copyAgentExtraContext(execCtx coretools.ExecutionContext) coretools.ExecutionContext {
 	out := coretools.ExecutionContext{}
 	for key, value := range execCtx {
-		if key == "parent_state" || key == "_registry" {
+		if key == "parent_state" || key == "agent_services" || key == "spawn_permissions" || key == "_registry" {
 			continue
 		}
 		out[key] = value

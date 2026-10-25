@@ -43,7 +43,7 @@ func StripMessageMetadata(messages []map[string]any) []map[string]any {
 	for _, msg := range messages {
 		cleaned := map[string]any{}
 		for key, value := range msg {
-			if key == "metadata" || key == "isMeta" {
+			if key == "metadata" || key == "isMeta" || key == "context_id" || key == "event_seq" {
 				continue
 			}
 			cleaned[key] = value

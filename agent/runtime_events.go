@@ -23,6 +23,8 @@ type RuntimeEventRecorder struct {
 	terminal     bool
 	publish      func([]harness.Event)
 	pendingRunID string
+	owner        *AgentRuntime
+	generation   uint64
 }
 
 func NewRuntimeEventRecorder(store harness.EventStore, sessionID string) *RuntimeEventRecorder {
@@ -72,12 +74,24 @@ func (r *RuntimeEventRecorder) BeginRun(ctx context.Context, message map[string]
 	if err != nil {
 		return err
 	}
-	events, err := r.store.Append(ctx, harness.AnyStreamSeq,
-		harness.PendingEvent{StreamID: r.streamID, Type: harness.EventMessageUserAppended, CorrelationID: r.runID,
-			Audience: []harness.Audience{harness.AudienceModel, harness.AudienceUser}, Payload: harness.MessageAppendedPayload{Message: raw, RunID: r.runID}},
-		harness.PendingEvent{StreamID: r.streamID, Type: harness.EventRunStarted, CorrelationID: r.runID,
-			Payload: harness.RunLifecyclePayload{RunID: r.runID}},
-	)
+	pending := []harness.PendingEvent{}
+	id := stringFromAny(message["context_id"])
+	if r.owner == nil || !r.owner.HasDurableMessage(id) {
+		pending = append(pending, harness.PendingEvent{StreamID: r.streamID, Type: harness.EventMessageUserAppended, CorrelationID: r.runID, Audience: []harness.Audience{harness.AudienceModel, harness.AudienceUser}, Payload: harness.MessageAppendedPayload{Message: raw, RunID: r.runID}})
+	}
+	pending = append(pending, harness.PendingEvent{StreamID: r.streamID, Type: harness.EventRunStarted, CorrelationID: r.runID, Payload: harness.RunLifecyclePayload{RunID: r.runID}})
+	if r.owner != nil {
+		r.generation = r.owner.Snapshot().Generation
+	}
+	events, err := r.store.Append(ctx, harness.AnyStreamSeq, pending...)
+	if err == nil && r.owner != nil {
+		for _, event := range events {
+			if event.Type == harness.EventMessageUserAppended {
+				r.owner.MarkDurableMessage(id, event.Seq)
+			}
+		}
+	}
+
 	r.publishLocked(events)
 	return err
 }
@@ -151,19 +165,31 @@ func (r *RuntimeEventRecorder) RecordAssistant(ctx context.Context, message map[
 	if r == nil || r.store == nil {
 		return nil
 	}
+	usage.RequestID = stringFromAny(message["context_id"])
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	events, err := r.store.Append(ctx, harness.AnyStreamSeq,
-		harness.PendingEvent{StreamID: r.streamID, Type: harness.EventModelResponseCompleted, CorrelationID: r.runID,
-			Payload: map[string]any{"run_id": r.runID, "step_id": r.stepID}},
-		harness.PendingEvent{StreamID: r.streamID, Type: harness.EventMessageAssistantAppended, CorrelationID: r.runID,
-			Audience: []harness.Audience{harness.AudienceModel, harness.AudienceUser}, Payload: harness.MessageAppendedPayload{Message: raw, RunID: r.runID, StepID: r.stepID}},
-		harness.PendingEvent{StreamID: r.streamID, Type: harness.EventUsageRecorded, CorrelationID: r.runID, Payload: usage},
-	)
+	if r.owner != nil && r.generation != r.owner.Snapshot().Generation {
+		return ErrStaleState
+	}
+	pending := []harness.PendingEvent{{StreamID: r.streamID, Type: harness.EventModelResponseCompleted, CorrelationID: r.runID, Payload: map[string]any{"run_id": r.runID, "step_id": r.stepID}}}
+	id := stringFromAny(message["context_id"])
+	if r.owner == nil || !r.owner.HasDurableMessage(id) {
+		pending = append(pending, harness.PendingEvent{StreamID: r.streamID, Type: harness.EventMessageAssistantAppended, CorrelationID: r.runID, Audience: []harness.Audience{harness.AudienceModel, harness.AudienceUser}, Payload: harness.MessageAppendedPayload{Message: raw, RunID: r.runID, StepID: r.stepID}})
+	}
+	pending = append(pending, harness.PendingEvent{StreamID: r.streamID, Type: harness.EventUsageRecorded, CorrelationID: r.runID, Payload: usage})
+	events, err := r.store.Append(ctx, harness.AnyStreamSeq, pending...)
+	if err == nil && r.owner != nil {
+		for _, event := range events {
+			if event.Type == harness.EventMessageAssistantAppended {
+				r.owner.MarkDurableMessage(id, event.Seq)
+			}
+		}
+	}
+
 	r.publishLocked(events)
 	return err
 }
@@ -291,6 +317,9 @@ func (r *RuntimeEventRecorder) append(ctx context.Context, eventType string, aud
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.owner != nil && r.generation != 0 && r.generation != r.owner.Snapshot().Generation {
+		return ErrStaleState
+	}
 	events, err := r.store.Append(ctx, harness.AnyStreamSeq, harness.PendingEvent{StreamID: r.streamID,
 		Type: eventType, CorrelationID: r.runID, Audience: audience, Payload: payload})
 	r.publishLocked(events)
@@ -320,3 +349,5 @@ type ToolEventObserver interface {
 	ToolFinished(context.Context, coretools.ToolCall, map[string]any, bool, ToolState) error
 	ToolDenied(context.Context, coretools.ToolCall, map[string]any) error
 }
+
+func (r *RuntimeEventRecorder) BindRuntime(owner *AgentRuntime) { r.owner = owner }
