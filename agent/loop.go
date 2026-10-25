@@ -71,15 +71,12 @@ type RuntimeCacheEditState = agentContext.CacheState
 type CoreExecutionEngine struct {
 	Config config.Config
 
-	mu                     sync.Mutex
-	aborted                bool
-	Registry               *coretools.ToolRegistry
-	AgentRuntime           *AgentRuntime
-	SessionRuntime         *SessionRuntime
-	permissionFuture       chan permissionDecision
-	skillPermissionCh      chan bool
-	mcpTrustCh             chan bool
-	skillPermissionQ       []StreamEvent
+	mu sync.Mutex
+
+	Registry       *coretools.ToolRegistry
+	AgentRuntime   *AgentRuntime
+	SessionRuntime *SessionRuntime
+
 	TaskRuntime            *AgentTaskRuntime
 	mcpMu                  sync.Mutex
 	mcpInitialized         bool
@@ -106,11 +103,6 @@ type CoreExecutionEngine struct {
 	StateObserver func(*AgentState)
 	RuntimeEvents *RuntimeEventRecorder
 	Runtime       *RuntimeAssembly
-}
-
-type permissionDecision struct {
-	decision string
-	toolName string
 }
 
 func NewCoreExecutionEngine(cfg config.Config, identity cluster.RuntimeIdentity, memoryFactory MemoryFabricFactory) *CoreExecutionEngine {
@@ -272,39 +264,33 @@ func (e *CoreExecutionEngine) ensureMCPTools(execCtx coretools.ExecutionContext)
 func (e *CoreExecutionEngine) maybePromptMCPTrust(ctx context.Context, out chan<- StreamEvent) {
 	e.mcpMu.Lock()
 	pending, _ := e.mcpContext["pending_mcp_trust"].([]map[string]any)
+	e.mcpMu.Unlock()
+	token, ok := runTokenFromContext(ctx)
+	if !ok {
+		return
+	}
 	if len(pending) == 0 {
-		e.mcpMu.Unlock()
 		return
 	}
 	if e.AgentRuntime.YoloEnabled() {
-		e.mcpMu.Unlock()
-		e.applyMCPTrustDecision(pending, true)
+		_ = e.AgentRuntime.withRun(token, func() { e.applyMCPTrustDecision(pending, true) })
 		return
 	}
-	ch := make(chan bool, 1)
-	e.mu.Lock()
-	e.mcpTrustCh = ch
-	e.mu.Unlock()
-	e.mcpMu.Unlock()
-
-	event := NewStreamEvent("permission_needed", "mcp_project_trust", map[string]any{
-		"mcp_trust_request": pending,
-		"dangerous":         true,
-		"risk":              "high",
-	})
+	event := NewStreamEvent("permission_needed", "mcp_project_trust", map[string]any{"mcp_trust_request": pending, "dangerous": true, "risk": "high"})
+	ticket, event, err := e.AgentRuntime.BeginPermission(ctx, token, PermissionMCP, "", event, false)
+	if err != nil {
+		return
+	}
 	if !sendStream(ctx, out, event) {
-		e.clearMCPTrustFuture(ch)
+		e.AgentRuntime.cancelPermission(ticket)
 		return
 	}
-
-	granted := false
-	select {
-	case granted = <-ch:
-	case <-ctx.Done():
+	answer, err := e.AgentRuntime.AwaitPermission(ctx, ticket)
+	if err != nil {
+		return
 	}
-	e.clearMCPTrustFuture(ch)
-
-	e.applyMCPTrustDecision(pending, granted)
+	granted := permissionGranted(answer)
+	_ = e.AgentRuntime.withRun(token, func() { e.applyMCPTrustDecision(pending, granted) })
 }
 
 func (e *CoreExecutionEngine) applyMCPTrustDecision(pending []map[string]any, granted bool) {
@@ -330,14 +316,6 @@ func (e *CoreExecutionEngine) applyMCPTrustDecision(pending []map[string]any, gr
 	e.mcpInitialized = false
 }
 
-func (e *CoreExecutionEngine) clearMCPTrustFuture(ch chan bool) {
-	e.mu.Lock()
-	if e.mcpTrustCh == ch {
-		e.mcpTrustCh = nil
-	}
-	e.mu.Unlock()
-}
-
 func (e *CoreExecutionEngine) disconnectMCP(ctx context.Context) {
 	e.mcpMu.Lock()
 	defer e.mcpMu.Unlock()
@@ -355,30 +333,7 @@ func mergeExecutionContext(dst, src coretools.ExecutionContext) {
 	}
 }
 
-func (e *CoreExecutionEngine) Abort() {
-	e.AgentRuntime.Abort()
-	e.mu.Lock()
-	e.aborted = true
-	if e.permissionFuture != nil {
-		select {
-		case e.permissionFuture <- permissionDecision{decision: PermissionDeny}:
-		default:
-		}
-	}
-	if e.skillPermissionCh != nil {
-		select {
-		case e.skillPermissionCh <- false:
-		default:
-		}
-	}
-	if e.mcpTrustCh != nil {
-		select {
-		case e.mcpTrustCh <- false:
-		default:
-		}
-	}
-	e.mu.Unlock()
-}
+func (e *CoreExecutionEngine) Abort() { e.AgentRuntime.Abort() }
 
 func (e *CoreExecutionEngine) Reset(contexts ...context.Context) error {
 	resetCtx := context.Background()
@@ -400,12 +355,12 @@ func (e *CoreExecutionEngine) Reset(contexts ...context.Context) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.aborted = false
 
 	e.skillRecoveryReady = map[string]bool{}
 	return nil
 }
 func (e *CoreExecutionEngine) Shutdown() {
+	e.AgentRuntime.Abort()
 	e.disconnectMCP(context.Background())
 	if e.TaskRuntime != nil {
 		e.TaskRuntime.Shutdown()
@@ -420,12 +375,7 @@ func (e *CoreExecutionEngine) Shutdown() {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.aborted = false
 	e.mcpInitialized = false
-	e.permissionFuture = nil
-	e.skillPermissionCh = nil
-	e.mcpTrustCh = nil
-	e.skillPermissionQ = nil
 	e.skillRecoveryReady = map[string]bool{}
 	e.TaskRuntime = NewAgentTaskRuntime()
 }
@@ -460,33 +410,18 @@ func (e *CoreExecutionEngine) MarkSkillHistoryCompacted(agentScope string) {
 	e.skillRecoveryReady[agentScope] = true
 }
 
-func (e *CoreExecutionEngine) ResolvePermission(decision string, toolName string) {
-	e.mu.Lock()
-	ch := e.permissionFuture
-	e.mu.Unlock()
-	if ch == nil {
-		return
-	}
-	if decision == "" {
-		decision = PermissionDeny
-	}
-	select {
-	case ch <- permissionDecision{decision: decision, toolName: toolName}:
-	default:
-	}
+func (e *CoreExecutionEngine) ResolvePermission(decision, toolName string) {
+	e.AgentRuntime.ResolveRunPermission(PermissionTool, PermissionAnswer{Decision: decision, ToolName: toolName})
 }
-
 func (e *CoreExecutionEngine) ResolveSkillPermission(granted bool) {
-	e.mu.Lock()
-	ch := e.skillPermissionCh
-	e.mu.Unlock()
-	if ch == nil {
-		return
+	decision := PermissionDeny
+	if granted {
+		decision = PermissionOnce
 	}
-	select {
-	case ch <- granted:
-	default:
-	}
+	e.SessionRuntime.ResolvePermissionKind(PermissionSkill, PermissionAnswer{Decision: decision})
+}
+func (e *CoreExecutionEngine) ResolvePermissionRequest(id, decision, toolName string) bool {
+	return e.SessionRuntime.ResolvePermissionRequest(id, PermissionAnswer{Decision: decision, ToolName: toolName})
 }
 
 func (e *CoreExecutionEngine) SkillNames(cwd string) []string {
@@ -506,32 +441,29 @@ func (e *CoreExecutionEngine) SkillNames(cwd string) []string {
 }
 
 func (e *CoreExecutionEngine) ResolveMCPTrust(granted bool) {
-	e.mu.Lock()
-	ch := e.mcpTrustCh
-	e.mu.Unlock()
-	if ch == nil {
-		return
+	decision := PermissionDeny
+	if granted {
+		decision = PermissionOnce
 	}
-	select {
-	case ch <- granted:
-	default:
-	}
+	e.AgentRuntime.ResolveRunPermission(PermissionMCP, PermissionAnswer{Decision: decision})
 }
 
 func (e *CoreExecutionEngine) queryDraftLoop(ctx context.Context, state *AgentState) <-chan StreamEvent {
 	out := make(chan StreamEvent)
 	go func() {
 		defer close(out)
-		e.queryLoop(ctx, state, out)
+		raw := make(chan StreamEvent)
+		go func() { defer close(raw); e.queryLoop(ctx, state, raw) }()
+		for event := range raw {
+			e.AgentRuntime.ObserveRunEvent(state.RunToken(), event)
+			sendStream(ctx, out, event)
+		}
 	}()
 	return out
 }
 
 func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, out chan<- StreamEvent) {
-	e.clearAbort()
-	outputRecovery := NewOutputRecoveryState(e.Config.APIMaxTokens)
-	ptlRecovery := PTLRecoveryManager{Config: e.Config}
-	consecutiveAPIErrors := 0
+	token := state.RunToken()
 
 	if e.Config.MCPEnabled && !e.mcpInitialized {
 		if e.Runtime != nil {
@@ -575,9 +507,12 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 	}
 
 	for {
-		if e.isAborted() {
+		if ctx.Err() != nil || e.AgentRuntime.RunSnapshot().Phase == AgentPhaseCancelling {
 			_ = e.publishDraft(context.WithoutCancel(ctx), state)
 			sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
+			return
+		}
+		if err := e.AgentRuntime.Transition(token, AgentPhasePreparing); err != nil {
 			return
 		}
 		maxTurns := e.Config.MaxParentTurns
@@ -661,7 +596,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"allowed_read_roots":  compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
 			"allowed_write_roots": compactToolRoots(e.Config.CWD, e.Config.ProjectRuntimeDir),
 			"_registry":           activeRegistry,
-			"agent_services":      e.AgentRuntime.Services(state.generation),
+			"agent_services":      e.AgentRuntime.ServicesFor(state.RunToken()),
 			"spawn_permissions":   ClonePermissionState(state.PermissionState),
 			"task_runtime":        e.TaskRuntime,
 			"_session_runtime":    e.SessionRuntime,
@@ -682,6 +617,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"_skill_agent_scope":      "main",
 			"_turn_count":             state.TurnCount,
 			"_permission_runtime":     e,
+			"_run_permission_emitter": func(event StreamEvent) bool { return sendStream(ctx, out, event) },
 			"_memory_engine":          e.memoryEngineSnapshot(),
 		}
 		if e.Config.MCPEnabled {
@@ -707,7 +643,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		if inlineRuntime.ModelOverride != nil {
 			modelOverride = *inlineRuntime.ModelOverride
 		}
-		client, err := e.BuildClient(outputRecovery.CurrentMaxTokens, modelOverride, thinkingBudget)
+		client, err := e.BuildClient(e.AgentRuntime.OutputRecovery(token).CurrentMaxTokens, modelOverride, thinkingBudget)
 		if err != nil {
 			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
 			sendStream(ctx, out, NewStreamEvent("done", "", nil))
@@ -770,22 +706,25 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				return
 			}
 		}
-		requestOptions := e.AgentRuntime.Context.ConsumeCacheEditsForGeneration(VisibleToolResultIDs(messages), firstNonEmptyString(modelOverride, e.Config.APIModel), state.generation)
+		requestOptions := e.AgentRuntime.ConsumeRequestCache(state.RunToken(), VisibleToolResultIDs(messages), firstNonEmptyString(modelOverride, e.Config.APIModel))
 		if len(requestOptions.AnthropicCacheEdits) == 0 {
 			requestOptions = nil
 		}
 		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(e.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+		if err := e.AgentRuntime.Transition(token, AgentPhaseCallingModel); err != nil {
+			return
+		}
 		for result := range client.StreamChat(streamCtx, state.SystemPrompt, messages, toolSchemas, requestOptions) {
 			if result.Err != nil {
-				if ctx.Err() != nil || e.isAborted() {
-					e.restoreInFlightCacheEdits(state.generation)
+				if ctx.Err() != nil || e.AgentRuntime.RunSnapshot().Phase == AgentPhaseCancelling {
+					e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
 					return
 				}
 				msg := result.Err.Error()
 				if IsFatalAPIError(msg) {
-					e.restoreInFlightCacheEdits(state.generation)
+					e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 					e.rememberAPIError(state, msg)
 					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("error", msg, api.ErrorMetadata(result.Err)))
@@ -797,10 +736,11 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 					turn.PTLErrorMsg = msg
 					break
 				}
-				consecutiveAPIErrors++
+				e.AgentRuntime.SetAPIErrors(token, e.AgentRuntime.APIErrors(token)+1)
+				_ = e.AgentRuntime.StartRecovery(token, RecoveryAPI, msg)
 				e.rememberAPIError(state, msg)
-				if consecutiveAPIErrors >= MaxAPIErrorRetries {
-					e.restoreInFlightCacheEdits(state.generation)
+				if e.AgentRuntime.APIErrors(token) >= MaxAPIErrorRetries {
+					e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 					sendStream(ctx, out, e.apiErrorEvent(msg, api.ErrorMetadata(result.Err)))
 					_ = e.publishDraft(context.WithoutCancel(ctx), state)
 					sendStream(ctx, out, NewStreamEvent("done", "", nil))
@@ -812,19 +752,19 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 				turn.StreamHadError = true
 				break
 			}
-			if ctx.Err() != nil || e.isAborted() {
-				e.restoreInFlightCacheEdits(state.generation)
+			if ctx.Err() != nil || e.AgentRuntime.RunSnapshot().Phase == AgentPhaseCancelling {
+				e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 				_ = e.publishDraft(context.WithoutCancel(ctx), state)
 				sendStream(ctx, out, NewStreamEvent("done", "Aborted by user.", nil))
 				return
 			}
-			action := e.HandleStreamEvent(result.Event, turn, executor, state, consecutiveAPIErrors)
-			consecutiveAPIErrors = action.ConsecutiveAPIErrors
+			action := e.HandleStreamEvent(result.Event, turn, executor, state, e.AgentRuntime.APIErrors(token))
+			e.AgentRuntime.SetAPIErrors(token, action.ConsecutiveAPIErrors)
 			if action.Event != nil {
 				sendStream(ctx, out, *action.Event)
 			}
 			if action.Return {
-				e.restoreInFlightCacheEdits(state.generation)
+				e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 				sendStream(ctx, out, NewStreamEvent("done", "", nil))
 				return
 			}
@@ -834,26 +774,32 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 		}
 
 		if turn.StreamHadError || turn.PTLDetected {
-			e.restoreInFlightCacheEdits(state.generation)
+			e.AgentRuntime.FinishRequestCache(state.RunToken(), false)
 		} else {
-			e.pinConsumedCacheEdits(state.generation)
+			e.AgentRuntime.FinishRequestCache(state.RunToken(), true)
 		}
 
 		if ShouldCommitFinalTextAfterStreamError(turn) {
 			turn.StreamHadError = false
-			consecutiveAPIErrors = 0
+			e.AgentRuntime.SetAPIErrors(token, 0)
 		}
 		if !turn.StreamHadError {
-			consecutiveAPIErrors = 0
+			e.AgentRuntime.SetAPIErrors(token, 0)
 		}
-		if turn.StreamHadError && len(turn.ToolCalls) == 0 && consecutiveAPIErrors < MaxAPIErrorRetries {
+		if turn.StreamHadError && len(turn.ToolCalls) == 0 && e.AgentRuntime.APIErrors(token) < MaxAPIErrorRetries {
+			_ = e.AgentRuntime.StartRecovery(token, RecoveryAPI, "retrying model request")
 			continue
 		}
 		if turn.PTLDetected {
-			action, event := ptlRecovery.RecoverContext(ctx, state, turn.PTLErrorMsg)
+			if !e.AgentRuntime.TryRecovery(token, RecoveryContext, 3) {
+				sendStream(ctx, out, NewStreamEvent("error", "Context recovery retry limit reached", nil))
+				return
+			}
+			_ = e.AgentRuntime.StartRecovery(token, RecoveryContext, turn.PTLErrorMsg)
+			action, event := (&PTLRecoveryManager{Config: e.Config}).RecoverContext(ctx, state, turn.PTLErrorMsg)
 			if action == "retry" {
 				e.clearRuntimeCompressionStateAfterHistoryReplace(state)
-				outputRecovery.ResetAfterHistoryReplace(e.Config.APIMaxTokens)
+				e.AgentRuntime.ResetOutputRecovery(token, e.Config.APIMaxTokens)
 				continue
 			}
 			if event != nil {
@@ -864,7 +810,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			return
 		}
 		if turn.OutputTruncated {
-			recovery := HandleOutputTruncation(state, &outputRecovery, turn.ToolCalls, turn.ThinkingContent, turn.FullText, turn.MessageID, turn.InputTokens, turn.OutputTokens)
+			recovery := e.AgentRuntime.HandleOutputTruncation(token, state, turn)
 			if recovery.ShouldContinue() {
 				continue
 			}
@@ -878,7 +824,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			}
 		}
 
-		outputRecovery.ResetRetries()
+		e.AgentRuntime.ResetOutputRetries(token)
 		CommitAssistantTurn(state, turn.ThinkingContent, turn.FullText, turn.ToolCalls, turn.MessageID, turn.InputTokens, turn.OutputTokens)
 		if e.Runtime != nil {
 			result, err := e.Runtime.Hooks.ModelResponseReceived.Run(ctx, ModelResponseHookContext{SessionID: e.SessionID, State: state, Turn: turn})
@@ -920,6 +866,9 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			return
 		}
 
+		if err := e.AgentRuntime.Transition(token, AgentPhaseExecutingTools); err != nil {
+			return
+		}
 		resolver := PermissionResolver{
 			Registry:        activeRegistry,
 			CheckPermission: e.CheckPermissionChain,
@@ -940,32 +889,27 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 						return PermissionDeny, ""
 					}
 				}
-				sendStream(ctx, out, event)
-				e.mu.Lock()
-				e.permissionFuture = make(chan permissionDecision, 1)
-				ch := e.permissionFuture
-				e.mu.Unlock()
-				defer func() {
-					e.mu.Lock()
-					if e.permissionFuture == ch {
-						e.permissionFuture = nil
-					}
-					e.mu.Unlock()
-				}()
-				select {
-				case decision := <-ch:
-					if e.RuntimeEvents != nil && toolCall.ID != "" {
-						if err := e.RuntimeEvents.RecordPermission(ctx, toolCall, false, decision.decision); err != nil {
-							return PermissionDeny, ""
-						}
-					}
-					return decision.decision, decision.toolName
-				case <-ctx.Done():
+				ticket, published, err := e.AgentRuntime.BeginPermission(ctx, token, PermissionTool, toolCall.Name, event, false)
+				if err != nil {
 					return PermissionDeny, ""
 				}
+				if !sendStream(ctx, out, published) {
+					e.AgentRuntime.cancelPermission(ticket)
+					return PermissionDeny, ""
+				}
+				decision, err := e.AgentRuntime.AwaitPermission(ctx, ticket)
+				if err != nil {
+					return PermissionDeny, ""
+				}
+				if e.RuntimeEvents != nil && toolCall.ID != "" {
+					if err = e.RuntimeEvents.RecordPermission(ctx, toolCall, false, decision.Decision); err != nil {
+						return PermissionDeny, ""
+					}
+				}
+				return decision.Decision, decision.ToolName
 			},
 		}
-		for _, event := range resolver.Resolve(ctx, turn.ToolCalls, executor, state, e.isAborted) {
+		for _, event := range resolver.Resolve(ctx, turn.ToolCalls, executor, state, func() bool { return ctx.Err() != nil || e.AgentRuntime.RunSnapshot().Phase == AgentPhaseCancelling }) {
 			sendStream(ctx, out, event)
 		}
 
@@ -1217,49 +1161,26 @@ func toolMemoryRecallQuery(original string, toolResults []map[string]any, execut
 }
 
 func (e *CoreExecutionEngine) requestSkillShellPermission(ctx context.Context, executor *StreamingToolExecutor, req skills.SkillShellPermissionRequest) bool {
-	if e != nil && e.AgentRuntime.YoloEnabled() {
+	if e.AgentRuntime.YoloEnabled() {
 		return true
 	}
-	ch := make(chan bool, 1)
-	e.mu.Lock()
-	if e.skillPermissionCh != nil {
-		e.mu.Unlock()
+	token, ok := runTokenFromContext(ctx)
+	if !ok {
 		return false
 	}
-	e.skillPermissionCh = ch
-	e.skillPermissionQ = append(e.skillPermissionQ, NewStreamEvent("permission_needed", "", map[string]any{
-		"skill_shell_request": req,
-		"dangerous":           true,
-		"risk":                "high",
-	}))
-	e.mu.Unlock()
+	event := NewStreamEvent("permission_needed", "", map[string]any{"skill_shell_request": req, "dangerous": true, "risk": "high"})
+	ticket, _, err := e.AgentRuntime.BeginPermission(ctx, token, PermissionSkill, "", event, true)
+	if err != nil {
+		return false
+	}
 	if executor != nil {
 		executor.signalActivity()
 	}
-	defer func() {
-		e.mu.Lock()
-		if e.skillPermissionCh == ch {
-			e.skillPermissionCh = nil
-		}
-		e.mu.Unlock()
-	}()
-	select {
-	case granted := <-ch:
-		return granted
-	case <-ctx.Done():
-		return false
-	}
+	answer, err := e.AgentRuntime.AwaitPermission(ctx, ticket)
+	return err == nil && permissionGranted(answer)
 }
-
 func (e *CoreExecutionEngine) drainSkillPermissionEvents() []StreamEvent {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.skillPermissionQ) == 0 {
-		return nil
-	}
-	events := append([]StreamEvent(nil), e.skillPermissionQ...)
-	e.skillPermissionQ = nil
-	return events
+	return e.AgentRuntime.DrainPermissionEvents(e.AgentRuntime.RunSnapshot().Token)
 }
 
 func (e *CoreExecutionEngine) BuildClient(maxTokens int, model string, thinkingBudgetTokens *int) (api.LLMClient, error) {
@@ -1620,18 +1541,6 @@ func (e *CoreExecutionEngine) rememberAPIError(state *AgentState, msg string) {
 
 func (e *CoreExecutionEngine) apiErrorEvent(msg string, metadata map[string]any) StreamEvent {
 	return NewStreamEvent("error", fmt.Sprintf("API error after %d retries: %s. The request may be malformed. Try /clear to start a fresh session.", MaxAPIErrorRetries, msg), metadata)
-}
-
-func (e *CoreExecutionEngine) isAborted() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.aborted
-}
-
-func (e *CoreExecutionEngine) clearAbort() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.aborted = false
 }
 
 func IsFatalAPIError(msg string) bool {

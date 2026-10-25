@@ -66,6 +66,11 @@ func (r *RuntimeEventRecorder) BeginRun(ctx context.Context, message map[string]
 		return fmt.Errorf("runtime run %s is already active", r.runID)
 	}
 	r.runID = r.pendingRunID
+	if r.owner != nil {
+		if live := r.owner.RunSnapshot(); live.Token.ID != "" && live.Phase.Active() {
+			r.runID = live.Token.ID
+		}
+	}
 	if r.runID == "" {
 		r.runID = uuid.NewString()
 	}
@@ -351,3 +356,9 @@ type ToolEventObserver interface {
 }
 
 func (r *RuntimeEventRecorder) BindRuntime(owner *AgentRuntime) { r.owner = owner }
+
+func (r *RuntimeEventRecorder) ReservedRunID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pendingRunID
+}

@@ -934,6 +934,10 @@ func resolveHeadlessPermission(engine *agent.QueryEngine, event agent.StreamEven
 			decision = agent.PermissionDeny
 		}
 	}
+	if id := agent.PermissionRequestID(event); id != "" {
+		engine.ResolvePermissionRequest(id, decision, event.Content)
+		return
+	}
 	if _, ok := event.Metadata["mcp_trust_request"]; ok {
 		engine.ResolveMCPTrust(granted)
 		return

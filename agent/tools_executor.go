@@ -69,7 +69,11 @@ func NewStreamingToolExecutor(registry *coretools.ToolRegistry, cfg config.Confi
 	if len(maxConcurrentSafe) > 0 && maxConcurrentSafe[0] > 0 {
 		limit = int64(maxConcurrentSafe[0])
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := context.Background()
+	if state != nil && state.owner != nil {
+		parent = state.owner.contextForRun(state.RunToken())
+	}
+	ctx, cancel := context.WithCancel(parent)
 	if execCtx == nil {
 		execCtx = coretools.ExecutionContext{}
 	}

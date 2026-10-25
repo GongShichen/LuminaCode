@@ -34,7 +34,7 @@ func TestAgentRuntimeDraftIsolationAndResetFence(t *testing.T) {
 	if r.Snapshot().Context.Messages[0].Role != "user" {
 		t.Fatal("snapshot shares storage")
 	}
-	services := r.Services(s.Generation)
+	services := r.ServicesFor(draft.RunToken())
 	if err = r.Reset(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestRuntimeKeepsOriginalToolResultsWhenWorkingViewChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.End(r.Snapshot().Generation)
+	defer r.EndRun(draft.RunToken())
 	draft.Messages[0]["content"] = "compressed working content"
 	if err = r.Commit(ctx, draft); err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestRuntimeAccountsForCompactorUsageExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.End(draft.ContextSnapshot.Generation)
+	defer r.EndRun(draft.RunToken())
 	result, err := manager.Compact(ctx, agentContext.CompactManual)
 	if err != nil {
 		t.Fatal(err)

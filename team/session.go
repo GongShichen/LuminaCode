@@ -1206,7 +1206,11 @@ func (s *Session) runAgentTask(ctx context.Context, agentID, from, prompt, taskT
 				cfg.Yolo = true
 				s.ApplyRuntimeConfig(cfg)
 			}
-			runtime.Engine.ResolvePermission(decision, toolNameFromPermissionEvent(event))
+			if id := agent.PermissionRequestID(event); id != "" {
+				runtime.Engine.ResolvePermissionRequest(id, decision, toolNameFromPermissionEvent(event))
+			} else {
+				runtime.Engine.ResolvePermission(decision, toolNameFromPermissionEvent(event))
+			}
 		}
 	}
 

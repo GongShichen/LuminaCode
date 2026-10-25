@@ -392,7 +392,9 @@ func (c *SessionController) Snapshot() SessionSnapshot {
 	if c.journal != nil {
 		lastSeq, _ = c.journal.Head(context.Background())
 	}
+	run := c.engine.CoreEngine.AgentRuntime.RunSnapshot()
 	return SessionSnapshot{
+		Run:               &run,
 		SessionID:         c.id,
 		Frame:             c.ui.SnapshotFrame(),
 		Busy:              c.busy.Load(),
@@ -428,6 +430,7 @@ func (c *SessionController) RuntimeDescription() map[string]any {
 	}
 	description := c.engine.CoreEngine.Runtime.Describe()
 	description["session_id"] = c.id
+	description["agent_run"] = c.engine.CoreEngine.AgentRuntime.RunSnapshot()
 	return description
 }
 

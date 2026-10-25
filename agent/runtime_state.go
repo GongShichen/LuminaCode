@@ -76,6 +76,7 @@ type AgentSnapshot struct {
 	Context           agentContext.ContextSnapshot `json:"context"`
 	Transcript        []agentContext.Message       `json:"transcript"`
 	HistoryIncomplete bool                         `json:"history_incomplete,omitempty"`
+	Run               *RunSnapshot                 `json:"run,omitempty"`
 }
 
 func cloneSnapshot(s AgentSnapshot) AgentSnapshot {
@@ -193,14 +194,6 @@ func (s AgentSnapshot) LegacyState() AgentState {
 	return result
 }
 
-type RunState struct {
-	Generation   uint64
-	Cancel       context.CancelFunc
-	Running      bool
-	Files        map[string]file.FileStateEntry
-	Replacements map[string]string
-}
-
 // AgentRuntime is the only publisher of an agent's state. Execution routines
 // edit detached drafts; readers never observe those in-flight mutations.
 type AgentRuntime struct {
@@ -223,14 +216,17 @@ func NewAgentRuntime(cfg config.Config, initial *AgentState) *AgentRuntime {
 	snapshot := SnapshotFromState(initial)
 	r := &AgentRuntime{snapshot: snapshot, Context: agentContext.NewContextManager(cfg, nil)}
 	_ = r.Context.Restore(snapshot.Context)
-	r.run = RunState{Generation: snapshot.Generation, Files: map[string]file.FileStateEntry{}, Replacements: map[string]string{}}
+	r.run = idleRun(snapshot.Generation)
 	return r
 }
 
 func (r *AgentRuntime) Snapshot() AgentSnapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return cloneSnapshot(r.snapshot)
+	snapshot := cloneSnapshot(r.snapshot)
+	run := r.runSnapshotLocked()
+	snapshot.Run = &run
+	return snapshot
 }
 func (r *AgentRuntime) BindStore(store harness.EventStore, stream string) {
 	r.mu.Lock()
@@ -247,52 +243,60 @@ func (r *AgentRuntime) Restore(s AgentSnapshot) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.run.Running {
+	if r.run.Phase.Active() {
 		return ErrAgentBusy
 	}
 	s.Generation = max(s.Generation, r.snapshot.Generation+1)
 	s.Context.Generation = s.Generation
+	s.Run = nil
 	r.snapshot = cloneSnapshot(s)
-	r.run = RunState{Generation: s.Generation, Files: map[string]file.FileStateEntry{}, Replacements: map[string]string{}}
+	r.run = idleRun(s.Generation)
 	return r.Context.Restore(s.Context)
 }
 
-func (r *AgentRuntime) Begin(ctx context.Context) (context.Context, *AgentState, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.run.Running {
-		return ctx, nil, ErrAgentBusy
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	r.run.Cancel = cancel
-	r.run.Running = true
-	s := r.snapshot.LegacyState()
-	s.owner = r
-	s.generation = r.snapshot.Generation
-	s.permissionRevision = r.policyRevision
-	return runCtx, &s, nil
+func (r *AgentRuntime) Begin(ctx context.Context, outputLimits ...int) (context.Context, *AgentState, error) {
+	return r.beginRun(ctx, "", outputLimits...)
 }
 
-func (r *AgentRuntime) End(generation uint64) {
+func (r *AgentRuntime) BeginWithRunID(ctx context.Context, id string, outputLimit int) (context.Context, *AgentState, error) {
+	return r.beginRun(ctx, id, outputLimit)
+}
+
+func (r *AgentRuntime) beginRun(ctx context.Context, id string, outputLimits ...int) (context.Context, *AgentState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if generation != r.run.Generation {
-		return
+	if r.run.Phase.Active() {
+		return ctx, nil, ErrAgentBusy
 	}
-	if r.run.Cancel != nil {
-		r.run.Cancel()
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
 	}
-	r.run.Cancel = nil
-	r.run.Running = false
+	limit := 16000
+	if len(outputLimits) > 0 {
+		limit = outputLimits[0]
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	if id == "" {
+		id = uuid.NewString()
+	}
+	r.run = RunState{ID: id, Generation: r.snapshot.Generation, Phase: AgentPhasePreparing, Activity: AgentPhasePreparing, Context: runCtx, Cancel: cancel, StartedAt: time.Now().UTC(), Pending: map[string]*permissionWaiter{}, Files: r.run.Files, Replacements: r.run.Replacements, Recovery: RecoveryState{Output: NewOutputRecoveryState(limit)}}
+	token := RunToken{r.run.Generation, r.run.ID}
+	runCtx = context.WithValue(runCtx, runTokenContextKey{}, token)
+	r.run.Context = runCtx
+	r.run.stopCancellation = context.AfterFunc(runCtx, func() { r.cancelRun(token, runCtx.Err().Error()) })
+	state := r.snapshot.LegacyState()
+	state.owner = r
+	state.generation = token.Generation
+	state.runID = token.ID
+	state.permissionRevision = r.policyRevision
+	return runCtx, &state, nil
 }
 
 func (r *AgentRuntime) Abort() {
 	r.mu.RLock()
-	cancel := r.run.Cancel
+	token := RunToken{r.run.Generation, r.run.ID}
 	r.mu.RUnlock()
-	if cancel != nil {
-		cancel()
-	}
+	r.cancelRun(token, "aborted by user")
 }
 
 func (r *AgentRuntime) persistLocked(ctx context.Context, s AgentSnapshot, extra ...harness.PendingEvent) error {
@@ -361,7 +365,7 @@ func (r *AgentRuntime) Commit(ctx context.Context, draft *AgentState) error {
 	next := SnapshotFromState(draft)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if draft.generation != r.snapshot.Generation {
+	if !r.runActiveLocked(draft.RunToken()) {
 		return ErrStaleState
 	}
 	if draft.permissionRevision < r.policyRevision {
@@ -390,7 +394,7 @@ func (r *AgentRuntime) Commit(ctx context.Context, draft *AgentState) error {
 func (r *AgentRuntime) CommitContext(ctx context.Context, result agentContext.CompactionResult, draft *AgentState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if result.Generation != r.snapshot.Generation || result.BaseRevision != r.snapshot.Context.Revision {
+	if !r.runActiveLocked(draft.RunToken()) || result.Generation != r.snapshot.Generation || result.BaseRevision != r.snapshot.Context.Revision {
 		return agentContext.ErrStaleContext
 	}
 	next := cloneSnapshot(r.snapshot)
@@ -452,7 +456,10 @@ func (r *AgentRuntime) Reset(ctx context.Context) error {
 	}
 	r.snapshot = fresh
 	r.durableMessages = map[string]int64{}
-	r.run = RunState{Generation: fresh.Generation, Files: map[string]file.FileStateEntry{}, Replacements: map[string]string{}}
+	if r.run.stopCancellation != nil {
+		r.run.stopCancellation()
+	}
+	r.run = idleRun(fresh.Generation)
 	return r.Context.Restore(fresh.Context)
 }
 
@@ -562,13 +569,14 @@ func stringsContainsCompaction(text string) bool {
 type AgentServices struct {
 	Runtime    *AgentRuntime
 	Generation uint64
+	RunID      string
 }
 
 func (s AgentServices) SetReadFileState(path string, entry file.FileStateEntry) {
 	r := s.Runtime
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if s.Generation == r.snapshot.Generation {
+	if s.Generation == r.snapshot.Generation && (s.RunID != "" && s.RunID == r.run.ID && r.run.Phase.Active() && r.run.Phase != AgentPhaseCancelling) {
 		r.run.Files[path] = entry
 	}
 }
@@ -576,17 +584,19 @@ func (s AgentServices) GetReadFileState(path string) (file.FileStateEntry, bool)
 	r := s.Runtime
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if s.Generation != r.snapshot.Generation {
+	if s.Generation != r.snapshot.Generation || (s.RunID == "" || s.RunID != r.run.ID || !r.run.Phase.Active() || r.run.Phase == AgentPhaseCancelling) {
 		return file.FileStateEntry{}, false
 	}
 	v, ok := r.run.Files[path]
 	return v, ok
 }
 func (s AgentServices) YoloEnabled() bool {
-	snapshot := s.Runtime.Snapshot()
-	return snapshot.Generation == s.Generation && snapshot.Permissions.Policy != nil && snapshot.Permissions.Policy.YoloMode
+	r := s.Runtime
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.runActiveLocked(RunToken{Generation: s.Generation, ID: s.RunID}) && r.run.Phase != AgentPhaseCancelling && r.snapshot.Permissions.Policy != nil && r.snapshot.Permissions.Policy.YoloMode
 }
-func (r *AgentRuntime) Services(generation uint64) AgentServices { return AgentServices{r, generation} }
+
 func (r *AgentRuntime) RecentFiles() []map[string]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -702,7 +712,7 @@ func (s AgentServices) Replacement(id string) (string, bool) {
 	r := s.Runtime
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if s.Generation != r.snapshot.Generation {
+	if s.Generation != r.snapshot.Generation || (s.RunID == "" || s.RunID != r.run.ID || !r.run.Phase.Active() || r.run.Phase == AgentPhaseCancelling) {
 		return "", false
 	}
 	value, ok := r.run.Replacements[id]
@@ -712,7 +722,7 @@ func (s AgentServices) SetReplacement(id, value string) {
 	r := s.Runtime
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if s.Generation == r.snapshot.Generation {
+	if s.Generation == r.snapshot.Generation && (s.RunID != "" && s.RunID == r.run.ID && r.run.Phase.Active() && r.run.Phase != AgentPhaseCancelling) {
 		r.run.Replacements[id] = value
 	}
 }
@@ -770,4 +780,8 @@ func (r *AgentRuntime) HasDurableStore() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.store != nil
+}
+
+func (r *AgentRuntime) ServicesFor(token RunToken) AgentServices {
+	return AgentServices{Runtime: r, Generation: token.Generation, RunID: token.ID}
 }

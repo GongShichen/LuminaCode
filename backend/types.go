@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"LuminaCode/agent"
 	"encoding/json"
 	"time"
 
@@ -56,6 +57,7 @@ type PushEvent struct {
 type EventEmitter func(PushEvent)
 
 type SessionSnapshot struct {
+	Run               *agent.RunSnapshot    `json:"run,omitempty"`
 	SessionID         string                `json:"session_id"`
 	Frame             luminaui.RenderFrame  `json:"frame"`
 	Busy              bool                  `json:"busy"`

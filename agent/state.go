@@ -14,6 +14,7 @@ import (
 
 // AgentState is a detached execution draft and legacy import DTO. Published state lives in AgentRuntime.
 type AgentState struct {
+	runID                          string
 	snapshotRevision               uint64
 	permissionRevision             uint64
 	owner                          *AgentRuntime

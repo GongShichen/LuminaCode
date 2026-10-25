@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"strings"
@@ -49,21 +50,23 @@ type SubAgentRequestResult struct {
 	TotalInputTokens  int
 	TotalOutputTokens int
 	TimedOut          bool
+	Error             error
 }
 
 type SubAgent struct {
-	Config            config.Config
-	Registry          *coretools.ToolRegistry
-	Definition        AgentDef
-	Permissions       *security.PermissionState
-	Runtime           *AgentRuntime
-	Model             string
-	AgentType         string
-	ExtraContext      coretools.ExecutionContext
-	ThinkingBudget    *int
-	MaxTurns          int
-	Aborted           bool
-	abortMu           sync.RWMutex
+	Config         config.Config
+	Registry       *coretools.ToolRegistry
+	Definition     AgentDef
+	Permissions    *security.PermissionState
+	Runtime        *AgentRuntime
+	Model          string
+	AgentType      string
+	ExtraContext   coretools.ExecutionContext
+	ThinkingBudget *int
+	MaxTurns       int
+
+	runtimeMu         sync.RWMutex
+	executionMu       sync.Mutex
 	TotalInputTokens  int
 	TotalOutputTokens int
 	TimeoutSeconds    int
@@ -99,10 +102,9 @@ func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition
 }
 
 func (s *SubAgent) Abort() {
-	s.abortMu.Lock()
-	s.Aborted = true
+	s.runtimeMu.Lock()
 	runtime := s.Runtime
-	s.abortMu.Unlock()
+	s.runtimeMu.Unlock()
 	if runtime != nil {
 		runtime.Abort()
 	}
@@ -149,7 +151,11 @@ func (s *SubAgent) createSessionState(ctx context.Context, prompt string) *SubAg
 	}
 }
 
-func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, sessionState *SubAgentSessionState) SubAgentRequestResult {
+func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, sessionState *SubAgentSessionState) (result SubAgentRequestResult) {
+	if !s.executionMu.TryLock() {
+		return SubAgentRequestResult{Error: ErrAgentBusy, FinalText: ErrAgentBusy.Error()}
+	}
+	defer s.executionMu.Unlock()
 	if sessionState == nil {
 		sessionState = s.createSessionState(ctx, prompt)
 	}
@@ -175,39 +181,47 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 			sessionState.Runtime.BindStore(store, firstNonEmptyString(sessionState.ScopeID, initial.MemoryAgentID))
 		}
 	}
-	s.abortMu.Lock()
+	s.runtimeMu.Lock()
 	s.Runtime = sessionState.Runtime
-	s.abortMu.Unlock()
-	runCtx, draft, beginErr := s.Runtime.Begin(ctx)
+	s.runtimeMu.Unlock()
+	runCtx, draft, beginErr := s.Runtime.Begin(ctx, s.Config.APIMaxTokens)
 	if beginErr != nil {
-		return SubAgentRequestResult{FinalText: beginErr.Error()}
+		if errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) {
+			return s.contextStopResult(sessionState, "", beginErr)
+		}
+		return SubAgentRequestResult{Error: beginErr, FinalText: beginErr.Error()}
 	}
 	ctx = runCtx
 	sessionState.draft = draft
 	// Run-scoped hints expire between reusable-worker requests. New inline hints
 	// remain in sessionState.Messages and are collected into this run below.
 	draft.ContextSnapshot.Attachments = nil
-	defer s.Runtime.End(draft.generation)
+	defer s.Runtime.EndRun(draft.RunToken())
 	defer func() {
+		if result.Error != nil {
+			s.Runtime.FailRun(draft.RunToken(), result.Error.Error())
+		}
 		draft.Messages = sessionState.Messages
 		draft.SystemPrompt = sessionState.SystemPrompt
 		draft.TotalInputTokens = sessionState.TotalInputTokens
 		draft.TotalOutputTokens = sessionState.TotalOutputTokens
-		_ = s.Runtime.Commit(context.WithoutCancel(ctx), draft)
+		if err := s.Runtime.Commit(context.WithoutCancel(ctx), draft); err != nil && result.Error == nil {
+			result.Error = err
+			s.Runtime.FailRun(draft.RunToken(), err.Error())
+		}
 	}()
 	messages := sessionState.Messages
 	systemPrompt := sessionState.SystemPrompt
-	continuationRetries := 0
 	shouldDrainNotifications := true
 	fullText := ""
 
-	reactiveRetries := 0
 requestLoop:
 	for turn := 0; turn < s.MaxTurns; turn++ {
 		if ctx.Err() != nil {
 			return s.contextStopResult(sessionState, fullText, ctx.Err())
 		}
-		if s.aborted() || sessionState.AbortCheck() {
+		if sessionState.AbortCheck() {
+			s.Runtime.cancelRun(draft.RunToken(), "worker stopped")
 			return SubAgentRequestResult{
 				FinalText:         "Sub-agent aborted by user.",
 				TotalInputTokens:  sessionState.TotalInputTokens,
@@ -220,6 +234,9 @@ requestLoop:
 		}
 		shouldDrainNotifications = true
 
+		if err := s.Runtime.Transition(draft.RunToken(), AgentPhasePreparing); err != nil {
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
+		}
 		draft.Messages = messages
 		runtime := skills.CollectInlineSkillRuntime(contextSkillMessages(draft))
 		activeRegistry := s.Registry
@@ -237,6 +254,7 @@ requestLoop:
 		client, err := CreateConfiguredLLMClient(s.Config, model, s.Config.APIMaxTokens, s.ThinkingBudget, api.DefaultRetryConfigPtr())
 		if err != nil {
 			return SubAgentRequestResult{
+				Error:             err,
 				FinalText:         "Sub-agent API call failed: " + err.Error(),
 				TotalInputTokens:  sessionState.TotalInputTokens,
 				TotalOutputTokens: sessionState.TotalOutputTokens,
@@ -248,11 +266,14 @@ requestLoop:
 		draft.TotalOutputTokens = sessionState.TotalOutputTokens
 		draft.SystemPrompt = systemPrompt
 		if err := s.Runtime.Commit(ctx, draft); err != nil {
-			return SubAgentRequestResult{FinalText: err.Error()}
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
 		}
 		cfg := s.Config
 		cfg.APIModel = model
 		s.Runtime.Context.Configure(cfg)
+		if agentContext.RequestBudget(systemPrompt, agentContext.Render(s.Runtime.Context.Snapshot()), toolSchemas, cfg.CompressionContextLimit()).Total > cfg.CompressionTriggerTokens() {
+			_ = s.Runtime.StartRecovery(draft.RunToken(), RecoveryContext, "context compression")
+		}
 		prepared, prepareErr := s.Runtime.Context.Build(ctx, agentContext.BuildInput{SystemPrompt: systemPrompt, ToolSchemas: toolSchemas, Evidence: s.Runtime.Snapshot().Transcript, Normalize: prepareSubagentAPIMessages})
 		if prepared.HistoryReplaced {
 			systemPrompt = s.buildSystemPrompt()
@@ -266,12 +287,12 @@ requestLoop:
 			return s.contextStopResult(sessionState, fullText, ctx.Err())
 		}
 		if err := s.Runtime.CommitContext(ctx, prepared, draft); err != nil {
-			return SubAgentRequestResult{FinalText: err.Error()}
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
 		}
 		sessionState.TotalInputTokens = draft.TotalInputTokens
 		sessionState.TotalOutputTokens = draft.TotalOutputTokens
 		if prepareErr != nil {
-			return SubAgentRequestResult{FinalText: "Sub-agent context failed: " + prepareErr.Error(), TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens}
+			return SubAgentRequestResult{Error: prepareErr, FinalText: "Sub-agent context failed: " + prepareErr.Error(), TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens}
 		}
 		messages = draft.Messages
 		sessionState.Messages = messages
@@ -284,10 +305,12 @@ requestLoop:
 		outputTruncated := false
 
 		streamCtx := api.ContextWithStreamIdleTimeout(ctx, time.Duration(s.Config.APIStreamIdleTimeoutSeconds*float64(time.Second)))
+		if err := s.Runtime.Transition(draft.RunToken(), AgentPhaseCallingModel); err != nil {
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
+		}
 		for result := range client.StreamChat(streamCtx, systemPrompt, prepared.Compiled.Messages, toolSchemas, nil) {
 			if result.Err != nil {
-				if ctx.Err() == nil && IsPTLErrorMessage(result.Err.Error()) && reactiveRetries < 3 {
-					reactiveRetries++
+				if ctx.Err() == nil && IsPTLErrorMessage(result.Err.Error()) && s.Runtime.TryRecovery(draft.RunToken(), RecoveryContext, 3) {
 					recovery, recoveryErr := s.Runtime.Context.Compact(ctx, agentContext.CompactReactive)
 					if recoveryErr == nil && recovery.Succeeded && s.Runtime.CommitContext(ctx, recovery, draft) == nil {
 						messages = draft.Messages
@@ -299,6 +322,7 @@ requestLoop:
 					return s.contextStopResult(sessionState, fullText, ctx.Err())
 				}
 				return SubAgentRequestResult{
+					Error:             result.Err,
 					FinalText:         "Sub-agent API call failed: " + result.Err.Error(),
 					TotalInputTokens:  sessionState.TotalInputTokens,
 					TotalOutputTokens: sessionState.TotalOutputTokens,
@@ -354,8 +378,7 @@ requestLoop:
 					return s.contextStopResult(sessionState, fullText, ctx.Err())
 				}
 				msg := stringFromAny(event["message"])
-				if IsPTLErrorMessage(msg) && reactiveRetries < 3 {
-					reactiveRetries++
+				if IsPTLErrorMessage(msg) && s.Runtime.TryRecovery(draft.RunToken(), RecoveryContext, 3) {
 					recovery, recoveryErr := s.Runtime.Context.Compact(ctx, agentContext.CompactReactive)
 					if recoveryErr == nil && recovery.Succeeded && s.Runtime.CommitContext(ctx, recovery, draft) == nil {
 						messages = draft.Messages
@@ -364,6 +387,7 @@ requestLoop:
 					}
 				}
 				return SubAgentRequestResult{
+					Error:             fmt.Errorf("%s", msg),
 					FinalText:         "Sub-agent error: " + msg,
 					TotalInputTokens:  sessionState.TotalInputTokens,
 					TotalOutputTokens: sessionState.TotalOutputTokens,
@@ -388,8 +412,7 @@ requestLoop:
 		messages = append(messages, assistantMsg)
 		sessionState.Messages = messages
 
-		if outputTruncated && continuationRetries < MaxContinuationRetries {
-			continuationRetries++
+		if outputTruncated && s.Runtime.TryRecovery(draft.RunToken(), RecoveryOutput, MaxContinuationRetries) {
 			messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{{
 				"type": "text",
 				"text": "Your previous response was cut off due to output length limits. Please continue exactly where you left off. Do not repeat any content you already generated.",
@@ -406,7 +429,10 @@ requestLoop:
 			return SubAgentRequestResult{FinalText: fullText, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens}
 		}
 
-		execCtx := s.buildExecutionContext()
+		if err := s.Runtime.Transition(draft.RunToken(), AgentPhaseExecutingTools); err != nil {
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
+		}
+		execCtx := s.buildExecutionContext(draft.RunToken())
 		execCtx["_registry"] = activeRegistry
 		var toolResults []map[string]any
 		var observations []map[string]any
@@ -424,7 +450,7 @@ requestLoop:
 		}
 		sessionState.RecentToolObservations = observations
 		sessionState.TotalToolUseCount += len(observations)
-		continuationRetries = 0
+		s.Runtime.ResetContinuationRetries(draft.RunToken())
 		if len(toolResults) > 0 {
 			messages = append(messages, map[string]any{"role": "user", "content": toolResults})
 			if pending, ok := execCtx["_pending_skill_messages"].([]map[string]any); ok && len(pending) > 0 {
@@ -439,6 +465,7 @@ requestLoop:
 		last = TruncateResult(fullText, 500)
 	}
 	return SubAgentRequestResult{
+		Error:             fmt.Errorf("sub-agent reached maximum turns"),
 		FinalText:         fmt.Sprintf("Sub-agent reached maximum turns (%d). Last response: %s", s.MaxTurns, last),
 		TotalInputTokens:  sessionState.TotalInputTokens,
 		TotalOutputTokens: sessionState.TotalOutputTokens,
@@ -495,12 +522,13 @@ func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessi
 		return SubAgentRequestResult{FinalText: fallback, TotalInputTokens: sessionState.TotalInputTokens, TotalOutputTokens: sessionState.TotalOutputTokens, TimedOut: true}
 	}
 	if sessionState.Runtime != nil {
-		runCtx, draft, beginErr := sessionState.Runtime.Begin(ctx)
+		runCtx, draft, beginErr := sessionState.Runtime.Begin(ctx, s.Config.APIMaxTokens)
 		if beginErr != nil {
 			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
 		}
 		ctx = runCtx
-		defer sessionState.Runtime.End(draft.generation)
+		_ = sessionState.Runtime.Transition(draft.RunToken(), AgentPhaseRecovering)
+		defer sessionState.Runtime.EndRun(draft.RunToken())
 		draft.Messages = messages
 		draft.SystemPrompt = sessionState.SystemPrompt
 		if err = sessionState.Runtime.Commit(ctx, draft); err != nil {
@@ -514,6 +542,7 @@ func (s *SubAgent) finalizeTimedOutRun(ctx context.Context, prompt string, sessi
 			return SubAgentRequestResult{FinalText: fallback, TimedOut: true}
 		}
 		messages = prepared.Compiled.Messages
+		_ = sessionState.Runtime.Transition(draft.RunToken(), AgentPhaseCallingModel)
 		defer func() {
 			draft.Messages = sessionState.Messages
 			draft.TotalInputTokens = sessionState.TotalInputTokens
@@ -678,7 +707,7 @@ func (s *SubAgent) sessionIDForMemoryUse() string {
 	return ""
 }
 
-func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
+func (s *SubAgent) buildExecutionContext(tokens ...RunToken) coretools.ExecutionContext {
 	execCtx := coretools.ExecutionContext{
 		"cwd":                     s.Config.CWD,
 		"config":                  s.Config,
@@ -698,12 +727,39 @@ func (s *SubAgent) buildExecutionContext() coretools.ExecutionContext {
 	if s.Runtime != nil {
 		snapshot := s.Runtime.Snapshot()
 		scope = firstNonEmptyString(snapshot.Identity.AgentID, scope)
-		execCtx["agent_services"] = s.Runtime.Services(snapshot.Generation)
+		token := s.Runtime.RunSnapshot().Token
+		if len(tokens) > 0 {
+			token = tokens[0]
+		}
+		execCtx["agent_services"] = s.Runtime.ServicesFor(token)
 		execCtx["spawn_permissions"] = ClonePermissionState(snapshot.Permissions.Policy)
 	}
 	execCtx["scope_id"] = scope
 	execCtx["_agent_id"] = scope
 	execCtx["_skill_agent_scope"] = scope
+	if s.Runtime != nil {
+		token := s.Runtime.RunSnapshot().Token
+		if len(tokens) > 0 {
+			token = tokens[0]
+		}
+		execCtx["_request_skill_shell_permission"] = func(req skills.SkillShellPermissionRequest) bool {
+			if s.Runtime.YoloEnabled() {
+				return true
+			}
+			ctx := s.Runtime.contextForRun(token)
+			ticket, event, err := s.Runtime.BeginPermission(ctx, token, PermissionSkill, "", NewStreamEvent("permission_needed", "", map[string]any{"skill_shell_request": req, "agent_id": scope, "dangerous": true, "risk": "high"}), false)
+			if err != nil {
+				return false
+			}
+			emit, ok := s.ExtraContext["_run_permission_emitter"].(func(StreamEvent) bool)
+			if !ok || !emit(event) {
+				s.Runtime.cancelPermission(ticket)
+				return false
+			}
+			answer, err := s.Runtime.AwaitPermission(ctx, ticket)
+			return err == nil && permissionGranted(answer)
+		}
+	}
 	if wt, _ := s.ExtraContext["worktree_cwd"].(string); wt != "" {
 		execCtx["cwd"] = wt
 	}
@@ -742,5 +798,3 @@ func prepareSubagentAPIMessages(messages []map[string]any) []map[string]any {
 	}
 	return cleaned
 }
-
-func (s *SubAgent) aborted() bool { s.abortMu.RLock(); defer s.abortMu.RUnlock(); return s.Aborted }

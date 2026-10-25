@@ -297,6 +297,14 @@ func (r *UiRuntime) taskRuntime() *agent.AgentTaskRuntime {
 }
 
 func (r *UiRuntime) resolvePermissionEvent(event UiEvent, answer string) {
+	if id := stringFromAny(event.Metadata["permission_request_id"]); id != "" {
+		if resolver, ok := r.Engine.(interface {
+			ResolvePermissionRequest(string, string, string) bool
+		}); ok {
+			resolver.ResolvePermissionRequest(id, answer, "")
+			return
+		}
+	}
 	granted := answer == "once" || answer == "always"
 	if _, _, ok := skillShellRequestParts(event.Metadata["skill_shell_request"]); ok {
 		if resolver, ok := r.Engine.(interface{ ResolveSkillPermission(bool) }); ok {

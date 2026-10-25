@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"LuminaCode/agentContext"
@@ -21,9 +20,6 @@ import (
 type QueryEngine struct {
 	Config     config.Config
 	CoreEngine *CoreExecutionEngine
-
-	skillPermissionMu sync.Mutex
-	skillPermissionCh chan bool
 }
 
 func NewQueryEngine(cfg config.Config, core *CoreExecutionEngine) *QueryEngine {
@@ -84,20 +80,17 @@ func (q *QueryEngine) ClearMCP() {
 	}
 }
 
-func (q *QueryEngine) ResolvePermission(decision string, toolName string) {
-	if q.resolvePendingSkillPermission(decision == PermissionOnce || decision == PermissionAlways || decision == "true") {
+func (q *QueryEngine) ResolvePermission(decision, toolName string) {
+	if q.CoreEngine.SessionRuntime.ResolvePermissionKind(PermissionSkill, PermissionAnswer{Decision: decision}) {
 		return
 	}
 	q.CoreEngine.ResolvePermission(decision, toolName)
 }
-
 func (q *QueryEngine) ResolveSkillPermission(granted bool) {
-	if q.resolvePendingSkillPermission(granted) {
-		return
-	}
-	if q.CoreEngine != nil {
-		q.CoreEngine.ResolveSkillPermission(granted)
-	}
+	q.CoreEngine.ResolveSkillPermission(granted)
+}
+func (q *QueryEngine) ResolvePermissionRequest(id, decision, toolName string) bool {
+	return q.CoreEngine.ResolvePermissionRequest(id, decision, toolName)
 }
 
 func (q *QueryEngine) ResolveMCPTrust(granted bool) {
@@ -114,15 +107,18 @@ func (q *QueryEngine) SkillRegistry() *skills.SkillRegistry {
 }
 
 func (q *QueryEngine) Compact(ctx context.Context, mode agentContext.CompactMode) (agentContext.CompactionResult, error) {
-	runCtx, state, err := q.CoreEngine.AgentRuntime.Begin(ctx)
+	runCtx, state, err := q.CoreEngine.AgentRuntime.Begin(ctx, q.Config.APIMaxTokens)
 	if err != nil {
 		return agentContext.CompactionResult{}, err
 	}
-	defer q.CoreEngine.AgentRuntime.End(state.generation)
+	defer q.CoreEngine.AgentRuntime.EndRun(state.RunToken())
 	q.buildOrRefreshSystemPrompt(state)
 	result, err := q.CoreEngine.prepareContextResult(runCtx, state, q.CoreEngine.Registry.GetAPISchemas(), mode, q.Config.APIModel)
 	if publishErr := q.CoreEngine.publishDraft(context.WithoutCancel(ctx), state); publishErr != nil && err == nil {
 		err = publishErr
+	}
+	if err != nil {
+		q.CoreEngine.AgentRuntime.FailRun(state.RunToken(), err.Error())
 	}
 	return result, err
 }
@@ -139,22 +135,26 @@ func (q *QueryEngine) Restore(state *AgentState) error {
 
 func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-chan StreamEvent {
 	out := make(chan StreamEvent)
-	runCtx, state, beginErr := q.CoreEngine.AgentRuntime.Begin(ctx)
+	runCtx, state, beginErr := q.CoreEngine.beginExecution(ctx)
 	if beginErr != nil {
 		go func() { defer close(out); sendStream(ctx, out, NewStreamEvent("error", beginErr.Error(), nil)) }()
 		return out
 	}
 	q.RefreshRuntimeConfig()
+	q.CoreEngine.AgentRuntime.ResetOutputRecovery(state.RunToken(), q.Config.APIMaxTokens)
+	emit := func(event StreamEvent) {
+		q.CoreEngine.AgentRuntime.ObserveRunEvent(state.RunToken(), event)
+		sendStream(runCtx, out, event)
+	}
 	go func() {
 		defer close(out)
-		defer q.CoreEngine.AgentRuntime.End(state.generation)
-		defer func() { _ = q.CoreEngine.publishDraft(context.WithoutCancel(runCtx), state) }()
+		defer q.CoreEngine.finishExecution(runCtx, state)
 		if strings.HasPrefix(userPrompt, "/") {
 			cmd := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(userPrompt, "/")))
 			switch cmd {
 			case "help", "tokens", "skill", "mcp", "compact", "compress":
-				sendStream(ctx, out, NewStreamEvent("text", fmt.Sprintf("[system] The '%s' command is handled by the REPL.\n", userPrompt), nil))
-				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				emit(NewStreamEvent("text", fmt.Sprintf("[system] The '%s' command is handled by the REPL.\n", userPrompt), nil))
+				emit(NewStreamEvent("done", "", nil))
 				return
 			}
 		}
@@ -170,19 +170,20 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 		if strings.HasPrefix(userPrompt, "/") {
 			skill, args := q.parseSkillInvocation(userPrompt)
 			if skill == nil {
-				sendStream(ctx, out, NewStreamEvent("error", "Unknown command: "+userPrompt, nil))
-				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				emit(NewStreamEvent("error", "Unknown command: "+userPrompt, nil))
+				emit(NewStreamEvent("done", "", nil))
 				return
 			}
+			_ = q.CoreEngine.AgentRuntime.Transition(state.RunToken(), AgentPhaseExecutingTools)
 			execution, err := q.executeSlashSkill(ctx, out, *skill, args, state, []string{q.CoreEngine.SessionID, q.CoreEngine.AgentID})
 			if err != nil {
-				sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
-				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				emit(NewStreamEvent("error", err.Error(), nil))
+				emit(NewStreamEvent("done", "", nil))
 				return
 			}
 			if err := q.recordSkillInvocation(ctx, *skill, execution, state.TurnCount); err != nil {
-				sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
-				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				emit(NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+				emit(NewStreamEvent("done", "", nil))
 				return
 			}
 			normalizedPrompt = q.normalizeSkillUserPrompt(skill.CanonicalName, args)
@@ -194,16 +195,16 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 				// Fork usage belongs to its child runtime and is included in session totals.
 				q.commitUserTurn(state, normalizedPrompt)
 				if err := q.beginRuntimeRun(ctx, state); err != nil {
-					sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
-					sendStream(ctx, out, NewStreamEvent("done", "", nil))
+					emit(NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+					emit(NewStreamEvent("done", "", nil))
 					return
 				}
 				AppendAssistantMessage(state, nil, resultText, nil, "")
 				if q.CoreEngine != nil && q.CoreEngine.RuntimeEvents != nil {
 					if err := q.CoreEngine.RuntimeEvents.RecordAssistant(ctx, state.Messages[len(state.Messages)-1], harness.UsageRecordedPayload{InputTokens: execution.InputTokens, OutputTokens: execution.OutputTokens}); err != nil {
 						_ = q.CoreEngine.RuntimeEvents.EndRun(ctx, "failed", err.Error())
-						sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
-						sendStream(ctx, out, NewStreamEvent("done", "", nil))
+						emit(NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+						emit(NewStreamEvent("done", "", nil))
 						return
 					}
 					_ = q.CoreEngine.RuntimeEvents.EndRun(ctx, "completed", "")
@@ -214,8 +215,8 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 				}
 				state.TurnCount++
 				_ = q.CoreEngine.publishDraft(context.Background(), state)
-				sendStream(ctx, out, NewStreamEvent("text", resultText, nil))
-				sendStream(ctx, out, NewStreamEvent("done", "", nil))
+				emit(NewStreamEvent("text", resultText, nil))
+				emit(NewStreamEvent("done", "", nil))
 				return
 			}
 			if execution.Prompt != nil {
@@ -224,8 +225,8 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 		}
 		q.commitUserTurn(state, normalizedPrompt)
 		if err := q.beginRuntimeRun(ctx, state); err != nil {
-			sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
-			sendStream(ctx, out, NewStreamEvent("done", "", nil))
+			emit(NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+			emit(NewStreamEvent("done", "", nil))
 			return
 		}
 		lastType := ""
@@ -239,11 +240,11 @@ func (q *QueryEngine) SubmitMessage(ctx context.Context, userPrompt string) <-ch
 					status = "failed"
 				}
 				if err := q.CoreEngine.RuntimeEvents.EndRun(ctx, status, reason); err != nil {
-					sendStream(ctx, out, NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
+					emit(NewStreamEvent("error", err.Error(), map[string]any{"runtime_journal": true}))
 					return
 				}
 			}
-			sendStream(ctx, out, event)
+			emit(event)
 			if event.Type != "thinking" && event.Type != "tool_progress" {
 				lastType = event.Type
 			}
@@ -340,67 +341,39 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 		sid = uuid.NewString()[:12]
 	}
 	extraContext := coretools.ExecutionContext{
-		"_session_id":         sid,
-		"_agent_id":           q.CoreEngine.sessionMemoryAgentID(),
-		"runtime_dir":         q.Config.ProjectRuntimeDir,
-		"_skill_persistence":  q.CoreEngine.skillPersistence,
-		"_skill_agent_scope":  "main",
-		"_turn_count":         state.TurnCount,
-		"_permission_runtime": q.CoreEngine,
+		"_session_id":             sid,
+		"_agent_id":               q.CoreEngine.sessionMemoryAgentID(),
+		"runtime_dir":             q.Config.ProjectRuntimeDir,
+		"_skill_persistence":      q.CoreEngine.skillPersistence,
+		"_skill_agent_scope":      "main",
+		"_turn_count":             state.TurnCount,
+		"_permission_runtime":     q.CoreEngine,
+		"_run_permission_emitter": func(event StreamEvent) bool { return sendStream(ctx, out, event) },
 	}
 	return executor.Execute(ctx, skill, args, sid, func(req skills.SkillShellPermissionRequest) bool {
+		_ = q.CoreEngine.AgentRuntime.Transition(state.RunToken(), AgentPhaseExecutingTools)
 		return q.requestSkillShellPermission(ctx, out, req)
 	}, q.CoreEngine.Registry, ClonePermissionState(state.PermissionState), extraContext)
 }
 
 func (q *QueryEngine) requestSkillShellPermission(ctx context.Context, out chan<- StreamEvent, req skills.SkillShellPermissionRequest) bool {
-	if q != nil && q.CoreEngine.AgentRuntime.YoloEnabled() {
+	if q.CoreEngine.AgentRuntime.YoloEnabled() {
 		return true
 	}
-	ch := make(chan bool, 1)
-	q.skillPermissionMu.Lock()
-	if q.skillPermissionCh != nil {
-		q.skillPermissionMu.Unlock()
+	token, ok := runTokenFromContext(ctx)
+	if !ok {
 		return false
 	}
-	q.skillPermissionCh = ch
-	q.skillPermissionMu.Unlock()
-	defer func() {
-		q.skillPermissionMu.Lock()
-		if q.skillPermissionCh == ch {
-			q.skillPermissionCh = nil
-		}
-		q.skillPermissionMu.Unlock()
-	}()
-
-	event := NewStreamEvent("permission_needed", "", map[string]any{
-		"skill_shell_request": req,
-		"dangerous":           true,
-		"risk":                "high",
-	})
+	ticket, event, err := q.CoreEngine.AgentRuntime.BeginPermission(ctx, token, PermissionSkill, "", NewStreamEvent("permission_needed", "", map[string]any{"skill_shell_request": req, "dangerous": true, "risk": "high"}), false)
+	if err != nil {
+		return false
+	}
 	if !sendStream(ctx, out, event) {
+		q.CoreEngine.AgentRuntime.cancelPermission(ticket)
 		return false
 	}
-	select {
-	case granted := <-ch:
-		return granted
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (q *QueryEngine) resolvePendingSkillPermission(granted bool) bool {
-	q.skillPermissionMu.Lock()
-	ch := q.skillPermissionCh
-	q.skillPermissionMu.Unlock()
-	if ch == nil {
-		return false
-	}
-	select {
-	case ch <- granted:
-	default:
-	}
-	return true
+	answer, err := q.CoreEngine.AgentRuntime.AwaitPermission(ctx, ticket)
+	return err == nil && permissionGranted(answer)
 }
 
 func (q *QueryEngine) normalizeSkillUserPrompt(skillName, skillArgs string) string {

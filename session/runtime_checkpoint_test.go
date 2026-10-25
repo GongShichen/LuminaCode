@@ -35,7 +35,7 @@ func checkpointOwner(t *testing.T, journal RuntimeStore) (RuntimeStore, *agent.A
 	if err = owner.Commit(run, draft); err != nil {
 		t.Fatal(err)
 	}
-	owner.End(owner.Snapshot().Generation)
+	owner.EndRun(draft.RunToken())
 	return journal, owner
 }
 
@@ -173,7 +173,7 @@ func runChildRecoveryReplaysDurableTail(t *testing.T, fixture func(*testing.T) (
 	if err = child.Commit(run, draft); err != nil {
 		t.Fatal(err)
 	}
-	child.End(child.Snapshot().Generation)
+	child.EndRun(draft.RunToken())
 	message, _ := json.Marshal(map[string]any{"role": "assistant", "context_id": "durable-tail", "content": "durable result"})
 	if _, err = journal.Append(ctx, harness.AnyStreamSeq,
 		harness.PendingEvent{StreamID: "child", Type: harness.EventMessageAssistantAppended, Payload: harness.MessageAppendedPayload{Message: message}},

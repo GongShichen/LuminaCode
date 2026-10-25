@@ -8,9 +8,9 @@ const (
 )
 
 type OutputRecoveryState struct {
-	Retries          int
-	Escalated        bool
-	CurrentMaxTokens int
+	Retries          int  `json:"retries"`
+	Escalated        bool `json:"escalated"`
+	CurrentMaxTokens int  `json:"current_max_tokens"`
 }
 
 func NewOutputRecoveryState(apiMaxTokens int) OutputRecoveryState {

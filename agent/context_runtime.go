@@ -2,6 +2,7 @@ package agent
 
 import (
 	"LuminaCode/agentContext"
+	"LuminaCode/api"
 	"context"
 )
 
@@ -38,6 +39,7 @@ func (e *CoreExecutionEngine) prepareContextResult(ctx context.Context, state *A
 		},
 	}
 	if mode != agentContext.CompactAuto || agentContext.RequestBudget(input.SystemPrompt, agentContext.Render(snapshot.Context), tools, cfg.CompressionContextLimit()).Total > cfg.CompressionTriggerTokens() {
+		_ = e.AgentRuntime.StartRecovery(state.RunToken(), RecoveryContext, "context compression")
 		e.RecordSessionMemory(ctx, state, false)
 	}
 	result, err := manager.Compact(ctx, mode, input)
@@ -84,14 +86,15 @@ func (e *CoreExecutionEngine) QueryLoop(ctx context.Context) <-chan StreamEvent 
 	out := make(chan StreamEvent)
 	go func() {
 		defer close(out)
-		runCtx, state, err := e.AgentRuntime.Begin(ctx)
+		runCtx, state, err := e.beginExecution(ctx)
 		if err != nil {
 			sendStream(ctx, out, NewStreamEvent("error", err.Error(), nil))
 			return
 		}
-		defer e.AgentRuntime.End(state.generation)
-		defer func() { _ = e.publishDraft(context.WithoutCancel(runCtx), state) }()
-		e.queryLoop(runCtx, state, out)
+		defer e.finishExecution(runCtx, state)
+		for event := range e.queryDraftLoop(runCtx, state) {
+			sendStream(runCtx, out, event)
+		}
 	}()
 	return out
 }
@@ -154,4 +157,41 @@ func (q *QueryEngine) CompactWithState(state *AgentState) (AgentState, agentCont
 		*state = next
 	}
 	return next, result.Stats
+}
+
+func (r *AgentRuntime) ConsumeRequestCache(token RunToken, ids map[string]struct{}, model string) *api.LLMRequestOptions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.runActiveLocked(token) || r.run.Phase == AgentPhaseCancelling {
+		return &api.LLMRequestOptions{}
+	}
+	return r.Context.ConsumeCacheEditsForGeneration(ids, model, token.Generation)
+}
+func (r *AgentRuntime) FinishRequestCache(token RunToken, success bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.runActiveLocked(token) {
+		return
+	}
+	if success {
+		if r.run.Phase != AgentPhaseCancelling {
+			r.Context.PinConsumedCacheEdits(token.Generation)
+		}
+	} else {
+		r.Context.RestoreInFlightCacheEdits(token.Generation)
+	}
+}
+
+func (e *CoreExecutionEngine) beginExecution(ctx context.Context) (context.Context, *AgentState, error) {
+	id := ""
+	if e.RuntimeEvents != nil {
+		id = e.RuntimeEvents.ReservedRunID()
+	}
+	return e.AgentRuntime.BeginWithRunID(ctx, id, e.Config.APIMaxTokens)
+}
+func (e *CoreExecutionEngine) finishExecution(ctx context.Context, state *AgentState) {
+	if err := e.publishDraft(context.WithoutCancel(ctx), state); err != nil {
+		e.AgentRuntime.FailRun(state.RunToken(), err.Error())
+	}
+	_ = e.AgentRuntime.EndRun(state.RunToken())
 }
