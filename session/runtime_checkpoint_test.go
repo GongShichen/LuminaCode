@@ -19,8 +19,14 @@ func checkpointFixture(t *testing.T) (RuntimeStore, *agent.AgentRuntime) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = load.Journal.Close() })
+	return checkpointOwner(t, load.Journal)
+}
+
+func checkpointOwner(t *testing.T, journal RuntimeStore) (RuntimeStore, *agent.AgentRuntime) {
+	t.Helper()
+	ctx := context.Background()
 	owner := agent.NewAgentRuntime(config.Config{ContextInputTokenLimit: 16000}, nil)
-	owner.BindStore(load.Journal, "checkpoint")
+	owner.BindStore(journal, journal.SessionID())
 	run, draft, err := owner.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -30,11 +36,15 @@ func checkpointFixture(t *testing.T) (RuntimeStore, *agent.AgentRuntime) {
 		t.Fatal(err)
 	}
 	owner.End(owner.Snapshot().Generation)
-	return load.Journal, owner
+	return journal, owner
 }
 
 func TestStaleCheckpointCannotResurrectClear(t *testing.T) {
-	journal, owner := checkpointFixture(t)
+	runStaleCheckpointCannotResurrectClear(t, checkpointFixture)
+}
+
+func runStaleCheckpointCannotResurrectClear(t *testing.T, fixture func(*testing.T) (RuntimeStore, *agent.AgentRuntime)) {
+	journal, owner := fixture(t)
 	ctx := context.Background()
 	stale := owner.Snapshot().LegacyState()
 	if err := owner.Reset(ctx); err != nil {
@@ -53,7 +63,11 @@ func TestStaleCheckpointCannotResurrectClear(t *testing.T) {
 }
 
 func TestStaleCheckpointCannotRollbackMemoryCursor(t *testing.T) {
-	journal, owner := checkpointFixture(t)
+	runStaleCheckpointCannotRollbackMemoryCursor(t, checkpointFixture)
+}
+
+func runStaleCheckpointCannotRollbackMemoryCursor(t *testing.T, fixture func(*testing.T) (RuntimeStore, *agent.AgentRuntime)) {
+	journal, owner := fixture(t)
 	ctx := context.Background()
 	current := owner.Snapshot()
 	stale := current.LegacyState()
@@ -82,7 +96,11 @@ func (s *interleavingCheckpointStore) Append(ctx context.Context, expected int64
 }
 
 func TestResetBetweenCheckpointValidationAndAppendIsRejected(t *testing.T) {
-	journal, owner := checkpointFixture(t)
+	runResetBetweenCheckpointValidationAndAppendIsRejected(t, checkpointFixture)
+}
+
+func runResetBetweenCheckpointValidationAndAppendIsRejected(t *testing.T, fixture func(*testing.T) (RuntimeStore, *agent.AgentRuntime)) {
+	journal, owner := fixture(t)
 	ctx := context.Background()
 	stale := owner.Snapshot().LegacyState()
 	interleaved := &interleavingCheckpointStore{RuntimeStore: journal, beforeAppend: func() {
@@ -103,7 +121,11 @@ func TestResetBetweenCheckpointValidationAndAppendIsRejected(t *testing.T) {
 }
 
 func TestOwnedCheckpointSerializesWithReset(t *testing.T) {
-	journal, owner := checkpointFixture(t)
+	runOwnedCheckpointSerializesWithReset(t, checkpointFixture)
+}
+
+func runOwnedCheckpointSerializesWithReset(t *testing.T, fixture func(*testing.T) (RuntimeStore, *agent.AgentRuntime)) {
+	journal, owner := fixture(t)
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -134,7 +156,11 @@ func TestOwnedCheckpointSerializesWithReset(t *testing.T) {
 }
 
 func TestChildRecoveryReplaysDurableTail(t *testing.T) {
-	journal, _ := checkpointFixture(t)
+	runChildRecoveryReplaysDurableTail(t, checkpointFixture)
+}
+
+func runChildRecoveryReplaysDurableTail(t *testing.T, fixture func(*testing.T) (RuntimeStore, *agent.AgentRuntime)) {
+	journal, _ := fixture(t)
 	ctx := context.Background()
 	cfg := config.Config{ContextInputTokenLimit: 16000}
 	child := agent.NewAgentRuntime(cfg, nil)

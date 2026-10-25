@@ -460,16 +460,20 @@ func (s *PostgresRuntimeStore) WithProjectionLock(ctx context.Context, fn func()
 	}
 	s.projectionMu.Lock()
 	defer s.projectionMu.Unlock()
-	connection, err := s.repository.pool.Acquire(ctx)
+	// The callback performs queries through the repository pool. Lock waiters
+	// must not occupy that pool, otherwise a full pool of advisory-lock waiters
+	// prevents the lock holder from acquiring a connection to finish its work.
+	// A dedicated connection also guarantees that cancellation releases any
+	// session-level advisory lock instead of returning it to the pool.
+	connection, err := pgx.ConnectConfig(ctx, s.repository.pool.Config().ConnConfig.Copy())
 	if err != nil {
 		return err
 	}
-	defer connection.Release()
+	defer connection.Close(context.Background())
 	lockKey := strings.Join([]string{s.repository.clusterID, s.tenantID, s.sessionID, "projection"}, "\x1f")
 	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext($1))`, lockKey); err != nil {
 		return err
 	}
-	defer connection.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext($1))`, lockKey)
 	return fn()
 }
 
