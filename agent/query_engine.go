@@ -97,6 +97,10 @@ func (q *QueryEngine) PermissionContext(id string) (context.Context, bool) {
 	return q.CoreEngine.SessionRuntime.PermissionContext(id)
 }
 
+func (q *QueryEngine) DeferPermissionRequest(id string) bool {
+	return q.CoreEngine.SessionRuntime.DeferPermissionRequest(id)
+}
+
 func (q *QueryEngine) ResolveMCPTrust(granted bool) {
 	if q.CoreEngine != nil {
 		q.CoreEngine.ResolveMCPTrust(granted)
@@ -353,6 +357,7 @@ func (q *QueryEngine) executeSlashSkill(ctx context.Context, out chan<- StreamEv
 		"_skill_agent_scope": "main",
 		"_turn_count":        state.TurnCount,
 		"_session_runtime":   q.CoreEngine.SessionRuntime,
+		"_session_lease":     q.CoreEngine.SessionRuntime.lease(),
 	}
 	return executor.Execute(ctx, skill, args, sid, func(req skills.SkillShellPermissionRequest) bool {
 		_ = q.CoreEngine.AgentRuntime.Transition(state.RunToken(), AgentPhaseExecutingTools)

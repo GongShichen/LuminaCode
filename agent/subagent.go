@@ -74,6 +74,13 @@ type SubAgent struct {
 }
 
 func NewSubAgent(cfg config.Config, registry *coretools.ToolRegistry, definition AgentDef, parentState *AgentState, modelOverride, agentType string, extraContext coretools.ExecutionContext, thinkingBudgetTokens ...*int) *SubAgent {
+	extra := make(coretools.ExecutionContext, len(extraContext)+1)
+	for key, value := range extraContext {
+		extra[key] = value
+	}
+	extra["_session_lease"] = sessionLeaseFrom(extraContext)
+	delete(extra, "_child_admission")
+	extraContext = extra
 	model := modelOverride
 	if model == "" {
 		model = definition.Model
@@ -163,6 +170,9 @@ func (s *SubAgent) ExecuteOneRequest(ctx context.Context, prompt string, session
 }
 
 func (s *SubAgent) executeOneRequest(ctx context.Context, prompt string, sessionState *SubAgentSessionState) (result SubAgentRequestResult) {
+	lease := sessionLeaseFrom(s.ExtraContext)
+	ctx, release := lease.executionContext(ctx)
+	defer release()
 	if sessionState == nil {
 		sessionState = s.newSessionState()
 	}
@@ -185,12 +195,6 @@ func (s *SubAgent) executeOneRequest(ctx context.Context, prompt string, session
 		initial.MemoryAgentID = firstNonEmptyString(sessionState.ScopeID, s.AgentType)
 		initial.MemoryAgentType = s.AgentType
 		sessionState.Runtime = NewAgentRuntime(s.Config, &initial)
-		if registry, ok := s.ExtraContext["_session_runtime"].(*SessionRuntime); ok {
-			registry.Register(initial.MemoryAgentID, sessionState.Runtime)
-		}
-		if store, ok := s.ExtraContext["_runtime_store"].(harness.EventStore); ok {
-			sessionState.Runtime.BindStore(store, firstNonEmptyString(sessionState.ScopeID, initial.MemoryAgentID))
-		}
 	}
 	s.runtimeMu.Lock()
 	s.Runtime = sessionState.Runtime
@@ -223,6 +227,14 @@ func (s *SubAgent) executeOneRequest(ctx context.Context, prompt string, session
 			s.Runtime.FailRun(draft.RunToken(), result.Error.Error())
 		}
 	}()
+	if err := lease.register(ctx, draft.MemoryAgentID, s.Runtime); err != nil {
+		return SubAgentRequestResult{Error: err, FinalText: err.Error()}
+	}
+	if store, ok := s.ExtraContext["_runtime_store"].(harness.EventStore); ok && !s.Runtime.HasDurableStore() {
+		if err := s.Runtime.BindStoreContext(ctx, store, firstNonEmptyString(sessionState.ScopeID, draft.MemoryAgentID)); err != nil {
+			return SubAgentRequestResult{Error: err, FinalText: err.Error()}
+		}
+	}
 	if sessionState.Messages == nil {
 		sessionState.Messages = s.buildInitialMessages(ctx, prompt)
 		sessionState.SurfacedMemoryIDs = memory.RecalledMemoryIDs(sessionState.Messages)

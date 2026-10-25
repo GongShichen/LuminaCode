@@ -63,6 +63,10 @@ func (t *AgentTool) TimeoutForInput(input any) time.Duration {
 }
 
 func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionContext, input any) (string, error) {
+	admission := admissionFrom(execCtx)
+	if err := admission.with(ctx, func() error { return nil }); err != nil {
+		return "", err
+	}
 	in := derefAgentInput(input)
 	if in.SubagentType == "" {
 		in.SubagentType = "general-purpose"
@@ -115,6 +119,12 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 	}
 	childCfg := cfg
 	worktreePath := ""
+	backgroundOwnsWorktree := false
+	defer func() {
+		if worktreePath != "" && !backgroundOwnsWorktree {
+			_ = RemoveWorktree(context.WithoutCancel(ctx), worktreePath)
+		}
+	}()
 	if isolationMode == "worktree" {
 		if repoRoot := FindGitRoot(cfg.CWD); repoRoot != "" {
 			result, err := CreateWorktree(ctx, repoRoot, cfg.WorktreeBaseRef, in.SubagentType, cfg.WorktreeDir)
@@ -138,19 +148,28 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 			return fmt.Sprintf("Error: Too many active background workers in this scope. Limit is %d.", MaxBackgroundWorkersPerScope), nil
 		}
 		extraContext := copyAgentExtraContext(execCtx)
+		extraContext["_child_admission"] = admission
+		extraContext["_session_lease"] = admission.session
 		extraContext["subagent_timeout_seconds"] = timeoutSeconds
 		if worktreePath != "" {
 			extraContext["worktree_path"] = worktreePath
 			extraContext["worktree_cwd"] = worktreePath
 		}
-		record := taskRuntime.SpawnWorker(ctx, childCfg, filteredRegistry, definition, &parentState, in.Description, in.Prompt, in.SubagentType, model, workerLabel, in.Reusable, parentScopeID, parentTaskID, extraContext)
+		record, err := taskRuntime.SpawnWorker(ctx, childCfg, filteredRegistry, definition, &parentState, in.Description, in.Prompt, in.SubagentType, model, workerLabel, in.Reusable, parentScopeID, parentTaskID, extraContext)
+		if err != nil {
+			return "", err
+		}
+		backgroundOwnsWorktree = true
 		return fmt.Sprintf("Background worker launched.\ntask_id: %s\nworker_label: %s\nstatus: %s\nreusable: %t", record.TaskID, record.WorkerLabel, record.Status, record.Reusable), nil
 	}
 	subagentScopeID := "scope-" + uuid.NewString()[:12]
 	taskID := "subagent-" + in.SubagentType + "-" + uuid.NewString()[:8]
-	record := taskRuntime.RegisterForegroundTask(taskID, parentTaskID, parentScopeID, workerLabel, in.Description, in.SubagentType)
-	taskRuntime.EnsureScope(subagentScopeID)
+	record, err := taskRuntime.registerForegroundTask(ctx, admission, subagentScopeID, taskID, parentTaskID, parentScopeID, workerLabel, in.Description, in.SubagentType)
+	if err != nil {
+		return "", err
+	}
 	extraContext := copyAgentExtraContext(execCtx)
+	extraContext["_session_lease"] = admission.session
 	extraContext["subagent_timeout_seconds"] = timeoutSeconds
 	extraContext["scope_id"] = subagentScopeID
 	extraContext["current_task_id"] = taskID
@@ -168,17 +187,11 @@ func (t *AgentTool) Execute(ctx context.Context, execCtx coretools.ExecutionCont
 		taskRuntime.FailForegroundTask(record, "failed")
 		taskRuntime.CleanupScope(subagentScopeID)
 		taskRuntime.DiscardForegroundTask(taskID)
-		if worktreePath != "" {
-			_ = RemoveWorktree(ctx, worktreePath)
-		}
 		return "", err
 	}
 	taskRuntime.CompleteForegroundTask(record, "completed")
 	cleanupReport := taskRuntime.CleanupScope(subagentScopeID)
 	taskRuntime.DiscardForegroundTask(taskID)
-	if worktreePath != "" {
-		_ = RemoveWorktree(ctx, worktreePath)
-	}
 	if cleanupReport["active_tasks_stopped"] > 0 {
 		result = fmt.Sprintf("Sub-agent returned before its background child tasks settled. Stopped and discarded %d background task(s).\n\nPartial sub-agent output:\n%s", cleanupReport["active_tasks_stopped"], result)
 	}

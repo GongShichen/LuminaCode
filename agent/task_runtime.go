@@ -277,16 +277,45 @@ func (rt *AgentTaskRuntime) GetTask(taskID, scopeID string) *AgentTaskRecord {
 }
 
 func (rt *AgentTaskRuntime) RegisterForegroundTask(taskID, parentTaskID, parentScopeID, workerLabel, description, agentType string) *AgentTaskRecord {
+	record, _ := rt.registerForegroundTask(context.Background(), childAdmission{}, "", taskID, parentTaskID, parentScopeID, workerLabel, description, agentType)
+	return record
+}
+
+func (rt *AgentTaskRuntime) registerForegroundTask(ctx context.Context, admission childAdmission, scopeID, taskID, parentTaskID, parentScopeID, workerLabel, description, agentType string) (*AgentTaskRecord, error) {
 	now := nowSeconds()
 	record := &AgentTaskRecord{
 		TaskID: taskID, ParentTaskID: parentTaskID, ParentScopeID: parentScopeID,
 		WorkerLabel: workerLabel, Description: description, AgentType: agentType,
 		Status: "running", CreatedAt: now, UpdatedAt: now,
 	}
-	rt.mu.Lock()
-	rt.registerRecordLocked(record, false)
-	rt.mu.Unlock()
-	return record
+	if err := rt.admitRecord(ctx, admission, record, false, func() {
+		if scopeID != "" {
+			rt.scopes[scopeID] = struct{}{}
+		}
+	}); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// Registration is atomic with session Reset. Journal observers run after the
+// session/agent admission locks are released; task.mu preserves event order.
+func (rt *AgentTaskRuntime) admitRecord(ctx context.Context, admission childAdmission, record *AgentTaskRecord, createScope bool, setup func()) error {
+	if err := admission.with(ctx, func() error {
+		rt.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			rt.mu.Unlock()
+			return err
+		}
+		rt.registerRecordDataLocked(record, createScope)
+		setup()
+		return nil
+	}); err != nil {
+		return err
+	}
+	defer rt.mu.Unlock()
+	rt.emitLifecycleLocked("task_created", record)
+	return nil
 }
 
 func (rt *AgentTaskRuntime) CompleteForegroundTask(record *AgentTaskRecord, terminationReason string) {
@@ -304,7 +333,11 @@ func (rt *AgentTaskRuntime) DiscardForegroundTask(taskID string) {
 	rt.forgetTaskIdentityLocked(taskID)
 }
 
-func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, registry *coretools.ToolRegistry, definition AgentDef, parentState *AgentState, description, prompt, agentType, modelOverride, workerLabel string, reusable bool, parentScopeID, parentTaskID string, extraContext coretools.ExecutionContext) *AgentTaskRecord {
+func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, registry *coretools.ToolRegistry, definition AgentDef, parentState *AgentState, description, prompt, agentType, modelOverride, workerLabel string, reusable bool, parentScopeID, parentTaskID string, extraContext coretools.ExecutionContext) (*AgentTaskRecord, error) {
+	admission := admissionFrom(extraContext)
+	if err := admission.with(ctx, func() error { return nil }); err != nil {
+		return nil, err
+	}
 	now := nowSeconds()
 	taskID := "subagent-" + agentType + "-" + uuid.NewString()[:8]
 	record := &AgentTaskRecord{
@@ -312,12 +345,18 @@ func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, 
 		WorkerLabel: workerLabel, Description: description, AgentType: agentType,
 		Reusable: reusable, Status: "queued", CreatedAt: now, UpdatedAt: now,
 	}
-	childCtx, cancel := context.WithCancel(context.Background())
+	parent := context.Background()
+	if admission.session.owner != nil {
+		parent = admission.session.ctx
+	}
+	childCtx, cancel := context.WithCancel(parent)
 	workerState := BuildSubagentState(parentState, definition.PermissionMode)
 	workerExtraContext := coretools.ExecutionContext{}
 	for key, value := range extraContext {
 		workerExtraContext[key] = value
 	}
+	workerExtraContext["_session_lease"] = admission.session
+	delete(workerExtraContext, "_child_admission")
 	workerExtraContext["allowed_read_roots"] = []string{cfg.CWD}
 	workerExtraContext["task_runtime"] = rt
 	workerExtraContext["scope_id"] = taskID
@@ -327,17 +366,20 @@ func (rt *AgentTaskRuntime) SpawnWorker(ctx context.Context, cfg config.Config, 
 	workerExtraContext["current_agent_type"] = agentType
 	workerExtraContext["_drain_pending_notifications"] = rt.DrainPendingNotifications
 	workerExtraContext["abort_check"] = func() bool { return childCtx.Err() != nil }
-	rt.mu.Lock()
-	rt.registerRecordLocked(record, true)
-	rt.workers[taskID] = cancel
-	rt.workerSpecs[taskID] = workerSpec{
-		cfg: cfg, registry: registry, definition: definition, permissions: ClonePermissionState(workerState.PermissionState),
-		agentType: agentType, modelOverride: modelOverride, extraContext: workerExtraContext,
+	var result AgentTaskRecord
+	if err := rt.admitRecord(ctx, admission, record, true, func() {
+		rt.workers[taskID] = cancel
+		rt.workerSpecs[taskID] = workerSpec{
+			cfg: cfg, registry: registry, definition: definition, permissions: ClonePermissionState(workerState.PermissionState),
+			agentType: agentType, modelOverride: modelOverride, extraContext: workerExtraContext,
+		}
+		result = *record
+	}); err != nil {
+		cancel()
+		return nil, err
 	}
-	result := *record
-	rt.mu.Unlock()
 	go rt.runWorker(childCtx, taskID, prompt)
-	return &result
+	return &result, nil
 }
 
 func (rt *AgentTaskRuntime) SendMessage(taskID, scopeID, prompt string) any {
@@ -802,6 +844,11 @@ func (rt *AgentTaskRuntime) getTaskLocked(taskID, scopeID string, forceScopeChec
 }
 
 func (rt *AgentTaskRuntime) registerRecordLocked(record *AgentTaskRecord, createTaskScope bool) {
+	rt.registerRecordDataLocked(record, createTaskScope)
+	rt.emitLifecycleLocked("task_created", record)
+}
+
+func (rt *AgentTaskRuntime) registerRecordDataLocked(record *AgentTaskRecord, createTaskScope bool) {
 	rt.records[record.TaskID] = record
 	rt.taskParentScopes[record.TaskID] = record.ParentScopeID
 	rt.childCounts[record.ParentScopeID]++
@@ -809,7 +856,6 @@ func (rt *AgentTaskRuntime) registerRecordLocked(record *AgentTaskRecord, create
 	if createTaskScope {
 		rt.scopes[record.TaskID] = struct{}{}
 	}
-	rt.emitLifecycleLocked("task_created", record)
 }
 
 func (rt *AgentTaskRuntime) emitLifecycleLocked(eventType string, record *AgentTaskRecord) {

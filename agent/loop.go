@@ -340,11 +340,14 @@ func (e *CoreExecutionEngine) Reset(contexts ...context.Context) error {
 	if len(contexts) > 0 {
 		resetCtx = contexts[0]
 	}
+	// Retire child publishers before writing the reset event. A child's first
+	// checkpoint must not appear after Clear and become a new recovered actor.
+	e.AgentRuntime.Abort()
+	e.SessionRuntime.Reset(e.AgentRuntime)
+	e.TaskRuntime.Shutdown()
 	if err := e.AgentRuntime.Reset(resetCtx); err != nil {
 		return err
 	}
-	e.TaskRuntime.Shutdown()
-	e.SessionRuntime.Reset(e.AgentRuntime)
 	e.disconnectMCP(context.Background())
 	if e.extraction != nil {
 		e.extraction.Cancel()
@@ -361,6 +364,7 @@ func (e *CoreExecutionEngine) Reset(contexts ...context.Context) error {
 }
 func (e *CoreExecutionEngine) Shutdown() {
 	e.AgentRuntime.Abort()
+	e.SessionRuntime.close()
 	e.disconnectMCP(context.Background())
 	if e.TaskRuntime != nil {
 		e.TaskRuntime.Shutdown()
@@ -426,6 +430,10 @@ func (e *CoreExecutionEngine) ResolvePermissionRequest(id, decision, toolName st
 
 func (e *CoreExecutionEngine) PermissionContext(id string) (context.Context, bool) {
 	return e.SessionRuntime.PermissionContext(id)
+}
+
+func (e *CoreExecutionEngine) DeferPermissionRequest(id string) bool {
+	return e.SessionRuntime.DeferPermissionRequest(id)
 }
 
 func (e *CoreExecutionEngine) SkillNames(cwd string) []string {
@@ -604,6 +612,7 @@ func (e *CoreExecutionEngine) queryLoop(ctx context.Context, state *AgentState, 
 			"spawn_permissions":   ClonePermissionState(state.PermissionState),
 			"task_runtime":        e.TaskRuntime,
 			"_session_runtime":    e.SessionRuntime,
+			"_session_lease":      e.SessionRuntime.lease(),
 			"_runtime_store": func() any {
 				if e.RuntimeEvents != nil {
 					return e.RuntimeEvents.EventStore()

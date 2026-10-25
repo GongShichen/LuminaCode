@@ -312,8 +312,8 @@ type SessionController struct {
 	seq  atomic.Int64
 }
 
-func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState,
-	repository session.SessionRepository, journal session.RuntimeStore, emit EventEmitter) *SessionController {
+func NewSessionController(ctx context.Context, identity cluster.RuntimeIdentity, sessionID string, cfg config.Config, engine *agent.QueryEngine, state *agent.AgentState,
+	repository session.SessionRepository, journal session.RuntimeStore, emit EventEmitter) (*SessionController, error) {
 	if identity.TenantID == "" {
 		identity.TenantID = session.LocalTenantID
 	}
@@ -334,9 +334,13 @@ func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cf
 	}
 	if engine != nil && engine.CoreEngine != nil {
 		if state != nil {
-			_ = engine.Restore(state)
+			if err := engine.Restore(state); err != nil {
+				return nil, err
+			}
 		}
-		engine.CoreEngine.AgentRuntime.BindStore(journal, sessionID)
+		if err := engine.CoreEngine.AgentRuntime.BindStoreContext(ctx, journal, sessionID); err != nil {
+			return nil, err
+		}
 		engine.CoreEngine.SessionID = sessionID
 	}
 	controller.bridge = NewWSRendererBridge(identity.TenantID, sessionID, emit, controller.nextSeq)
@@ -344,7 +348,9 @@ func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cf
 	if engine != nil && engine.CoreEngine != nil {
 		engine.CoreEngine.RuntimeEvents = agent.NewRuntimeEventRecorder(journal, sessionID)
 		engine.CoreEngine.RuntimeEvents.BindRuntime(engine.CoreEngine.AgentRuntime)
-		_ = engine.CoreEngine.SessionRuntime.RestoreChildren(context.Background(), journal, cfg, sessionID)
+		if err := engine.CoreEngine.SessionRuntime.RestoreChildren(ctx, journal, cfg, sessionID); err != nil {
+			return nil, err
+		}
 		engine.CoreEngine.RuntimeEvents.SetPublisher(controller.bridge.emitRuntimeEvents)
 		engine.CoreEngine.TaskRuntime.SetTaskEventObserver(engine.CoreEngine.RuntimeEvents)
 		engine.CoreEngine.SessionRuntime.SetPermissionHandler(func(ctx context.Context, event agent.StreamEvent) {
@@ -352,7 +358,7 @@ func NewSessionController(identity cluster.RuntimeIdentity, sessionID string, cf
 			engine.ResolvePermissionRequest(agent.PermissionRequestID(event), answer, "")
 		})
 	}
-	return controller
+	return controller, nil
 }
 
 func (c *SessionController) ID() string {

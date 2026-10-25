@@ -127,7 +127,12 @@ func lifecycleController(t *testing.T, emit EventEmitter) *SessionController {
 		t.Fatal(err)
 	}
 	engine := agent.NewQueryEngine(cfg, agent.NewCoreExecutionEngine(cfg, cluster.RuntimeIdentity{TenantID: session.LocalTenantID}, nil))
-	controller := NewSessionController(cluster.RuntimeIdentity{}, "permission-session", cfg, engine, loaded.State, repo, loaded.Journal, emit)
+	controller, err := NewSessionController(context.Background(), cluster.RuntimeIdentity{}, "permission-session", cfg, engine, loaded.State, repo, loaded.Journal, emit)
+	if err != nil {
+		engine.Shutdown()
+		_ = loaded.Journal.Close()
+		t.Fatal(err)
+	}
 	t.Cleanup(controller.Shutdown)
 	return controller
 }

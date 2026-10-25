@@ -99,6 +99,7 @@ type PermissionAnswer struct {
 type permissionWaiter struct {
 	PermissionWait
 	ctx    context.Context
+	event  StreamEvent
 	answer chan PermissionAnswer
 }
 type PermissionTicket struct {
@@ -313,6 +314,7 @@ func (r *AgentRuntime) BeginPermission(ctx context.Context, token RunToken, kind
 	metadata["run_id"] = token.ID
 	metadata["generation"] = token.Generation
 	event.Metadata = metadata
+	waiter.event = event
 	if queued {
 		r.run.PermissionEvents = append(r.run.PermissionEvents, event)
 	}

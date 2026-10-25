@@ -297,7 +297,10 @@ func TestFailedWorkerDoesNotReportCompleted(t *testing.T) {
 			tasks := NewAgentTaskRuntime()
 			defer tasks.Shutdown()
 			registry := NewSessionRuntime()
-			record := tasks.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), AgentDef{Name: "worker", MaxTurns: 1}, nil, "test worker", "task", "worker", "", "worker", reusable, "main", "", coretools.ExecutionContext{"_session_runtime": registry})
+			record, spawnErr := tasks.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), AgentDef{Name: "worker", MaxTurns: 1}, nil, "test worker", "task", "worker", "", "worker", reusable, "main", "", coretools.ExecutionContext{"_session_runtime": registry})
+			if spawnErr != nil {
+				t.Fatal(spawnErr)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			tasks.WaitForTasks(ctx, []string{record.TaskID}, "main", 3)
@@ -332,7 +335,10 @@ func TestStoppedWorkerCannotPublishLateCompletion(t *testing.T) {
 		if reusable {
 			mem = &lifecycleBlockingMemory{entered: make(chan struct{}), release: make(chan struct{})}
 		}
-		record := tasks.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), AgentDef{Name: "worker"}, nil, fmt.Sprint(reusable), "task", "worker", "", "worker", reusable, "main", "", coretools.ExecutionContext{"_memory_engine": mem, "_session_runtime": registry})
+		record, spawnErr := tasks.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), AgentDef{Name: "worker"}, nil, fmt.Sprint(reusable), "task", "worker", "", "worker", reusable, "main", "", coretools.ExecutionContext{"_memory_engine": mem, "_session_runtime": registry})
+		if spawnErr != nil {
+			t.Fatal(spawnErr)
+		}
 		select {
 		case <-mem.entered:
 		case <-time.After(2 * time.Second):

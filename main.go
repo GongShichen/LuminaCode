@@ -990,7 +990,9 @@ func runREPL(ctx context.Context, engine *agent.QueryEngine, state *agent.AgentS
 		}
 		engine.CoreEngine.SessionID = sessionID
 		if replJournal != nil {
-			engine.CoreEngine.AgentRuntime.BindStore(replJournal, sessionID)
+			if err := engine.CoreEngine.AgentRuntime.BindStoreContext(ctx, replJournal, sessionID); err != nil {
+				return err
+			}
 			recorder := agent.NewRuntimeEventRecorder(replJournal, sessionID)
 			recorder.BindRuntime(engine.CoreEngine.AgentRuntime)
 			engine.CoreEngine.RuntimeEvents = recorder

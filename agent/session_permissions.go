@@ -25,28 +25,51 @@ func (s *SessionRuntime) PermissionContext(id string) (context.Context, bool) {
 	return nil, false
 }
 
+// DeferPermissionRequest ends only the current presentation. The pending
+// decision remains with its owner and can be presented by the next consumer.
+func (s *SessionRuntime) DeferPermissionRequest(id string) bool {
+	s.mu.RLock()
+	var pending sessionPermission
+	for _, runtime := range s.agents {
+		runtime.mu.RLock()
+		if wait := runtime.run.Pending[id]; wait != nil {
+			pending = sessionPermission{ctx: wait.ctx, event: wait.event}
+		}
+		runtime.mu.RUnlock()
+		if pending.ctx != nil {
+			break
+		}
+	}
+	s.mu.RUnlock()
+	return pending.ctx != nil && s.PublishPermission(pending.ctx, pending.event)
+}
+
 // SetPermissionHandler binds a session-lived UI transport. Background workers
 // must never retain the output channel (or cancellation) of their parent's run.
 func (s *SessionRuntime) SetPermissionHandler(handler func(context.Context, StreamEvent)) {
-	s.permissionMu.Lock()
+	s.mu.Lock()
 	s.permissionHandler = handler
 	var queued []sessionPermission
 	if handler != nil {
 		queued, s.permissions = s.permissions, nil
 	}
-	s.permissionMu.Unlock()
+	s.mu.Unlock()
 	for _, pending := range queued {
 		s.PublishPermission(pending.ctx, pending.event)
 	}
 }
 
 func (s *SessionRuntime) permissionPending(event StreamEvent) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.permissionPendingLocked(event)
+}
+
+func (s *SessionRuntime) permissionPendingLocked(event StreamEvent) bool {
 	id := PermissionRequestID(event)
 	if id == "" {
 		return false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	for _, runtime := range s.agents {
 		runtime.mu.RLock()
 		pending := runtime.run.Pending[id] != nil && runtime.run.Phase.Active() && runtime.run.Phase != AgentPhaseCancelling && runtime.run.Context.Err() == nil
@@ -64,27 +87,32 @@ func (s *SessionRuntime) PublishPermission(ctx context.Context, event StreamEven
 	if ctx.Err() != nil || !s.permissionPending(event) {
 		return false
 	}
-	s.permissionMu.Lock()
-	if ctx.Err() != nil || !s.permissionPending(event) {
-		s.permissionMu.Unlock()
+	s.mu.Lock()
+	if ctx.Err() != nil || !s.permissionPendingLocked(event) {
+		s.mu.Unlock()
 		return false
 	}
 	handler := s.permissionHandler
 	if handler == nil {
 		// Prune expired requests when a new request arrives, including during idle.
 		live := s.permissions[:0]
+		queued := false
 		for _, pending := range s.permissions {
-			if pending.ctx.Err() == nil && s.permissionPending(pending.event) {
+			if pending.ctx.Err() == nil && s.permissionPendingLocked(pending.event) {
 				live = append(live, pending)
+				queued = queued || PermissionRequestID(pending.event) == PermissionRequestID(event)
 			}
 		}
-		s.permissions = append(live, sessionPermission{ctx, event})
+		s.permissions = live
+		if !queued {
+			s.permissions = append(s.permissions, sessionPermission{ctx, event})
+		}
 		select {
 		case s.permissionReady <- struct{}{}:
 		default:
 		}
 	}
-	s.permissionMu.Unlock()
+	s.mu.Unlock()
 	if handler != nil {
 		go func() {
 			if ctx.Err() == nil && s.permissionPending(event) {
@@ -106,13 +134,13 @@ func (s *SessionRuntime) forwardPermissions(ctx context.Context, out chan<- Stre
 			if ctx.Err() != nil {
 				return
 			}
-			s.permissionMu.Lock()
+			s.mu.Lock()
 			var pending sessionPermission
 			if len(s.permissions) > 0 {
 				pending = s.permissions[0]
 				s.permissions = s.permissions[1:]
 			}
-			s.permissionMu.Unlock()
+			s.mu.Unlock()
 			if pending.ctx == nil {
 				select {
 				case <-ctx.Done():

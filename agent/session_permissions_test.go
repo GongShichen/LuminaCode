@@ -110,12 +110,95 @@ func TestSessionResetDiscardsQueuedChildPermission(t *testing.T) {
 	if session.PublishPermission(ctx, event) || session.ResolvePermissionRequest(ticket.ID, PermissionAnswer{Decision: PermissionOnce}) {
 		t.Fatal("reset retained child ownership")
 	}
-	session.permissionMu.Lock()
+	session.mu.Lock()
 	queued := len(session.permissions)
-	session.permissionMu.Unlock()
+	session.mu.Unlock()
 	if queued != 0 {
 		t.Fatal("reset retained permission notification")
 	}
 	child.Abort()
 	_, _ = child.AwaitPermission(ctx, ticket)
+}
+
+func TestDeferredPermissionResumesOnNextForegroundRun(t *testing.T) {
+	child, ctx, state := phaseFixture(t)
+	session := NewSessionRuntime()
+	session.Register("child", child)
+	ticket, event, err := child.BeginPermission(ctx, state.RunToken(), PermissionSkill, "", NewStreamEvent("permission_needed", "", nil), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut := make(chan StreamEvent)
+	stopOld := session.forwardPermissions(context.Background(), oldOut)
+	if !session.PublishPermission(ctx, event) {
+		t.Fatal("permission not published")
+	}
+	select {
+	case <-oldOut:
+	case <-time.After(time.Second):
+		stopOld()
+		t.Fatal("first run did not receive permission")
+	}
+	// The cancelled UI defers before its stream forwarder finishes shutting down.
+	if !session.DeferPermissionRequest(ticket.ID) {
+		t.Fatal("live child request could not be deferred")
+	}
+	stopOld()
+	close(oldOut)
+	if !session.DeferPermissionRequest(ticket.ID) {
+		t.Fatal("duplicate defer lost its request")
+	}
+	session.mu.RLock()
+	queued := len(session.permissions)
+	session.mu.RUnlock()
+	if queued != 1 {
+		t.Fatalf("defer duplicated notification: %d", queued)
+	}
+	nextOut := make(chan StreamEvent)
+	stopNext := session.forwardPermissions(context.Background(), nextOut)
+	defer stopNext()
+	select {
+	case got := <-nextOut:
+		if PermissionRequestID(got) != ticket.ID {
+			t.Fatal("resumption changed permission ownership")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("next run lost deferred permission")
+	}
+	if !session.ResolvePermissionRequest(ticket.ID, PermissionAnswer{Decision: PermissionOnce}) {
+		t.Fatal("resumed grant rejected")
+	}
+	answer, err := child.AwaitPermission(ctx, ticket)
+	if err != nil || !permissionGranted(answer) {
+		t.Fatal("deferred approval was lost")
+	}
+}
+
+func TestResetRacingPermissionDeferralDropsOldRequest(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		child, ctx, state := phaseFixture(t)
+		session := NewSessionRuntime()
+		session.Register("child", child)
+		ticket, event, err := child.BeginPermission(ctx, state.RunToken(), PermissionSkill, "", NewStreamEvent("permission_needed", "", nil), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session.PublishPermission(ctx, event)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; session.DeferPermissionRequest(ticket.ID) }()
+		go func() { defer wg.Done(); <-start; session.Reset(NewAgentRuntime(config.Config{}, nil)) }()
+		close(start)
+		wg.Wait()
+		session.mu.RLock()
+		queued := len(session.permissions)
+		session.mu.RUnlock()
+		if queued != 0 || session.ResolvePermissionRequest(ticket.ID, PermissionAnswer{Decision: PermissionOnce}) {
+			t.Fatal("Reset retained a deferred request")
+		}
+		if _, err := child.AwaitPermission(ctx, ticket); err == nil {
+			t.Fatal("Reset did not cancel the old owner")
+		}
+	}
 }

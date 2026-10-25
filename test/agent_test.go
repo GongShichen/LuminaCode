@@ -937,7 +937,10 @@ func TestCoreQueryLoopInjectsPendingTaskNotificationsLikePython(t *testing.T) {
 	engine := newTestCoreExecutionEngine(cfg)
 	workerState := agent.NewAgentState()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
-	record := engine.TaskRuntime.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &workerState, "desc", "worker prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := engine.TaskRuntime.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &workerState, "desc", "worker prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, engine.TaskRuntime, record.TaskID, "main", "idle")
 	engine.TaskRuntime.DrainPendingNotifications("main")
 	engine.TaskRuntime.StopTask(record.TaskID, "main")

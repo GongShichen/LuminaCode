@@ -244,7 +244,10 @@ func TestReusableWorkerPreservesSessionAcrossMessages(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "first prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "first prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "main", "idle")
 	if got := rt.SendMessage(record.TaskID, "main", "second prompt"); fmt.Sprint(got) == "Error: Worker is not reusable or has already terminated." {
 		t.Fatalf("expected reusable worker to accept follow-up, got %#v", got)
@@ -335,7 +338,10 @@ func TestBackgroundWorkerUsesPythonScopedExecutionContext(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3, PermissionMode: "bypass"}
 	worktreeCWD := cfg.CWD + "/.Lumina/worktrees/Explore-test"
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(newContextCaptureTool(captured)), def, &parent, "desc", "prompt", "Explore", "", "worker", false, "parent-scope", "parent-task", coretools.ExecutionContext{"scope_id": "wrong-parent", "worktree_cwd": worktreeCWD})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(newContextCaptureTool(captured)), def, &parent, "desc", "prompt", "Explore", "", "worker", false, "parent-scope", "parent-task", coretools.ExecutionContext{"scope_id": "wrong-parent", "worktree_cwd": worktreeCWD})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "parent-scope", "completed")
 
 	var payload map[string]any
@@ -395,7 +401,10 @@ func TestBackgroundWorkerOutlivesParentContextLikePython(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3, PermissionMode: "inherit"}
 	parentCtx, cancel := context.WithCancel(context.Background())
-	record := rt.SpawnWorker(parentCtx, cfg, coretools.NewToolRegistry(newContextCaptureTool(captured)), def, &parent, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(parentCtx, cfg, coretools.NewToolRegistry(newContextCaptureTool(captured)), def, &parent, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	cancel()
 	waitUntilStatus(t, rt, record.TaskID, "main", "completed")
 
@@ -424,7 +433,10 @@ func TestStopTaskMatchesPythonStatusSpecificNotifications(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "first prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "first prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "main", "idle")
 	rt.DrainPendingNotifications("main")
 	stopped := rt.StopTask(record.TaskID, "main")
@@ -469,7 +481,10 @@ func TestShutdownStopsIdleReusableWorkers(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "main", "idle")
 	rt.Shutdown()
 	stopped := rt.GetTask(record.TaskID, "main")
@@ -497,7 +512,10 @@ func TestReusableWorkerExpiresAfterIdleTTLLikePython(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", true, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "main", "idle")
 	rt.DrainPendingNotifications("main")
 	waitUntilStatus(t, rt, record.TaskID, "main", "completed")
@@ -538,7 +556,10 @@ func TestNonReusableWorkerTerminalRecordCleanupTTLMatchesPython(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(), def, &state, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	waitUntilStatus(t, rt, record.TaskID, "main", "completed")
 	waitUntilMissing(t, rt, record.TaskID, "main")
 
@@ -567,7 +588,10 @@ func TestStopRunningWorkerIsNotOverwrittenByCompletion(t *testing.T) {
 	rt := agent.NewAgentTaskRuntime()
 	def := agent.AgentDef{Name: "Explore", Description: "search", MaxTurns: 3}
 	state := agent.NewAgentState()
-	record := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(newBlockingTool(toolStarted)), def, &state, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	record, spawnErr := rt.SpawnWorker(context.Background(), cfg, coretools.NewToolRegistry(newBlockingTool(toolStarted)), def, &state, "desc", "prompt", "Explore", "", "worker", false, "main", "", coretools.ExecutionContext{})
+	if spawnErr != nil {
+		t.Fatal(spawnErr)
+	}
 	select {
 	case <-toolStarted:
 	case <-time.After(2 * time.Second):

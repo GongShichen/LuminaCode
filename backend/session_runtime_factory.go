@@ -88,7 +88,11 @@ func (f *SessionRuntimeFactory) Create(ctx context.Context, identity cluster.Run
 			return nil, attachErr
 		}
 	}
-	controller := NewSessionController(identity, sessionID, cfg, engine, state, f.repository, journal, f.emit)
+	controller, err := NewSessionController(ctx, identity, sessionID, cfg, engine, state, f.repository, journal, f.emit)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
 	messageCount, turnCount := 0, 0
 	if state != nil {
 		messageCount = len(state.Messages)

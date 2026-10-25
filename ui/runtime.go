@@ -409,11 +409,14 @@ func (r *UiRuntime) HandlePermissionEvent(event UiEvent) string {
 }
 
 func (r *UiRuntime) HandlePermissionEventContext(ctx context.Context, event UiEvent) string {
-	if id := stringFromAny(event.Metadata["permission_request_id"]); id != "" {
+	id := stringFromAny(event.Metadata["permission_request_id"])
+	var permissionCtx context.Context
+	if id != "" {
 		if owner, ok := r.Engine.(interface {
 			PermissionContext(string) (context.Context, bool)
 		}); ok {
-			permissionCtx, pending := owner.PermissionContext(id)
+			var pending bool
+			permissionCtx, pending = owner.PermissionContext(id)
 			if !pending {
 				return "deny"
 			}
@@ -434,8 +437,19 @@ func (r *UiRuntime) HandlePermissionEventContext(ctx context.Context, event UiEv
 		r.UI.ShowModal(r.Frame.ModalState)
 	}
 	answer := AskPermissionEvent(ctx, r.UI, event)
-	r.resolvePermissionEvent(event, answer)
-	r.RecordPermissionAudit(event, answer)
+	if ctx.Err() != nil || (permissionCtx != nil && permissionCtx.Err() != nil) {
+		// Cancelling the foreground presenter is not a denial from the user.
+		// Background children keep their own pending decision and run lifetime.
+		if permissionCtx != nil && permissionCtx.Err() == nil {
+			if owner, ok := r.Engine.(interface{ DeferPermissionRequest(string) bool }); ok {
+				owner.DeferPermissionRequest(id)
+			}
+		}
+		answer = "cancelled"
+	} else {
+		r.resolvePermissionEvent(event, answer)
+		r.RecordPermissionAudit(event, answer)
+	}
 	r.Frame.ActiveModal = "none"
 	r.Frame.InputEnabled = false
 	r.Frame.InputMode = "normal"

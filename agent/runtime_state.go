@@ -205,6 +205,7 @@ type AgentRuntime struct {
 	streamID        string
 	policyRevision  uint64
 	durableMessages map[string]int64
+	sessionContext  context.Context
 }
 
 func NewAgentRuntime(cfg config.Config, initial *AgentState) *AgentRuntime {
@@ -228,14 +229,49 @@ func (r *AgentRuntime) Snapshot() AgentSnapshot {
 	snapshot.Run = &run
 	return snapshot
 }
-func (r *AgentRuntime) BindStore(store harness.EventStore, stream string) {
+func (r *AgentRuntime) BindStore(store harness.EventStore, stream string) error {
+	return r.BindStoreContext(context.Background(), store, stream)
+}
+
+// Stream creation may block on storage. Keep the runtime available to Abort
+// and Reset, then fence publication against the run/generation that started it.
+func (r *AgentRuntime) BindStoreContext(ctx context.Context, store harness.EventStore, stream string) error {
+	r.mu.RLock()
+	generation, runID, active := r.snapshot.Generation, r.run.ID, r.run.Phase.Active()
+	expired := r.sessionContext != nil && r.sessionContext.Err() != nil
+	cancelling := r.run.Phase == AgentPhaseCancelling
+	r.mu.RUnlock()
+	if expired {
+		return ErrStaleState
+	}
+	if cancelling {
+		return context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if store != nil && stream != "" {
+		if err := store.CreateStream(ctx, harness.StreamDescriptor{ID: stream, Kind: "agent", Status: "idle"}); err != nil {
+			return err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r.sessionContext != nil && r.sessionContext.Err() != nil {
+		return ErrStaleState
+	}
+	if generation != r.snapshot.Generation || runID != r.run.ID {
+		return ErrStaleState
+	}
+	if active && (!r.run.Phase.Active() || r.run.Phase == AgentPhaseCancelling) {
+		return context.Canceled
+	}
 	r.store = store
 	r.streamID = stream
-	if store != nil && stream != "" {
-		_ = store.CreateStream(context.Background(), harness.StreamDescriptor{ID: stream, Kind: "agent", Status: "idle"})
-	}
+	return nil
 }
 func (r *AgentRuntime) Restore(s AgentSnapshot) error {
 	if s.Version != 3 {
@@ -283,6 +319,9 @@ func (r *AgentRuntime) beginRecoveryRun(ctx context.Context, previous RunToken, 
 }
 
 func (r *AgentRuntime) beginRunLocked(ctx context.Context, id string, outputLimits ...int) (context.Context, *AgentState, error) {
+	if r.sessionContext != nil && r.sessionContext.Err() != nil {
+		return ctx, nil, ErrStaleState
+	}
 	if r.run.Phase.Active() {
 		return ctx, nil, ErrAgentBusy
 	}
@@ -325,6 +364,9 @@ func (r *AgentRuntime) persistLocked(ctx context.Context, s AgentSnapshot, extra
 }
 
 func (r *AgentRuntime) persistSnapshotLocked(ctx context.Context, s AgentSnapshot, metadata *harness.RuntimeStateCheckpointedPayload, extra ...harness.PendingEvent) error {
+	if r.sessionContext != nil && r.sessionContext.Err() != nil {
+		return ErrStaleState
+	}
 	if r.store == nil {
 		return nil
 	}
@@ -515,19 +557,31 @@ func (r *AgentRuntime) YoloEnabled() bool { return r.Snapshot().Permissions.Poli
 type SessionRuntime struct {
 	mu                sync.RWMutex
 	agents            map[string]*AgentRuntime
-	permissionMu      sync.Mutex
+	epoch             uint64
+	lifetime          context.Context
+	cancel            context.CancelFunc
 	permissions       []sessionPermission
 	permissionReady   chan struct{}
 	permissionHandler func(context.Context, StreamEvent)
 }
 
 func NewSessionRuntime() *SessionRuntime {
-	return &SessionRuntime{agents: map[string]*AgentRuntime{}, permissionReady: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &SessionRuntime{agents: map[string]*AgentRuntime{}, epoch: 1, lifetime: ctx, cancel: cancel, permissionReady: make(chan struct{}, 1)}
 }
-func (s *SessionRuntime) Register(id string, r *AgentRuntime) {
+func (s *SessionRuntime) Register(id string, r *AgentRuntime) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessionContext != nil && r.sessionContext.Err() != nil {
+		return ErrStaleState
+	}
+	if id != "main" {
+		r.sessionContext = s.lifetime
+	}
 	s.agents[id] = r
+	return nil
 }
 func (s *SessionRuntime) Snapshots() map[string]AgentSnapshot {
 	s.mu.RLock()
@@ -729,8 +783,12 @@ func (s *SessionRuntime) RestoreChildren(ctx context.Context, store harness.Even
 		if err := r.Restore(snapshot); err != nil {
 			return err
 		}
-		r.BindStore(store, id)
-		s.Register(id, r)
+		if err := r.BindStoreContext(ctx, store, id); err != nil {
+			return err
+		}
+		if err := s.Register(id, r); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -777,16 +835,27 @@ func (r *AgentRuntime) RecordCompiled(ctx context.Context, compiled agentContext
 
 func (s *SessionRuntime) Reset(main *AgentRuntime) {
 	s.mu.Lock()
+	s.cancel()
+	s.epoch++
+	s.lifetime, s.cancel = context.WithCancel(context.Background())
 	for _, runtime := range s.agents {
 		if runtime != main {
 			runtime.Abort()
 		}
 	}
 	s.agents = map[string]*AgentRuntime{"main": main}
-	s.mu.Unlock()
-	s.permissionMu.Lock()
 	s.permissions = nil
-	s.permissionMu.Unlock()
+	s.mu.Unlock()
+}
+
+func (s *SessionRuntime) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel()
+	for _, runtime := range s.agents {
+		runtime.Abort()
+	}
+	s.permissions = nil
 }
 
 // Checkpoint snapshots current state under the same lock as commits and resets.
